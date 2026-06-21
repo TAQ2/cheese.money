@@ -148,7 +148,7 @@ infra / data migration / refactor) and the proof type (live transcript
   real terminal output. Use `[...trimmed N lines for context
   efficiency — full breakdown: ...]` to elide repetitive output but
   always keep the canonical proof line (e.g. `28 passed`, `200 OK`,
-  `must_be_declined=1`).
+  the specific asserted value).
 - `### Falsification criterion` — one paragraph stating what the
   captured evidence would have to look like for the claim to be FALSE.
 - `### Minimum-lines check` — checkbox list confirming the evidence is
@@ -161,7 +161,7 @@ infra / data migration / refactor) and the proof type (live transcript
 
 State the **primary** success metric in one sentence, including the
 target threshold and the direction of expected movement. Then link the
-Metabase card / dashboard that tracks it, with the card number and
+dashboard / metrics card that tracks it, with its identifier and
 title. End with the observation window (e.g. "4 weeks post-deploy") and
 how to read the chart (what should drop / flatten / step-down).
 
@@ -236,7 +236,7 @@ The agent MUST NOT emit those lines — duplicates will appear if it does.
 | Bland TL;DR | LLM filler ("This PR introduces a change that…") | Lead with the noun; identifier in backticks; behavior delta in the second sentence |
 | Missing punchline | Agent skipped the `## 🎯` section | It is REQUIRED — never omit |
 | Test plan checkboxes only | Agent stopped at `## Test plan` instead of the full Merge Checklist | Use `## Merge Checklist` per the schema |
-| RedSight prompt mentions cards / metrics not in Glossary | Agent invented metric names | Cross-check against `The_Baubap_Glossary` before emitting; mark DERIVED metrics explicitly |
+| Monitoring prompt mentions metrics that don't exist | Agent invented metric names | Cross-check against your real metrics catalog/glossary before emitting; mark DERIVED metrics explicitly |
 
 ---
 
@@ -252,7 +252,7 @@ The agent MUST NOT emit those lines — duplicates will appear if it does.
   (🔴 🟡 🟢) in `### Section 7: Risk Self-Assessment`.
 - **Imperative voice** in the title and the Approach paragraph. Past
   tense in Captured Evidence sections (the work already happened).
-- **Mexican Spanish technical terms preserved** when they are
-  domain-canonical (`mediumRisk`, `loanIdx`, `must_be_declined`).
+- **Domain-canonical technical terms preserved** verbatim — use your
+  codebase's real identifiers, in whatever language they are written.
 - **No "we"** in operational sections — the PR is a singular artifact,
   not a team narrative.

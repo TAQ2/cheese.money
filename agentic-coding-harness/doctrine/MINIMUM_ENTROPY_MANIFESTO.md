@@ -5,27 +5,26 @@
 > the 0.7 "surfaces where it bites hardest" list, with your own.
 
 This is the long-form doctrine behind **Principle 0 (Minimum Entropy)**, the prime directive of
-the LMO Coding Principles. The agent instruction docs (`LMO Brain Agent.md`,
-`LMO Coding Agent.md`) carry a seven-rule operational summary — "Principle 0 — Operating Rules
+your project's Coding Principles. The agent instruction docs (the Brain and Coding agent docs)
+carry a seven-rule operational summary — "Principle 0 — Operating Rules
 (the Minimum Entropy Manifesto)" — that points here for the full reasoning. This file is that
 full reasoning.
 
 It is **language- and codebase-agnostic.** The seven rules below hold in any repository, any
-language, any service. They predate and outlive LMO's TypeScript/Next.js/Drizzle stack — they
+language, any service. They predate and outlive any one stack — they
 are the doctrine, not the stack.
 
 ## Relationship to the other law (read this first)
 
-LMO has three layers of written law, and they do not overlap. Keeping them distinct is itself an
+A project can have up to three layers of written law, and they do not overlap. Keeping them distinct is itself an
 act of Minimum Entropy — one document, one job:
 
-- **`MANIFESTO.md`** (repo root, twinned with `prototype/documentation/manifesto.html`) is the
-  **stack constitution**: the stack table, the Six Rules, the Forbidden list, domain separation,
-  the amendment process. It answers *what we build with* — which language, which framework, which
-  database, what is forbidden. It is founder-approved and twin-locked. **It is not a
-  minimum-entropy doctrine and must not become one.** This file does not duplicate it, does not
-  amend it, and does not compete with it. Where the two ever appear to conflict on stack law,
-  `MANIFESTO.md` wins and this file is wrong.
+- **A stack constitution** (if you keep one — e.g. a `MANIFESTO.md` at the repo root) is the
+  **stack law**: the stack table, the forbidden list, domain separation, the amendment process. It
+  answers *what we build with* — which language, which framework, which database, what is
+  forbidden. **It is not a minimum-entropy doctrine and must not become one.** This file does not
+  duplicate it, amend it, or compete with it. Where the two ever appear to conflict on stack law,
+  the stack constitution wins and this file is wrong.
 - **This file** is the **complexity doctrine**: *how much* we build, and the tactics for keeping
   the system as small as it can correctly be. It is the long-form of Principle 0.
 - **`CAVEMAN_CODE.md`** is the **operational companion**: a per-change working mode (smallest
@@ -33,7 +32,7 @@ act of Minimum Entropy — one document, one job:
   practice at the keystroke level. Where this file states the *why*, `CAVEMAN_CODE.md` is the
   *how* you actually edit.
 
-If you are making a stack/dependency/forbidden-item decision, you are in `MANIFESTO.md`'s
+If you are making a stack/dependency/forbidden-item decision, you are in the stack constitution's
 jurisdiction. If you are deciding how much code a correct change needs, you are here.
 
 ## The core claim
@@ -79,16 +78,16 @@ exactly that.
 ### 0.4 — Dependencies are imported entropy
 
 Reach for the standard library and existing dependencies first. A new dependency must remove more
-complexity than it adds — and at LMO it is **never added without explicit approval and a written
-exit note in `MANIFESTO.md` and its `manifesto.html` twin** (Six Rules, Rule 6: "If you can't
-state how we'd leave it in a weekend, don't adopt it"). A dependency is not just code you didn't
+complexity than it adds — and it is **never added without explicit approval** (and, if you keep a
+dependency ledger, a written exit note in it: state how you'd remove it in a weekend, or don't
+adopt it). A dependency is not just code you didn't
 write; it is code you don't understand, can't easily change, and now must track for security,
 versioning, and breakage forever. The cheapest dependency is the one you didn't add.
 
 ### 0.5 — One-pass readability
 
 If a competent reader cannot follow a function top-to-bottom in a single pass, rewrite it. Clear
-beats clever, always. Code is read far more often than it is written, and at LMO it is read by the
+beats clever, always. Code is read far more often than it is written, and it is read by the
 next agent session that has none of your context. Cleverness that saves three lines but forces the
 reader to backtrack twice is a net loss of entropy, not a gain. Optimize for the reader who arrives
 cold.
@@ -146,7 +145,7 @@ finish later"; the mixed state itself is the defect.
 
 A requirement handed to you is a hypothesis, not a command. The business problem is real — *that* is never in question — but the **solution** bestowed on you is rarely the smallest one that resolves it. Before planning or writing a line, ask from first principles: does the whole of this need to exist? When there is a clear opportunity to reach the same outcome with less — fewer branches, fewer files, one fewer endpoint, or by **deleting an entire module that costs more than it earns** — surface it in good faith and recommend it before you build. Tilt every borderline judgment toward less. Silence in the face of obvious excess is a defect, not deference.
 
-This is the upstream twin of the core claim: the seven rules minimize the code you write; this rule minimizes the work you are asked to write at all. And mind the order — **delete the part before you simplify it, simplify before you optimize, optimize before you accelerate, automate last of all.** Never optimize, accelerate, or automate a thing you did not first try to delete (a Vercel cron is automation — step last, not first). Each agent questions the mandate at its own door: **TPM Mode** by framing only the simplest solution, the **Brain Agent** on receiving a brief, the **Coding Agent** on receiving an instruction file or QA review.
+This is the upstream twin of the core claim: the seven rules minimize the code you write; this rule minimizes the work you are asked to write at all. And mind the order — **delete the part before you simplify it, simplify before you optimize, optimize before you accelerate, automate last of all.** Never optimize, accelerate, or automate a thing you did not first try to delete (a scheduled job is automation — step last, not first). Each agent questions the mandate at its own door: **TPM Mode** by framing only the simplest solution, the **Brain Agent** on receiving a brief, the **Coding Agent** on receiving an instruction file or QA review.
 
 ---
 
@@ -157,7 +156,7 @@ Explicit Over Implicit, Atomicity & Fail Loudly, Minimal Surface Area) conflict 
 call, the resolution that leaves the system simpler wins. Principles 1–5 are Principle 0 projected
 onto specific axes.
 
-In the LMO agent workflow, the rules above are checked at three points, in the project's own
+In the agent workflow, the rules above are checked at three points, in the project's own
 severity vocabulary (🔴 Must Fix · 🟡 Should Address Soon · 🟢 Future Consideration):
 
 1. **Brain Agent, Mode 1 (planning).** Every Code Change Request Form declares an expected entropy
@@ -184,7 +183,7 @@ severity vocabulary (🔴 Must Fix · 🟡 Should Address Soon · 🟢 Future Co
 
 ## Provenance
 
-These tactics are not LMO inventions; they are the field's accumulated wisdom on complexity,
+These tactics are not the invention of any one project; they are the field's accumulated wisdom on complexity,
 restated as enforceable rules: Tony Hoare and Edsger Dijkstra on simplicity as the precondition of
 reliability; Fred Brooks on conceptual integrity (*The Mythical Man-Month*); John Gall's
 *Systemantics*; the Extreme Programming maxims YAGNI and the Rule of Three; Antoine de

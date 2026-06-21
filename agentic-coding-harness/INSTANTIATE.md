@@ -61,7 +61,7 @@ Edit `playbooks/FULL_DOCUMENTATION_UPDATE.md` to list your real documentation se
 ## 5. Set up the PR path
 
 - **GitHub**: `gh auth login` once. Stage 6 uses `gh pr create --draft`.
-- **Gitea**: `brew install tea` then `tea login add` (use `-i` if your instance has a self-signed/weak cert). Set `TEA_LOGIN` in the orchestrator. Stage 6 uses `tea pull create` with a `WIP:` title prefix for draft.
+- **Gitea**: `brew install tea` then `tea login add` (use `-i` if your instance has a self-signed/weak cert). On Gitea 1.20+, grant the token the **full scope set up front** to avoid incremental "missing scope" errors — `read:user,write:user,read:repository,write:repository,write:organization,read:issue,write:issue` (repo-create needs `write:user`; PR create/merge needs `read:issue`+`write:issue`, since PRs are issues in Gitea; the legacy `repo` scope is rejected). Set `TEA_LOGIN` in the orchestrator. Stage 6 uses `tea pull create` with a `WIP:` title prefix for draft.
 
 Trim `templates/PR_DESCRIPTION_TEMPLATE.md` to the sections you actually use (the monitoring/observability section is optional).
 
