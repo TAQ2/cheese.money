@@ -1,102 +1,63 @@
 # Worktree to Main — Manual Merge Playbook
 
-This playbook covers how to merge a completed worktree back into `main` so the changes appear as staged (uncommitted) changes in VS Code's Source Control panel. Execute these steps **one worktree at a time, sequentially**. Do not merge multiple worktrees simultaneously.
+How to merge a completed orchestration worktree back into the base branch as **staged (uncommitted)** changes, so you review them in your editor's Source Control panel before committing. Use this when you stop **before** the orchestrator's Stage 6 (auto-PR) and merge by hand. One worktree at a time, sequentially.
+
+Placeholders: `<repo>` = your repo working dir · `<repo>-wt-<feature>` = the orchestrator's worktree · `<feature>` = the worktree branch · `<base>` = the target branch (usually `main`).
 
 ## Prerequisites
-
-- The orchestration script has finished all 5 stages inside the worktree
-- You have reviewed the orchestration artifacts (CCR, QA reports) and are satisfied
-- You are ready to commit and deploy this feature
+- The orchestration finished its stages inside the worktree.
+- You reviewed the run artifacts (CCR, QA reports) and are satisfied.
 
 ## Steps
 
-### 1. Commit all changes inside the worktree
-
-The Coding Agent only stages files (`git add`). You need to commit them on the feature branch so `git merge` has something to work with.
-
+### 1. Commit the staged changes inside the worktree
+The Coding Agent only `git add`s; commit them on the feature branch so `git merge` has something to merge.
 ```bash
-cd /Users/Conrad/Desktop/lastminuteoutdoors-wt-<feature-name>
-git status                    # review what's staged
+cd <repo>-wt-<feature>
+git status                       # review what's staged
 git commit -m "<commit message from CCR Section 8>"
 ```
 
-### 2. Go to the main working directory
-
+### 2. Go to the main working directory and verify it's clean
 ```bash
-cd /Users/Conrad/Desktop/lastminuteoutdoors
+cd <repo>
+git status                       # must be clean — commit/stash anything first
 ```
 
-### 3. Verify main is clean
-
+### 3. Squash-merge into the staging area (no commit)
 ```bash
-git status
+git merge <feature> --squash --no-commit
+```
+This brings all the worktree's changes into your staging area on `<base>` **without committing**. Your editor's Source Control panel now shows them all as staged for review.
+
+### 4. Review, then run your validation
+Review the diffs. Re-run **your project's build / lint / test commands** and regenerate any build artifacts (generated CSS/JS, lockfiles, schema dumps) so the staged set is complete and green. **Never hand-edit a generated file** — regenerate it and stage the output.
+
+### 5. Commit manually
+Commit from the Source Control panel (or terminal) with the commit message from CCR Section 8.
+
+### 6. Push (and deploy per your pipeline)
+```bash
+git push origin <base>
+```
+If your deploy is push-triggered (CI → production), the push *is* the deploy. Otherwise run your deploy step.
+
+### 7. Remove the worktree + delete the branch
+```bash
+cd <repo>
+git worktree remove ../<repo>-wt-<feature>
+git branch -D <feature>          # -D because --squash leaves it "unmerged" in Git's eyes
 ```
 
-If there are uncommitted changes on `main`, commit or stash them first. The merge requires a clean working tree.
+## Multiple worktrees
+Repeat 1–7 for each, **one at a time**, to keep history linear and avoid conflicts.
 
-### 4. Merge with squash and no-commit
-
+## Quick reference
 ```bash
-git merge <feature-branch-name> --squash --no-commit
-```
-
-This brings all the worktree's changes into your staging area on `main` **without creating a commit**. VS Code's Source Control panel will now show all the changes as staged.
-
-### 5. Review in VS Code
-
-Open VS Code on the `lastminuteoutdoors/` folder. The Source Control panel shows all staged changes. Review the diffs. If anything needs adjustment, edit the files and re-stage. (If the change touched `prototype/css/tailwind.css`, `prototype/css/theme.css`, or used new utility classes in HTML, confirm the regenerated `prototype/css/app.css` is part of the staged set — run `npm run css` if it is not.)
-
-### 6. Commit manually
-
-Commit from VS Code's Source Control panel (or terminal) with the commit message from the CCR Section 8.
-
-### 7. Push and deploy
-
-```bash
-git push origin main
-```
-
-Today the repo is a static HTML/CSS prototype — there is nothing to deploy; pushing `main` ends the procedure. To eyeball the result locally, serve the prototype:
-
-```bash
-cd /Users/Conrad/Desktop/lastminuteoutdoors/prototype && python3 -m http.server 5555
-```
-
-When the Next.js app lands on Vercel, the push itself is the deploy: `git push` → CI gates → production (per `MANIFESTO.md`). There is no SSH or manual deploy step in this project — ever (SSH-based ops are on the Forbidden list).
-
-### 8. Remove the worktree
-
-```bash
-cd /Users/Conrad/Desktop/lastminuteoutdoors
-git worktree remove ../lastminuteoutdoors-wt-<feature-name>
-```
-
-### 9. Delete the feature branch
-
-```bash
-git branch -d <feature-branch-name>
-```
-
-If the branch wasn't "merged" in Git's eyes (because we used `--squash`), use:
-
-```bash
-git branch -D <feature-branch-name>
-```
-
-## Multiple Worktrees
-
-If you have multiple finished worktrees, repeat steps 1-9 for each one, in order. Always merge one at a time to keep the history linear and avoid conflicts.
-
-## Quick Reference
-
-```bash
-# Full single-worktree merge sequence (copy-paste template)
-cd /Users/Conrad/Desktop/lastminuteoutdoors-wt-FEATURE
-git add -A && git commit -m "COMMIT_MSG"
-cd /Users/Conrad/Desktop/lastminuteoutdoors
-git merge FEATURE --squash --no-commit
-# → Review in VS Code, commit, then:
-git push origin main
-git worktree remove ../lastminuteoutdoors-wt-FEATURE
-git branch -D FEATURE
+cd <repo>-wt-<feature> && git add -A && git commit -m "COMMIT_MSG"
+cd <repo>             && git merge <feature> --squash --no-commit
+# → review + run your checks, commit, then:
+git push origin <base>
+git worktree remove ../<repo>-wt-<feature>
+git branch -D <feature>
 ```

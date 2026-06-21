@@ -2,7 +2,7 @@
 
 A drop-in, project-agnostic harness for running a **Brain Agent ↔ Coding Agent ↔ Independent Reviewer** workflow that plans, implements, QAs, documents, and ships a code change as a pull request — fully automated, with human checkpoints.
 
-This folder is the **abstracted, reproducible form** of a harness that runs in production across several real repositories. It is distilled from the **Last Minute Outdoors (LMO)** instantiation, used here as the reference implementation. Everything project-specific has been lifted out into placeholders and an instantiation guide; the doctrine and the orchestrator engine are included verbatim.
+This folder is the **abstracted, reproducible form** of a harness that runs in production across several real repositories. It is distilled from the **Last Minute Outdoors (LMO)** instantiation, used here as the reference implementation. The doctrine, templates, and playbooks are project-agnostic — project specifics are lifted into `{{placeholders}}` and the instantiation guide. The **orchestrator engine is included as-is**: its `CONFIG / ADAPT` header marks the values to change per project, and a few of its internal paths still reference the reference implementation until you adapt them.
 
 ---
 
