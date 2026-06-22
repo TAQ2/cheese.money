@@ -1,85 +1,54 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034
-# =============================================================================
-# CONFIG / ADAPT — this is a project-agnostic template. To instantiate it for
-# your repo, change ONLY these, then run `bash -n` to verify:
-#   • Workspace / repo-marker — how the selector finds your repo(s): the
-#     repo-root-marker check and the selector scan dir (search this file for
-#     the "*Brain*Agent*.md" marker and the hardcoded workspace path) point
-#     them at your workspace.
-#   • VCS / PR path — a `github.com` origin uses `gh`; any other host is
-#     treated as Gitea and uses `tea` (set TEA_LOGIN to your `tea login` name).
-#   • Commit convention — the Stage 6 metadata step's commit-message pattern.
-#   • Defaults — HUMAN_JITTER, EFFORT_LEVEL, the model picker.
-# Everything else is the engine — leave it unless changing pipeline behavior.
-# The note below is a worked example of one real adaptation, kept for reference.
-# =============================================================================
-# LMO ADAPTATION NOTE — adapted from VendeBien orchestrate-agents.sh (v2.0,
-# tmux variant) for Last Minute Outdoors (LMO) on 2026-06-10. Surgical port:
-# all phases, functions, machinery and style preserved. Changes made:
-#   • Project identity: title, runs/ layout + --resume-run examples, and the
-#     repo-marker check ("VendeBien Brain Agent.md" → "LMO Brain Agent.md")
-#     now target /Users/Conrad/Desktop/lastminuteoutdoors (GitHub
-#     TAQ2/lastminuteoutdoors); default-branch fallback was already "main".
-#   • Agent docs: glob resolution (*Brain*Agent*, *Coding*Agent*) kept — it
-#     matches "LMO Brain Agent.md" / "LMO Coding Agent.md"; "LMO Technical
-#     Product Manager.md" replaces the VendeBien TPM doc alongside them.
-#   • One repo, no microservices: this variant has no per-service arrays —
-#     runs are keyed by repo basename (runs/lastminuteoutdoors/<ts>);
-#     multi-service examples in comments collapsed to the single repo.
-#   • Verification: pre-commit/test/coverage gates in embedded prompts →
-#     `npm run css` build success (the only gate today), with clearly
-#     commented placeholder hooks for `npm run typecheck` / `npx vitest run`.
-#   • Schema artifact: Layer 3 in the Brain survey prompt now names
-#     lmo-db-schema.jsonl; canonical doc names (SERVICE_DOCUMENTATION.md,
-#     TEST_DOCUMENTATION.md, domains-function-map.md, doc runbook) kept.
-#   • Business-specific prompt text neutralized only where misleading: help
-#     task example, Haiku branch-name examples, "RedSight" dropped,
-#     "integration outbound/inbound" tier split simplified.
-# STILL VENDEBIEN-FLAVORED — needs human review:
-#   • Embedded prompts assume the agent docs define: Coding Principles,
-#     Golden Rules, DB Security Policy, Agentic IDE Contract, testing tiers,
-#     CCR "Sections 1-8", "Testing Demo", doc-header re-stamp, and
-#     "pre-commit hooks" (orchestration-override box) — verify the LMO agent
-#     docs carry the same contract before first run.
-#   • The GIT FLOW header diagram keeps illustrative CRM branch names
-#     (feat/crm-export, crm-audit-endpoint) — cosmetic, kept for ASCII
-#     alignment.
-#   • Canonical docs + FULL_DOCUMENTATION_UPDATE runbook do not exist yet in
-#     LMO's "LLM coding agent documents/" — the script already warns about
-#     missing context files and skips Stage 5 when the runbook is absent.
-#   • TOS note, rate-limit-pool dates, and tmux/JSONL machinery untouched.
-# =============================================================================
 set -euo pipefail
 IFS=$'\n\t'
 
 # =============================================================================
-# orchestrate-agents.sh — Last Minute Outdoors (LMO) Multi-Agent Development Orchestrator
-#                         (tmux-driven, v2.0)
+# orchestrate-agents.sh — Multi-Agent Development Orchestrator (project-agnostic template)
+# (tmux-driven, v2.0)
 # =============================================================================
 #
-# WHAT THIS SCRIPT DOES
-# ---------------------
-# Drives one persistent INTERACTIVE `claude` session per agent role inside a
-# detached tmux session — one window per role (brain, coder, reviewer-1,
-# reviewer-2, …). Each role's `claude` is launched once with a deterministic
-# UUID via `--session-id`, kept alive across stages, and driven by:
+# PROJECT-AGNOSTIC TEMPLATE — to instantiate for a project:
+#   1. Place this script in "<repo-or-workspace>/LLM coding agent documents/".
+#   2. Provide "<Name> Brain Agent.md", "<Name> Coding Agent.md", and
+#      FULL_DOCUMENTATION_UPDATE.md beside it (auto-discovered at startup).
+#   3. Set TEA_LOGIN below only for self-hosted Gitea with multiple logins on
+#      one host; leave empty for GitHub or single-login Gitea.
+#   4. Commit convention lives in the Stage-6 metadata prompt + conventional_re
+#      (defaults to Conventional Commits).
+#   5. Supports BOTH monorepos AND multi-repo WORKSPACES (a docs host with
+#      nested sibling service repos) — the workspace-host guard in main()
+#      forces a service-repo target so code is never stranded in the host.
+#
+# WHAT THIS VARIANT DOES DIFFERENTLY
+# -----------------------------------
+# The canonical orchestrator (`orchestrate-agents-canonical.sh`) spawns a
+# fresh `claude -p` subprocess per agent turn. After 2026-06-15, Anthropic
+# routes `claude -p` / Agent SDK / GitHub Actions usage through a separate
+# monthly programmatic-credit pool (Pro $20, Max 5× $100, Max 20× $200),
+# with spillover billed at API rates. That makes the canonical pipeline
+# economically unsustainable for heavy orchestration on a subscription plan.
+#
+# This variant drives N persistent INTERACTIVE `claude` sessions inside a
+# detached tmux session — one window per agent role (brain, coder,
+# reviewer-1, reviewer-2, ...). Each role's `claude` is launched once with a
+# deterministic UUID via `--session-id`, kept alive across stages, and
+# driven by:
 #   1. tmux load-buffer <prompt-file>
 #   2. tmux paste-buffer  -t <role-window>
 #   3. tmux send-keys     -t <role-window> Enter
 # Completion is detected by polling the session JSONL written by Claude
 # Code itself (~/.claude/projects/<encoded-cwd>/<sid>.jsonl) — when the
 # last `assistant` entry's stop_reason settles on "end_turn" the turn is
-# done. The new JSONL entries are translated into a stream-json NDJSON file
-# so the existing parse_agent_output + track_metrics consumers work
-# unchanged. Interactive sessions stay on the standard subscription
-# rate-limit pool (not the `claude -p` programmatic-credit pool that takes
-# effect 2026-06-15 and would otherwise make heavy orchestration unaffordable).
+# done. The new JSONL entries are then translated into a stream-json NDJSON
+# file so the existing parse_agent_output + track_metrics consumers work
+# unchanged. Interactive sessions remain on the standard subscription
+# rate-limit pool.
 #
 # IMPORTANT — TERMS-OF-SERVICE NOTE
 # ----------------------------------
 # Anthropic's Consumer Terms prohibit "automated or non-human means... bot,
-# script, or otherwise" for subscription access. This script is intended
+# script, or otherwise" for subscription access. This variant is intended
 # strictly for the case where:
 #   - You are physically attached to the orchestrator while it runs
 #     (`tmux attach`), supervising the work in real time
@@ -89,21 +58,15 @@ IFS=$'\n\t'
 # that triggered the February 2026 enforcement wave (OpenClaw, Conductor,
 # Claude Code Remote), which distributed OAuth tokens across many users and
 # replaced the Claude Code binary. Even so, take account-ban risk seriously
-# and do not run this script unattended.
+# and do not run this variant unattended.
 #
-# Architecture (6 stages — ends with a committed branch + draft PR):
+# Architecture (same 6 stages as the canonical variant):
 #   Stage 1: Brain Agent Mode 1 — Planning + CCR generation (user checkpoint)
 #   Stage 2: Coding Agent — Implementation of the CCR
 #   Stage 3: Original Thinker QA — Mode 2 review + fix loop until convergence
 #   Stage 4: Independent Reviewer(s) — Fresh sessions + fix loop (N rounds)
 #   Stage 5: Coding Agent — Documentation finalization via runbook
-#   Stage 6: Commit worktree → push branch → open draft PR (full traceability)
-#
-#   Stage 6 commits the staged worktree, recreates the branch off BASE_BRANCH,
-#   pushes, and opens a draft PR. LMO is on GitHub → PRs open via `gh`;
-#   open_pull_request selects gh/tea by remote. If PR creation is skipped, the
-#   manual merge-back per `LLM coding agent documents/WORKTREE_TO_MAIN_PLAYBOOK.md`
-#   still applies.
+#   Stage 6: Merge worktree → commit → push → open PR
 #
 # Prerequisites:
 #   - Claude Code CLI installed and authenticated (`claude` command)
@@ -116,7 +79,7 @@ IFS=$'\n\t'
 # Usage:
 #   ./orchestrate-agents.sh [OPTIONS]
 #
-# tmux-specific options:
+# Options added by this variant:
 #   --keep-tmux                Preserve the orchestrator tmux session at
 #                              exit instead of killing it. Lets you attach
 #                              after a failed run and inspect each role's
@@ -251,24 +214,28 @@ IFS=$'\n\t'
 # FILE LAYOUT: CANONICAL ORCHESTRATOR + RUN ARTIFACTS
 # =============================================================================
 #
-#   LLM coding agent documents/              <-- this repo (git-tracked)
-#   ├── orchestrate-agents.sh           <-- the script (single source of truth)
-#   └── runs/                                <-- all orchestration runs
-#       └── lastminuteoutdoors/              <-- ONE repo (no microservices)
-#           ├── 20260610_120000/
-#           │   ├── artifacts/               <-- CCR, reviews, fix reports, docs
-#           │   ├── prompts/                 <-- every prompt sent to Claude
-#           │   ├── outputs/                 <-- raw JSON + stderr per call
-#           │   ├── sessions/                <-- session ID files
-#           │   ├── run_state.json           <-- resume checkpoint
-#           │   ├── sessions.json            <-- metrics snapshot
-#           │   └── orchestration.log        <-- full execution log
-#           └── 20260610_113000/
+#   LLM coding agent documents/              <-- shared workspace docs folder
+#   ├── orchestrate-agents.sh                <-- the script (single source of truth)
+#   └── runs/                                <-- all orchestration runs, all repos
+#       ├── service-api/
+#       │   ├── 20260402_160759/
+#       │   │   ├── artifacts/               <-- CCR, reviews, fix reports, docs
+#       │   │   ├── prompts/                 <-- every prompt sent to Claude
+#       │   │   ├── outputs/                 <-- raw JSON + stderr per call
+#       │   │   ├── sessions/                <-- session ID files
+#       │   │   ├── run_state.json           <-- resume checkpoint
+#       │   │   ├── sessions.json            <-- metrics snapshot
+#       │   │   └── orchestration.log        <-- full execution log
+#       │   └── 20260402_155319/
+#       ├── service-bi/
+#       │   └── 20260401_230226/
+#       └── another-service/
+#           └── 20260402_150953/
 #
 #   Runs are stored HERE, not inside target repos. This means:
 #   - No git clean/checkout/reset can destroy them
-#   - All runs are browsable from one place
-#   - Resume works: --resume-run runs/lastminuteoutdoors/20260610_120000
+#   - All runs across all repos are browsable from one place
+#   - Resume works: --resume-run runs/service-api/20260402_160759
 #
 # =============================================================================
 
@@ -280,7 +247,7 @@ readonly SCRIPT_NAME="$(basename "$0")"
 # shellcheck disable=SC2155
 readonly SCRIPT_START=$(date +%s)
 
-# Model configuration (overridable via --brain-model / --coder-model)
+# Model configuration (set by select_model_config, overridable via --brain-model / --coder-model)
 BRAIN_MODEL="claude-opus-4-8"
 CODER_MODEL="claude-opus-4-8"
 MODEL_CONFIG_LABEL="Opus + Opus (default)"
@@ -333,7 +300,8 @@ QA_ROUNDS_SET=false
 # When true, the post-CCR interactive review checkpoint (Enter / v / e / q)
 # is skipped and the orchestrator hands the CCR(s) straight to the Coding
 # Agent(s). Default false — the user can opt in via `--skip-ccr-review` or
-# the wizard prompt in prompt_run_config().
+# the wizard prompt in prompt_run_config(). Applies to both single-repo and
+# multi-repo flows.
 SKIP_CCR_REVIEW=false
 SKIP_CCR_REVIEW_SET=false
 # Caveman communication mode injected into every agent prompt.
@@ -351,6 +319,8 @@ STAGE_2_COMPLETE=false
 STAGE_3_COMPLETE=false
 STAGE_4_COMPLETE=false
 STAGE_5_COMPLETE=false
+STAGE_6_COMPLETE=false
+
 # Paths (populated during init)
 REPO_ROOT=""
 DOC_DIR=""
@@ -375,6 +345,8 @@ CODING_SESSION_FILE=""
 BRAIN_SESSION_ID=""
 CODER_SESSION_ID=""
 
+# Background process tracking (killed on Ctrl+C)
+CLAUDE_BG_PID=""
 
 # ───────────────────────────────────────────────────────────────────────
 # TMUX BACKEND — globals
@@ -402,9 +374,10 @@ KEEP_TMUX_ON_EXIT=false    # when true, do NOT kill tmux session at exit
 HUMAN_JITTER=true
 HUMAN_JITTER_MIN=12
 HUMAN_JITTER_MAX=44
-# Gitea PR login name (tea --login) for Stage 6. LMO is on GitHub (uses gh, not
-# tea), so this is unused here — kept for parity with the shared helper. Empty
-# = let tea auto-match by host if ever pointed at a Gitea remote.
+# Gitea PR login name (tea --login) for Stage 6. When several Gitea logins
+# share one host, tea cannot auto-disambiguate the login by host — pin it per
+# project here. Empty = let tea auto-match (the default; correct for GitHub
+# remotes and single-login Gitea setups).
 TEA_LOGIN=""
 # Effort is forced to `xhigh` on every Opus/Sonnet launch (Brain, Coder,
 # Reviewer). Skipped for Haiku oneshots (Haiku doesn't support --effort).
@@ -421,6 +394,30 @@ TOTAL_CLAUDE_CALLS=0
 TOTAL_FINDINGS_FIXED=0
 STEP_COUNT=0
 
+# ─── MULTI-REPO EXTENSION (N=1..3 repos; single-repo flow untouched) ─────────
+# MULTI_REPO_MODE=true activates a parallel implementation pipeline that
+# creates N worktrees, has the Brain agent produce N distinct CCRs, and runs
+# N sequential Coding agents / reviews / PRs — one per repo. The original
+# single-repo flow (REPO_COUNT=1) is completely preserved.
+MULTI_REPO_MODE=false
+REPO_COUNT=1
+REPO_ROOTS_ARRAY=()
+REPO_NAMES_ARRAY=()
+BASE_BRANCHES_ARRAY=()
+ORIGINAL_REPO_ROOTS_ARRAY=()
+ORIGINAL_BRAIN_AGENT_FILES_ARRAY=()
+DOC_DIRS_ARRAY=()
+BRAIN_AGENT_FILES_ARRAY=()
+CODING_AGENT_FILES_ARRAY=()
+FULL_DOC_UPDATE_FILES_ARRAY=()
+WORKTREE_DIRS_ARRAY=()
+CODING_SESSION_FILES_ARRAY=()
+CODER_SESSION_IDS_ARRAY=()     # Per-repo coding-agent session IDs (multi-repo only)
+PR_URLS_ARRAY=()
+# Worktrees created during create_worktrees_multi() — used for cleanup on failure.
+# A trap in that function reads this to remove half-created worktrees if any
+# later repo fails, so the user is not left with a leaked worktree on rerun.
+CREATED_WORKTREES_FOR_CLEANUP=()
 
 # ─── SECTION 2: COLORS & FORMATTING ─────────────────────────────────────────
 
@@ -927,6 +924,7 @@ tmux_jsonl_for() {
 #   brain-original → brain
 #   coding         → coder
 #   independent-N  → reviewer-N   (Stage 4 fresh reviewer sessions)
+#   coding-repo-N  → coder-rN     (multi-repo per-repo coder)
 #   else           → basename
 tmux_role_for() {
     local b; b="$(basename "$1" .session)"
@@ -934,12 +932,21 @@ tmux_role_for() {
         brain-original)   echo brain ;;
         coding)           echo coder ;;
         independent-*)    echo "reviewer-${b#independent-}" ;;
+        coding-repo-*)    echo "coder-r${b#coding-repo-}" ;;
         *)                echo "$b" ;;
     esac
 }
 
+# Multi-repo cwd: session_file matches *-repo-N → WORKTREE_DIRS_ARRAY[N].
+# Falls back to scalar WORKTREE_DIR.
 tmux_cwd_for() {
-    echo "${WORKTREE_DIR:-$PWD}"
+    local b; b="$(basename "$1" .session)"
+    if [[ "$b" =~ -repo-([0-9]+)$ ]] \
+        && [[ -n "${WORKTREE_DIRS_ARRAY[${BASH_REMATCH[1]}]:-}" ]]; then
+        echo "${WORKTREE_DIRS_ARRAY[${BASH_REMATCH[1]}]}"
+    else
+        echo "${WORKTREE_DIR:-$PWD}"
+    fi
 }
 
 # Build a minimal `env -i` prefix for launching `claude`. Strips $TMUX,
@@ -1046,23 +1053,25 @@ tmux_launch() {
         cmd+=$(printf ' --effort %q' "$EFFORT_LEVEL")
     fi
     [[ -f "$sp" ]] && cmd+=$(printf ' --append-system-prompt-file %q' "$sp")
-    # ROOT-CAUSE FIX: never type this command directly into the pane. The env -i prefix
-    # inlines the full $PATH (~1KB), so the line is ~1.4KB; the interactive zsh line editor
-    # (autosuggestions/syntax-highlight) does not reliably submit a paste that large — the
-    # trailing Enter is swallowed, claude never launches, no session JSONL is created, and
-    # the orchestrator times out ("paste may have failed"). Write the command to a tiny
-    # launcher script and source a SHORT (~40-char) line instead. Verified on CLI 2.1.170.
-    local launcher
-    launcher="$(dirname "$sf")/launch-$(echo "$target" | tr -c 'A-Za-z0-9._-' '-').sh"
-    printf '%s\n' "$cmd" > "$launcher"
     # Clear any stuck/old pane state before launching: a prior failed paste can
-    # leave zsh at a continuation prompt or a half-typed line, and sourcing the
-    # launcher into that would corrupt it. Safe here — the reuse gate above
+    # leave zsh at a continuation prompt or a half-typed line, and sending the
+    # launch command into that would corrupt it (the claude command gets injected
+    # as stray input instead of running). Safe here — the reuse gate above
     # guarantees no live claude owns this pane.
     tmux -S "$TMUX_SOCK" send-keys -t "$target" C-c 2>/dev/null || true
     sleep 0.3
     tmux -S "$TMUX_SOCK" send-keys -t "$target" C-c 2>/dev/null || true
     sleep 0.3
+    # ROOT-CAUSE FIX: never type the command directly into the pane. The env -i
+    # prefix inlines the full $PATH (~1KB), so the line is ~1.4KB; the interactive
+    # zsh line editor does not reliably submit a paste that large — the trailing
+    # Enter is swallowed, claude never launches, no session JSONL is created, and
+    # the orchestrator times out / churns. Write the command to a tiny launcher
+    # script and source a SHORT (~40-char) line instead. (Ported from the variant
+    # orchestrators, verified on CLI 2.1.x.)
+    local launcher
+    launcher="$(dirname "$sf")/launch-$(echo "$target" | tr -c 'A-Za-z0-9._-' '-').sh"
+    printf '%s\n' "$cmd" > "$launcher"
     tmux -S "$TMUX_SOCK" send-keys -t "$target" "source $(printf '%q' "$launcher")" Enter
     local t0; t0=$(date +%s)
     # Wait for a LIVE claude process (not merely an on-disk JSONL — that survives
@@ -1202,10 +1211,9 @@ tmux_oneshot() {
     env_prefix=$(tmux_env_prefix)
     printf -v cmd 'cd %q && %s claude --model %q --dangerously-skip-permissions --session-id %q' \
         "$cwd" "$env_prefix" "$model" "$sid"
-    # ROOT-CAUSE FIX (same as tmux_launch): the ~1.4KB command line (env -i inlines the full
-    # $PATH) is not reliably submitted by the interactive zsh via send-keys, so claude never
-    # launches and the oneshot returns empty — this is why branch auto-naming silently fell
-    # back to a timestamp. Source a short line that runs a tiny launcher script instead.
+    # Launcher-script indirection — avoid the swallowed-Enter on the ~1.4KB
+    # env-prefixed command (same fix as tmux_launch). Fresh window each call, so
+    # no pane-clear needed.
     local launcher="${pf}.launch.sh"
     printf '%s\n' "$cmd" > "$launcher"
     tmux -S "$TMUX_SOCK" send-keys -t "$target" "source $(printf '%q' "$launcher")" Enter
@@ -1242,7 +1250,7 @@ tmux_oneshot() {
     tail -n 80 "$jsonl" | grep '"type":"assistant"' | tail -n 1 \
         | jq -r '[.message.content[]? | select(.type == "text") | .text] | join("\n")' 2>/dev/null
     tmux -S "$TMUX_SOCK" kill-window -t "$target" 2>/dev/null
-    rm -f "$pf" "$launcher"
+    rm -f "$pf"
 }
 
 tmux_cleanup() {
@@ -1354,6 +1362,12 @@ CAVEMAN_LITE
     esac
 }
 
+# Prepended to EVERY agent prompt by invoke_agent so no agent ever stalls the
+# unattended orchestrator on an interactive question. Phase-aware via the prompt
+# filename: phase1_* (clarification rounds) → write open questions down for the
+# between-round feedback loop; phase2_*..phase5_* (past clarification) → resolve
+# autonomously and document the decision + rationale. Nobody answers a live
+# prompt in this harness, so the native ask tool must never be used.
 no_interactive_directive() {
     local pf_base
     pf_base="$(basename "${1:-}")"
@@ -1635,6 +1649,16 @@ parse_agent_output() {
                 BRAIN_SESSION_ID="$sid"
             elif [[ "$session_file" == *"coding"* ]] || [[ "$session_file" == *"coder"* ]]; then
                 CODER_SESSION_ID="$sid"
+                # Multi-repo: also track per-repo by parsing the index out of
+                # the filename pattern `coding-repo-<N>.session`. Keeps all N
+                # coding-agent session IDs addressable even though the scalar
+                # CODER_SESSION_ID is overwritten by whichever repo ran last.
+                local _basename
+                _basename=$(basename "$session_file")
+                if [[ "$_basename" =~ ^coding-repo-([0-9]+)\.session$ ]]; then
+                    local _idx="${BASH_REMATCH[1]}"
+                    CODER_SESSION_IDS_ARRAY[$_idx]="$sid"
+                fi
             fi
         fi
 
@@ -1797,6 +1821,13 @@ save_run_state() {
 STATE_EOF
     mv "$tmp_state" "${RUN_DIR}/run_state.json"
 
+    # Keep the multi-repo sidecar in sync whenever we save run state. The
+    # sidecar is what multi-repo resume keys off; run_state.json itself only
+    # captures the scalar (repo[0]) fields. This guarantees the two files
+    # never diverge within a single save cycle.
+    if [[ "${MULTI_REPO_MODE:-false}" == "true" ]] && [[ ${#REPO_ROOTS_ARRAY[@]} -gt 0 ]]; then
+        save_multi_repo_state 2>/dev/null || true
+    fi
 }
 
 restore_run_state() {
@@ -1838,15 +1869,13 @@ restore_run_state() {
             ;;
     esac
 
-    # Restore metrics. `// 0` falls back on null / missing so `set -e`
-    # arithmetic (`TOTAL_CLAUDE_CALLS=$((... + 1))`) does not fatal when an
-    # older state file lacks one of these fields.
-    TOTAL_COST=$(jq -r '.metrics.total_cost // 0' "$state_file")
-    TOTAL_DURATION=$(jq -r '.metrics.total_duration // 0' "$state_file")
-    TOTAL_TURNS=$(jq -r '.metrics.total_turns // 0' "$state_file")
-    TOTAL_CLAUDE_CALLS=$(jq -r '.metrics.total_claude_calls // 0' "$state_file")
-    TOTAL_FINDINGS_FIXED=$(jq -r '.metrics.total_findings_fixed // 0' "$state_file")
-    STEP_COUNT=$(jq -r '.metrics.step_count // 0' "$state_file")
+    # Restore metrics
+    TOTAL_COST=$(jq -r '.metrics.total_cost' "$state_file")
+    TOTAL_DURATION=$(jq -r '.metrics.total_duration' "$state_file")
+    TOTAL_TURNS=$(jq -r '.metrics.total_turns' "$state_file")
+    TOTAL_CLAUDE_CALLS=$(jq -r '.metrics.total_claude_calls' "$state_file")
+    TOTAL_FINDINGS_FIXED=$(jq -r '.metrics.total_findings_fixed' "$state_file")
+    STEP_COUNT=$(jq -r '.metrics.step_count' "$state_file")
 
     # Restore sessions
     BRAIN_SESSION_ID=$(jq -r '.sessions.brain_session_id // empty' "$state_file")
@@ -1954,9 +1983,14 @@ recover_missing_state() {
     fi
 
     # ORIGINAL_BRAIN_AGENT_FILE — find it in the agent documents directory
-    if [[ -z "$ORIGINAL_BRAIN_AGENT_FILE" ]] && [[ -n "$ORIGINAL_REPO_ROOT" ]] && [[ -d "$ORIGINAL_REPO_ROOT/LLM coding agent documents" ]]; then
-        ORIGINAL_BRAIN_AGENT_FILE=$(find "$ORIGINAL_REPO_ROOT/LLM coding agent documents" -maxdepth 1 -type f \( -name "*Brain*Agent*.md" -o -name "*brain*agent*.md" \) 2>/dev/null | head -1 || true)
-        [[ -n "$ORIGINAL_BRAIN_AGENT_FILE" ]] && { warn "Recovered original_brain_agent_file: ${ORIGINAL_BRAIN_AGENT_FILE}"; recovered=1; }
+    # MULTI-REPO WORKSPACE ADAPTATION: repo-local docs folder OR shared workspace-level fallback.
+    if [[ -z "$ORIGINAL_BRAIN_AGENT_FILE" ]] && [[ -n "$ORIGINAL_REPO_ROOT" ]]; then
+        local _rec_doc_dir="${ORIGINAL_REPO_ROOT}/LLM coding agent documents"
+        [[ -d "$_rec_doc_dir" ]] || _rec_doc_dir="$(dirname "$ORIGINAL_REPO_ROOT")/LLM coding agent documents"
+        if [[ -d "$_rec_doc_dir" ]]; then
+            ORIGINAL_BRAIN_AGENT_FILE=$(find "$_rec_doc_dir" -maxdepth 1 -type f \( -name "*Brain*Agent*.md" -o -name "*brain*agent*.md" \) 2>/dev/null | head -1 || true)
+            [[ -n "$ORIGINAL_BRAIN_AGENT_FILE" ]] && { warn "Recovered original_brain_agent_file: ${ORIGINAL_BRAIN_AGENT_FILE}"; recovered=1; }
+        fi
     fi
 
     # Session IDs — session files are the authoritative on-disk source
@@ -2016,6 +2050,7 @@ detect_completed_stages() {
     STAGE_3_COMPLETE=false
     STAGE_4_COMPLETE=false
     STAGE_5_COMPLETE=false
+    STAGE_6_COMPLETE=false
 
     # Also check run_state.json for explicit completion markers
     local completed_json="[]"
@@ -2092,6 +2127,11 @@ detect_completed_stages() {
     if [[ -f "${a}/documentation_report.md" ]] && [[ -s "${a}/documentation_report.md" ]]; then
         STAGE_5_COMPLETE=true
     fi
+
+    # Stage 6: PR URL file exists (created after PR is opened)
+    if [[ -f "${a}/pr_url.txt" ]] && [[ -s "${a}/pr_url.txt" ]]; then
+        STAGE_6_COMPLETE=true
+    fi
 }
 
 restore_worktree_context() {
@@ -2118,10 +2158,16 @@ restore_worktree_context() {
     REPO_ROOT="$WORKTREE_DIR"
 
     # Re-derive DOC_DIR
-    if [[ -f "${REPO_ROOT}/LMO Brain Agent.md" ]] || [[ -f "${REPO_ROOT}/SERVICE_DOCUMENTATION.md" ]]; then
+    # MULTI-REPO WORKSPACE ADAPTATION: root-level SERVICE_DOCUMENTATION.md is a per-service doc in
+    # the workspace docs host, NOT a docs-repo marker — docs-repo detection requires an actual
+    # root-level Brain Agent file. Fallback to the shared workspace-level
+    # 'LLM coding agent documents/' (sibling of every service repo/worktree).
+    if compgen -G "${REPO_ROOT}/*Brain*Agent*.md" > /dev/null 2>&1; then
         DOC_DIR="$REPO_ROOT"
     elif [[ -d "${REPO_ROOT}/LLM coding agent documents" ]]; then
         DOC_DIR="${REPO_ROOT}/LLM coding agent documents"
+    elif [[ -d "$(dirname "$REPO_ROOT")/LLM coding agent documents" ]]; then
+        DOC_DIR="$(dirname "$REPO_ROOT")/LLM coding agent documents"
     fi
 
     # Re-derive agent instruction files
@@ -2458,7 +2504,8 @@ Options:
                          backward compatibility but warns and is overridden.
   --skip-ccr-review      Skip the post-CCR pause that asks the user to
                          review (or edit) each Code Change Request before
-                         the Coding Agent runs. When omitted, the wizard
+                         the Coding Agent runs. Applies to both single-repo
+                         and multi-repo flows. When omitted, the wizard
                          asks interactively.
   --caveman-mode MODE    Inject a caveman communication-style preamble
                          into every agent turn: Brain Agent (planning +
@@ -2491,10 +2538,10 @@ Examples:
   ./orchestrate-agents.sh --task-file ticket-description.md
 
   # Inline with extra QA
-  ./orchestrate-agents.sh --task "Add a last-minute deals rail to the home pages" --qa-rounds 3
+  ./orchestrate-agents.sh --task "Add lead assignment endpoint" --qa-rounds 3
 
   # Resume a crashed run
-  ./orchestrate-agents.sh --resume-run runs/lastminuteoutdoors/20260610_113000
+  ./orchestrate-agents.sh --resume-run runs/service-api/20260328_144502
 
   # Preview without running
   ./orchestrate-agents.sh --dry-run
@@ -2743,15 +2790,23 @@ check_prerequisites() {
     info "Current branch: ${branch}"
 
     # LLM coding agent documents — detect whether we are inside the docs repo
-    # itself or in a parent repo that contains it as a subdirectory
-    if [[ -f "${REPO_ROOT}/LMO Brain Agent.md" ]] || [[ -f "${REPO_ROOT}/SERVICE_DOCUMENTATION.md" ]]; then
+    # itself or in a parent repo that contains it as a subdirectory.
+    # MULTI-REPO WORKSPACE ADAPTATION: root-level SERVICE_DOCUMENTATION.md is a per-service doc in
+    # the workspace docs host, NOT a docs-repo marker — docs-repo detection requires an actual
+    # root-level Brain Agent file. The canonical docs folder is shared at the
+    # WORKSPACE level (the workspace's LLM coding agent documents/), a sibling of
+    # every service repo — hence the parent-directory fallback.
+    if compgen -G "${REPO_ROOT}/*Brain*Agent*.md" > /dev/null 2>&1; then
         # We ARE inside the docs repo (it has its own .git)
         DOC_DIR="$REPO_ROOT"
         info "Running from inside the documentation repo"
     elif [[ -d "${REPO_ROOT}/LLM coding agent documents" ]]; then
         DOC_DIR="${REPO_ROOT}/LLM coding agent documents"
+    elif [[ -d "$(dirname "$REPO_ROOT")/LLM coding agent documents" ]]; then
+        DOC_DIR="$(dirname "$REPO_ROOT")/LLM coding agent documents"
+        info "Using shared workspace-level agent documents (multi-repo workspace layout)"
     else
-        fatal "'LLM coding agent documents/' not found and not running from docs repo. Run the Creation Playbook first."
+        fatal "'LLM coding agent documents/' not found in repo or parent workspace. Run the Creation Playbook first."
     fi
     success "Agent documents: ${DOC_DIR}"
 
@@ -2971,7 +3026,8 @@ prompt_run_config() {
     # Skip CCR review checkpoint?
     # When enabled, Stage 1 emits the CCR(s) and hands off directly to Stage 2
     # without the interactive Enter/v/e/q review pause. Equivalent to
-    # --skip-ccr-review on the command line.
+    # --skip-ccr-review on the command line. Applies to both single-repo and
+    # multi-repo flows.
     if [[ "$SKIP_CCR_REVIEW_SET" == "false" ]]; then
         printf "${C_DIM} ┃${C_RESET} ${C_BOLD}Skip CCR review?${C_RESET} — after the Brain Agent writes the CCR(s),\n"
         printf "${C_DIM} ┃${C_RESET}   the script normally pauses so you can read / edit / abort.\n"
@@ -3058,7 +3114,7 @@ TASK_TEMPLATE
 run_stage_1() {
     local phase_start
     phase_start=$(date +%s)
-    stage_header "1" "6" "BRAIN AGENT — MODE 1 (PLANNING)""Original Thinker" "$C_BG_BLUE"
+    stage_header "1" "6" "BRAIN AGENT — MODE 1 (PLANNING)" "Original Thinker" "$C_BG_BLUE"
 
     # ── 1a: Initialize Brain Agent ────────────────────────────────────────
     subtask "Initializing Brain Agent with instruction file"
@@ -3288,7 +3344,7 @@ PROMPT_BOUNDARY
 
 Execute your full Mode 1 process:
 
-1. SURVEY THE CODEBASE — Use the Codebase Navigation Protocol. Start with Layer 0 (domains-function-map.md), then Layer 1 (SERVICE_DOCUMENTATION.md), then open source code as needed. Check the schema (Layer 3: lmo-db-schema.jsonl) and call graph (Layer 4) for blast radius assessment.
+1. SURVEY THE CODEBASE — Use the Codebase Navigation Protocol. Start with Layer 0 (domains-function-map.md), then Layer 1 (SERVICE_DOCUMENTATION.md), then open source code as needed. Check the schema (Layer 3) and call graph (Layer 4) for blast radius assessment.
 
 2. UNDERSTAND THE CURRENT STATE — Before proposing changes, understand exactly how the current code works in the areas you will touch. Read the actual source files.
 
@@ -3296,7 +3352,7 @@ Execute your full Mode 1 process:
 
 4. PLAN SURGICAL CHANGES — Identify the minimum set of files and functions that need to change. Minimize blast radius. Prefer pinpointed changes over broad rewrites.
 
-5. SPECIFY TESTING TIERS + TDD TEST PLAN — State which testing tiers are required and enumerate the unit tests to be written FIRST (TDD: red before implementation). For prototype HTML/CSS-only work, the unit law-suites (tests/unit/) plus visual checks plus the 'npm run css' build gate are the baseline.
+5. SPECIFY TESTING TIERS — State which testing tiers are required (unit, E2E, integration outbound/inbound) and why.
 
 6. PRODUCE A COMPLETE CODE CHANGE REQUEST FORM — Fill out every section (Header + Sections 1-8) with specific, actionable instructions for the Coding Agent.
 
@@ -3421,7 +3477,7 @@ REGEN_BOUNDARY
 run_stage_2() {
     local phase_start
     phase_start=$(date +%s)
-    stage_header "2" "6" "CODING AGENT — IMPLEMENTATION""Coding Agent" "$C_BG_GREEN"
+    stage_header "2" "6" "CODING AGENT — IMPLEMENTATION" "Coding Agent" "$C_BG_GREEN"
 
     # ── 2a: Initialize Coding Agent ───────────────────────────────────────
     subtask "Initializing Coding Agent with instruction file"
@@ -3508,12 +3564,8 @@ run_stage_2() {
         echo "   d) If doing multiple iterations (QA fixes, refinements), just re-stage — overwriting the staging area is fine."
         echo "   e) Do NOT create branches, PRs, or push to remote. The user handles all of this."
         echo ""
-        echo "4. IMPLEMENT incrementally. Once the app (and Vitest) lands, use TDD flow: Read existing tests → Define new tests → Make tests fail → Implement → Verify. For prototype HTML/CSS work, verify pages render and the CSS build passes."
-        echo "4b. TEST-FIRST GATE (TDD — MANDATORY, BEFORE ANY IMPLEMENTATION EDIT): read the relevant tests (tests/unit/, src/**, app/** and tests/e2e/flows/); write the new FAILING unit tests AND — when the change touches any user journey — write/extend the flow spec in tests/e2e/flows/ first, capturing red output for both tiers; only then implement to green. A fix starts with a failing reproduction test. Emit the 'Test-First Gate' block (tests read / tests written first / RED evidence / E2E tier) per LMO Coding Agent.md Critical Rule 0 — a diff without it is rejected."
-        echo "5. RUN VERIFICATION after implementation: 'npm test' green + 'npm run test:coverage' >= 99% + 'npm run css' must build cleanly (regenerates prototype/css/app.css) + 'npm run test:e2e:smoke' green when app/ or src/ changed ('npm run test:e2e' full before PR). Fix any failures. This is a hard gate."
-        # LMO placeholder verification hooks — uncomment when the Next.js app lands:
-        # echo "5b. RUN 'npm run typecheck' (tsc --noEmit) — must pass."
-        # echo "5c. RUN 'npx vitest run' — must pass."
+        echo "4. IMPLEMENT using TDD flow: Read existing tests → Define new tests → Make tests fail → Implement → Verify."
+        echo "5. RUN PRE-COMMIT HOOKS after implementation. Fix any failures. This is a hard gate."
         echo "6. UPDATE SERVICE_DOCUMENTATION.md for every file you touched."
         echo "7. UPDATE TEST_DOCUMENTATION.md if you added or modified test files."
         echo "8. COMPLETE the Code Change Request Form (all 8 sections) with your actual implementation details — not the plan, but what you actually did."
@@ -3615,6 +3667,25 @@ run_stage_2() {
 
 # ─── SECTION 13b: INLINE DOCUMENTATION UPDATE PASS ────────────────────────
 
+# Emits the Full Documentation Update Runbook block + canonical 5-step
+# checklist that run_doc_update_pass (pre-QA) and run_stage_5 (final) share
+# verbatim. Single source of truth so the two prompt builders never drift.
+# Reads the global FULL_DOC_UPDATE_FILE; both callers guard its existence
+# before invoking, so the cat cannot fail under set -e here.
+emit_doc_runbook_steps() {
+    echo "<full_documentation_update_runbook>"
+    cat "$FULL_DOC_UPDATE_FILE"
+    echo "</full_documentation_update_runbook>"
+    echo ""
+    echo "Execute EVERY step in order:"
+    echo "1. Full validation sweep (pre-commit, tests, coverage)"
+    echo "2. Regenerate function maps"
+    echo "3. Identify and fill SERVICE_DOCUMENTATION.md gaps"
+    echo "4. Update TEST_DOCUMENTATION.md"
+    echo "5. Stage all changes with git add — do NOT run git commit"
+    echo ""
+}
+
 run_doc_update_pass() {
     local phase_label="${1:-doc-update}"
 
@@ -3633,19 +3704,7 @@ run_doc_update_pass() {
         echo ""
         echo "Before QA review begins, execute the Full Documentation Update Runbook to ensure all documentation is synchronized with your code changes."
         echo ""
-        echo "<full_documentation_update_runbook>"
-        cat "$FULL_DOC_UPDATE_FILE"
-        echo "</full_documentation_update_runbook>"
-        echo ""
-        echo "Execute EVERY step in order:"
-        echo "1. Full validation sweep: 'npm test' green, 'npm run test:coverage' >= 99%, 'npm run css' must build cleanly, and 'npm run test:e2e' green (Tier 2, production build)"
-        # LMO placeholders — uncomment when the Next.js app lands:
-        # echo "1b. 'npm run typecheck' and 'npx vitest run' must pass."
-        echo "2. Regenerate function maps"
-        echo "3. Identify and fill SERVICE_DOCUMENTATION.md gaps"
-        echo "4. Update TEST_DOCUMENTATION.md"
-        echo "5. Stage all changes with git add — do NOT run git commit"
-        echo ""
+        emit_doc_runbook_steps
         echo "Do NOT skip any step. Do NOT run git commit."
     } > "$doc_prompt"
 
@@ -3729,7 +3788,7 @@ run_stage_3() {
     local skip_to="${1:-}"
     local phase_start
     phase_start=$(date +%s)
-    stage_header "3" "6" "ORIGINAL THINKER — QA MODE 2 + FIX LOOP""Brain Agent (Mode 2) ↔ Coding Agent" "$C_BG_YELLOW"
+    stage_header "3" "6" "ORIGINAL THINKER — QA MODE 2 + FIX LOOP" "Brain Agent (Mode 2) ↔ Coding Agent" "$C_BG_YELLOW"
 
     local coding_output="${RUN_DIR}/artifacts/implementation_report.md"
     local loop_count=0
@@ -3777,7 +3836,7 @@ CRITICAL REVIEW INSTRUCTIONS:
 3. Check git changes: run 'git diff' or 'git diff --stat' to see exactly what changed.
 4. Verify the Code Change Request Form matches the actual code.
 5. Check business logic correctness, DB impact, edge cases, integration risks.
-6. Verify the verification gate passes: 'npm test' green + coverage >= 99% + 'npm run css' builds cleanly (typecheck once the app lands). Verify the Test-First Gate block exists with RED evidence preceding implementation — its absence is a blocking finding.
+6. Verify test coverage and that tests actually pass.
 7. Verify SERVICE_DOCUMENTATION.md was updated for every file touched.
 8. Verify CHANGELOG.md was NOT modified.
 9. Run the full Deployment Conditions checklist.
@@ -3857,7 +3916,7 @@ For each finding:
 2. Assess if it makes sense and is correct
 3. If viable: implement the fix
 4. If not viable: explain exactly why with a concrete technical reason
-5. Run the verification gate after fixes: failing tests first for each fix (TDD), then 'npm test' green + coverage >= 99% + 'npm run css' builds cleanly (typecheck once the app lands)
+5. Run pre-commit hooks after fixes
 6. Stage changes with git add — do NOT run git commit
 
 At the end, output:
@@ -3979,7 +4038,7 @@ run_stage_4() {
     local skip_to="${1:-}"
     local phase_start
     phase_start=$(date +%s)
-    stage_header "4" "6" "INDEPENDENT REVIEWER(S) —${QA_ROUNDS} ROUND(S)" "Fresh Brain Agent (Mode 2)" "$C_BG_RED"
+    stage_header "4" "6" "INDEPENDENT REVIEWER(S) — ${QA_ROUNDS} ROUND(S)" "Fresh Brain Agent (Mode 2)" "$C_BG_RED"
 
     if [[ "${QA_ROUNDS:-0}" -le 0 ]]; then
         info "QA rounds set to 0 — skipping independent review (full autopilot, no QA)"
@@ -4062,7 +4121,7 @@ REVIEW INSTRUCTIONS:
 3. Verify compliance with ALL Coding Principles, Golden Rules, and the Agentic IDE Contract.
 4. Look for UNEXPECTED SIDE EFFECTS that fall outside the intended scope of changes.
 5. Check for architectural drift, security concerns, performance issues, data integrity risks.
-6. Verify the verification gate passes ('npm test' green; coverage >= 99%; 'npm run css' builds cleanly; typecheck once the app lands) and that tests preceded implementation (Test-First Gate with RED evidence).
+6. Verify test coverage is adequate.
 7. Verify documentation was updated.
 8. Verify CHANGELOG.md was NOT touched.
 
@@ -4143,7 +4202,7 @@ This is Round ${round} of independent review, iteration ${loop_count}. Apply fix
 1. Evaluate each finding with critical thinking — does it make sense? Is it correct?
 2. If viable: implement the fix with best effort. No laziness.
 3. If not viable: explain the concrete technical reason.
-4. Run the verification gate after all fixes: failing tests first for each fix (TDD), then 'npm test' green + coverage >= 99% + 'npm run css' builds cleanly (typecheck once the app lands).
+4. Run pre-commit hooks after all fixes.
 5. Stage changes with git add — do NOT run git commit.
 
 Output: summary of fixes applied, deferred items with reasons, and updated CCR Form.
@@ -4228,7 +4287,7 @@ PROMPT_BOUNDARY
 run_stage_5() {
     local phase_start
     phase_start=$(date +%s)
-    stage_header "5" "6" "CODING AGENT — DOCUMENTATION FINALIZATION""Coding Agent" "$C_BG_MAGENTA"
+    stage_header "5" "6" "CODING AGENT — DOCUMENTATION FINALIZATION" "Coding Agent" "$C_BG_MAGENTA"
 
     if [[ -z "$FULL_DOC_UPDATE_FILE" ]]; then
         warn "FULL_DOCUMENTATION_UPDATE file not found — skipping Stage 5"
@@ -4249,24 +4308,12 @@ run_stage_5() {
         echo ""
         echo "Now execute the Full Documentation Update Runbook. Read the complete instructions:"
         echo ""
-        echo "<full_documentation_update_runbook>"
-        cat "$FULL_DOC_UPDATE_FILE"
-        echo "</full_documentation_update_runbook>"
-        echo ""
-        echo "Execute EVERY step in order:"
-        echo "1. Full validation sweep: 'npm test' green, 'npm run test:coverage' >= 99%, 'npm run css' must build cleanly, and 'npm run test:e2e' green (Tier 2, production build)"
-        # LMO placeholders — uncomment when the Next.js app lands:
-        # echo "1b. 'npm run typecheck' and 'npx vitest run' must pass."
-        echo "2. Regenerate function maps"
-        echo "3. Identify and fill SERVICE_DOCUMENTATION.md gaps"
-        echo "4. Update TEST_DOCUMENTATION.md"
-        echo "5. Stage all changes with git add — do NOT run git commit"
-        echo ""
+        emit_doc_runbook_steps
         echo "Do NOT skip any step. If a step fails, report the failure — do not silently proceed."
         echo "Do NOT run git commit at any point. Stage only."
         echo ""
-        echo "PR BODY — do NOT author a PR description in this turn. The orchestrator's Stage 6 commits the worktree, pushes the branch, and opens the draft PR — the PR body is generated in a dedicated Stage 6 step. Whatever 'PR Description Standard' your instruction file specifies is handled there, not here."
-        echo "Do NOT mark any mandatory output (PR description, Testing Demo, any CCR section, doc-header re-stamp) 'N/A'. If an artifact is genuinely blocked, write 'BLOCKED: <named artifact/step + concrete reason>' — never a bare N/A. A bare N/A on a mandatory output is itself a finding."
+        echo "PR BODY — canonical source of truth: the orchestrator ships PR_DESCRIPTION_TEMPLATE.md alongside this script; Stage 6 (step 6b2) injects it verbatim and produces the template-compliant PR body. That canonical template SUPERSEDES any repo .github/pull_request_template.md and any 'PR Description Standard' section in your instruction file — those are older/looser and drift. Do NOT author a PR body from them. Runbook step 6 ('PR description') is satisfied by that dedicated Stage-6 step, NOT this turn — do not hand-roll a PR body here."
+        echo "Do NOT mark any mandatory output (PR description, Testing Demo, RedSight, any CCR section, doc-header re-stamp) 'N/A'. If an artifact is genuinely blocked, write 'BLOCKED: <named artifact/step + concrete reason>' — never a bare N/A. A bare N/A on a mandatory output is itself a finding."
         echo ""
         echo "At the end, report the full Verification Checklist results (every item must pass)."
     } > "$doc_prompt_file"
@@ -4281,35 +4328,34 @@ run_stage_5() {
     stage_complete "5" "$phase_start" "$doc_output"
 }
 
-# ─── SECTION 16: STAGE 6 — COMMIT WORKTREE → PR CREATION ───────────────────
-#
-# Converts the staged worktree into a draft pull request for full backward
-# traceability (the TPM evaluates from the run's phase files + the PR). LMO is
-# on GitHub → PRs open via `gh`; open_pull_request selects the CLI by remote.
-# Mirrors the canonical orchestrator's Stage 6.
+# ─── SECTION 16: STAGE 6 — MERGE WORKTREE & CREATE PR ──────────────────────
+
 run_stage_6() {
     local phase_start
     phase_start=$(date +%s)
+    stage_header "6" "6" "MERGE WORKTREE → PR CREATION" "Git Operations" "$C_BG_BLUE"
 
-    # Resume-safety: if the worktree is already gone, Stage 6 ran on a prior
-    # invocation (it commits then removes the worktree). Skip rather than abort.
-    if [[ -z "${WORKTREE_DIR:-}" ]] || [[ ! -d "$WORKTREE_DIR" ]]; then
-        warn "Stage 6: worktree already consumed or missing — skipping PR creation."
-        return 0
-    fi
-
-    stage_header "6" "6" "COMMIT WORKTREE → PR CREATION" "Git Operations" "$C_BG_BLUE"
-
+    # Resolve the canonical PR description template that lives alongside this
+    # script. Used by the Coding Agent body-generation step further down to
+    # produce a template-compliant pr_body_agent.md artifact.
     local _stage6_script_dir
     _stage6_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local pr_template_file="${_stage6_script_dir}/PR_DESCRIPTION_TEMPLATE.md"
 
-    # ── 6a: Commit message + fallback What/Why/How via the Coding Agent ─────────
+    # ── 6a: Generate PR metadata (commit message + fallback What/Why/How) via the Coding Agent ──
+    #
+    # Haiku produces the Conventional Commit subject line used for both the
+    # git commit and the PR title — short, structural, cheap. The what/why/
+    # how prose fields it returns are only used as a fallback if the
+    # downstream Coding Agent body generation fails or produces an invalid
+    # artifact. On the success path, the full PR body comes from a Coding
+    # Agent call with the staged diff in view (see 6b2 below).
     subtask "Generating PR metadata (commit + fallback What/Why/How) via the Coding Agent"
 
     local ccr_file="${RUN_DIR}/artifacts/ccr.md"
     local task_file="${RUN_DIR}/artifacts/business_problem.md"
-    local task_text="" ccr_text=""
+    local task_text=""
+    local ccr_text=""
     [[ -f "$task_file" ]] && task_text=$(cat "$task_file")
     [[ -f "$ccr_file" ]] && ccr_text=$(head -400 "$ccr_file")
 
@@ -4321,12 +4367,12 @@ Read the BUSINESS PROBLEM and the CCR below and produce a single JSON object wit
 
 {
   "commit_message": "<Conventional Commit SUBJECT LINE ONLY. Format: type(scope): description — type is one of feat|fix|docs|style|refactor|perf|test|build|ci|chore. Imperative mood, lower-case description, no trailing period. Example good: 'feat(booking): add seat-hold expiry'. NO newlines, NO body, NO bullets, NO 'Why:' prose. Maximum 160 characters total.>",
-  "what": "<One paragraph, 2-4 sentences, concretely describing what this PR changes. Name the files/modules/functions touched. No motivation — just the observable change.>",
-  "why": "<One paragraph, 2-4 sentences, the business or technical motivation. What problem is solved? Why now? What was wrong before?>",
-  "how": "<One paragraph, 2-4 sentences, the implementation approach and key design decisions. Not a line-by-line walkthrough.>"
+  "what": "<One paragraph, 2-4 sentences, concretely describing what this PR changes in the codebase. Name the files/modules/functions touched. No motivation, no approach — just the observable change.>",
+  "why": "<One paragraph, 2-4 sentences, explaining the business or technical motivation. What problem is being solved? Why now? What was wrong or missing before?>",
+  "how": "<One paragraph, 2-4 sentences, explaining the implementation approach. Key design decisions, trade-offs, why this approach over alternatives. Not a line-by-line walkthrough.>"
 }
 
-Do NOT wrap the JSON in markdown. Output ONLY the JSON object.
+Do NOT wrap the JSON in markdown. Do NOT add explanation before or after. Output ONLY the JSON object.
 
 BUSINESS PROBLEM:
 ---
@@ -4349,11 +4395,15 @@ PROMPT_BOUNDARY
     local _meta_output="${RUN_DIR}/artifacts/pr_metadata.md"
     invoke_agent "$CODING_SESSION_FILE" "$CODING_AGENT_FILE" "$_meta_output" "Coding Agent (PR metadata)" "$_meta_prompt_file"
     inner=$(cat "$_meta_output" 2>/dev/null || true)
+    # Strip markdown fences if Haiku added them anyway.
     if [[ -n "$inner" ]]; then
         inner=$(echo "$inner" | sed -E 's/^[[:space:]]*```(json)?[[:space:]]*//; s/```[[:space:]]*$//' | sed '/^$/d')
     fi
 
-    local commit_msg="" pr_what="" pr_why="" pr_how=""
+    local commit_msg=""
+    local pr_what=""
+    local pr_why=""
+    local pr_how=""
     if [[ -n "$inner" ]] && jq -e . <<< "$inner" >/dev/null 2>&1; then
         commit_msg=$(jq -r '.commit_message // empty' <<< "$inner" 2>/dev/null || true)
         pr_what=$(jq -r '.what // empty' <<< "$inner" 2>/dev/null || true)
@@ -4361,16 +4411,24 @@ PROMPT_BOUNDARY
         pr_how=$(jq -r '.how // empty' <<< "$inner" 2>/dev/null || true)
     fi
 
+    # Haiku occasionally stuffs the entire What/Why/How into commit_message
+    # (subject + body + bullets jammed onto one field). Collapse to the first
+    # non-empty line and strip any trailing body — the PR title and the git
+    # commit subject must stay short.
     if [[ -n "$commit_msg" ]]; then
         commit_msg=$(printf '%s\n' "$commit_msg" | awk 'NF{print; exit}')
     fi
 
-    # Validate Conventional Commit subject and length.
-    local lmo_commit_re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .+$'
+    # Validate commit_msg matches the Conventional Commits pattern
+    # (type(scope): description) AND is a sane subject length
+    # (≤160 chars). If not, fall back to a deterministic default built from the
+    # worktree branch name.
+    local conventional_re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?: .+'
     local commit_msg_len=${#commit_msg}
-    if ! [[ "$commit_msg" =~ $lmo_commit_re ]] || (( commit_msg_len > 160 )); then
+    if ! [[ "$commit_msg" =~ $conventional_re ]] || (( commit_msg_len > 160 )); then
         local humanized="${WORKTREE_BRANCH//-/ }"
-        local fallback_msg="chore: update ${humanized}"
+        local fallback_msg="chore: ${humanized} (orchestrated change)"
+        # Truncate fallback too so we never push a giant title.
         if (( ${#fallback_msg} > 160 )); then
             fallback_msg="${fallback_msg:0:157}..."
         fi
@@ -4384,12 +4442,18 @@ PROMPT_BOUNDARY
         success "Commit message: ${commit_msg}"
     fi
 
+    # PR title must be the subject line only — same as commit_msg now that we've
+    # collapsed and length-checked it. Kept as a separate var so future changes
+    # to commit body composition don't accidentally pollute the title.
     local pr_title="$commit_msg"
+
+    # Fallback placeholders for missing PR body sections so the description
+    # always has the three-section structure, even if Haiku had a bad day.
     : "${pr_what:=See the CCR artifact for the full list of code changes in this PR.}"
     : "${pr_why:=See the CCR artifact for the full motivation and business context for this change.}"
     : "${pr_how:=See the CCR artifact for the full implementation approach and key design decisions.}"
 
-    # ── 6b: Commit all staged changes in the worktree ───────────────
+    # ── 6b: Commit all staged changes in the worktree ────────────────
     subtask "Committing all changes in worktree"
 
     cd "$WORKTREE_DIR"
@@ -4403,7 +4467,15 @@ PROMPT_BOUNDARY
         return 0
     fi
 
-    # ── 6b2: Coding Agent writes the template-compliant PR body ─────
+    # ── 6b2: Coding Agent writes the PR body (template-compliant) ────
+    #
+    # Done while changes are still staged in the worktree so the agent can
+    # `git diff --cached` and quote real numbers / file paths. The agent's
+    # response is captured verbatim into pr_body_agent.md; the orchestrator
+    # later appends `## Orchestration Metrics` and the generated footer.
+    # If the file is missing the canonical headings, the assembly step
+    # falls back to the deterministic Haiku-derived body so PR creation
+    # never blocks on a bad agent run.
     local pr_body_agent_file="${RUN_DIR}/artifacts/pr_body_agent.md"
     if [[ -f "$pr_template_file" ]]; then
         subtask "Coding Agent writing PR body to template"
@@ -4419,17 +4491,19 @@ PROMPT_BOUNDARY
         _diff_stat=$(git diff --cached --stat 2>/dev/null | tail -20)
 
         {
-            echo "REMINDER (ORCHESTRATION OVERRIDE): Your instruction file's git branching/commit/push/PR rules are SUSPENDED. Do NOT run 'git commit', 'git push', 'git checkout -b', or open a PR. You are writing the PR description text only."
+            echo "REMINDER (ORCHESTRATION OVERRIDE): Your instruction file's git branching/commit/push/PR rules are SUSPENDED. Do NOT run 'git commit', 'git push', 'git checkout -b', or 'gh pr create'. You are writing the PR description text only."
             echo ""
-            echo "You shipped this implementation. Write the pull-request description for the change you just staged."
+            echo "You shipped this implementation. Write the GitHub pull-request description for the change you just staged."
             echo ""
             echo "Output a SINGLE markdown document. NO preface, NO commentary, NO trailing notes — your entire response is captured verbatim into the PR body. Start with \`## TL;DR\` on the first line."
             echo ""
-            echo "The PR body MUST follow the canonical PR template exactly. Read the template spec below and produce every required section in order, with byte-exact headings — the template and downstream review tooling depend on the exact heading text (e.g. \`## What / Why?\` with the spaces and the question mark)."
+            echo "The PR body MUST follow the canonical PR template exactly. Read the template spec below and produce every required section in order, with byte-exact headings. The \`## What / Why?\` heading is validated by the PR-description CI check — a missing \`?\` or wrong spacing fails CI."
             echo ""
             echo "<pr_template_spec>"
             cat "$pr_template_file"
             echo "</pr_template_spec>"
+            echo ""
+            echo "If your project keeps exemplar PRs, mirror their structure (not their prose); otherwise follow the template spec above."
             echo ""
             echo "The change you shipped:"
             echo "- Branch: ${WORKTREE_BRANCH}"
@@ -4458,10 +4532,11 @@ PROMPT_BOUNDARY
             echo "</documentation_report>"
             echo ""
             echo "Hard rules:"
-            echo "- Use REAL captured evidence — paste actual test output / curl transcripts you ran during implementation. Do NOT fabricate. If a test wasn't run, state so under \"Known test gaps\" in Section 5."
+            echo "- Use REAL captured evidence — paste actual test output / curl transcripts / migration logs you ran during implementation. Do NOT fabricate. If a test wasn't run, state so under \"Known test gaps\" in Section 5."
             echo "- Do NOT emit \`## Orchestration Metrics\` — the orchestrator appends that footer."
-            echo "- Do NOT emit anything BEFORE \`## TL;DR\` or AFTER the last template section. The PR body is ingested verbatim."
+            echo "- Do NOT emit anything BEFORE \`## TL;DR\` or AFTER the last template section. \`gh pr create --body-file\` ingests your response verbatim."
             echo "- Use \`git diff --cached\`, \`git log -1\`, and the Read tool to verify your claims against the actual staged changes before you write."
+            echo "- The \`## What / Why?\` heading is byte-exact: two hashes, space, the word What, space, slash, space, the word Why, question mark."
             echo ""
             echo "Write the complete PR body now."
         } > "$pr_body_prompt_file"
@@ -4486,7 +4561,7 @@ PROMPT_BOUNDARY
 
     git commit -m "${commit_msg}
 
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" 2>&1 \
         | while IFS= read -r line; do verbose "$line"; done
 
     success "Committed ${changed_files} files in worktree"
@@ -4506,9 +4581,20 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
 
     success "Pushed: origin/${WORKTREE_BRANCH}"
 
-    # Assemble the PR body: prefer the agent's template-compliant output;
-    # fall back to the deterministic Haiku-derived body if it's missing the
-    # canonical headings, so PR creation never blocks on a bad agent run.
+    # Build the PR body. Preferred source: the Coding Agent's template-
+    # compliant pr_body_agent.md from 6b2. The orchestrator validates it
+    # against the canonical heading set (## TL;DR / ## What / Why? / ## How?
+    # / ## Code Change Request Form) — those four are the regex-check anchors
+    # the PR-description CI check enforces. If validation fails OR
+    # the agent step was skipped, we fall back to the deterministic Haiku-
+    # derived body so PR creation never blocks on a bad agent run.
+    local slack_url=""
+    if [[ -n "$task_text" ]]; then
+        slack_url=$(printf '%s\n' "$task_text" \
+            | grep -oE 'https://[a-zA-Z0-9.-]+\.slack\.com/[^[:space:]]+' \
+            | head -1 || true)
+    fi
+
     local pr_body_file="${RUN_DIR}/artifacts/pr_body.md"
     local _use_agent_body=false
     if [[ -s "$pr_body_agent_file" ]]; then
@@ -4524,6 +4610,9 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
     fi
 
     if [[ "$_use_agent_body" == "true" ]]; then
+        # Copy the agent body and strip any accidentally-emitted Orchestration
+        # Metrics block (we append our own with live numbers). Then append the
+        # standard footer.
         awk '
             /^## Orchestration Metrics[[:space:]]*$/ { skip=1; next }
             skip && /^## / && !/^## Orchestration Metrics/ { skip=0 }
@@ -4552,6 +4641,10 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
             echo ""
             echo "${pr_what}"
             echo ""
+            if [[ -n "$slack_url" ]]; then
+                echo "Slack Thread: ${slack_url}"
+                echo ""
+            fi
             echo "${pr_why}"
             echo ""
             echo "## How?"
@@ -4584,7 +4677,10 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
         } > "$pr_body_file"
     fi
 
-    # Draft PR via the right CLI for the remote (gh for LMO's GitHub).
+    # PRs are ALWAYS opened in draft mode (gh --draft on GitHub, Gitea 'WIP:'
+    # title prefix on self-hosted Gitea) — the orchestrator's output is reviewed
+    # by a human before it's marked ready. open_pull_request picks gh or tea by
+    # the origin remote.
     # Open the PR from inside the worktree so tea/gh detect the right repo.
     cd "$WORKTREE_DIR" 2>/dev/null || true
     open_pull_request "$pr_title" "$pr_body_file" "$BASE_BRANCH" "${RUN_DIR}/artifacts/pr_url.txt"
@@ -4596,10 +4692,12 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
 
 # Opens a DRAFT pull request for the just-pushed branch against <base>,
 # choosing the CLI by the origin remote: `gh` for github.com, `tea` for
-# self-hosted Gitea. Draft is gh's --draft on GitHub and the conventional
-# 'WIP:' title prefix on Gitea. Writes the resulting PR URL (or "(failed)")
-# to <url_out_file>. Never aborts the run.
+# self-hosted Gitea. Draft is gh's --draft on GitHub and
+# the conventional 'WIP:' title prefix on Gitea. Writes the resulting PR URL
+# (or "(failed)") to <url_out_file>. Never aborts the run — a PR-create
+# failure leaves the branch pushed for a manual PR. Args:
 #   1 pr_title   2 pr_body_file   3 base_branch   4 url_out_file   5 label(opt)
+# Requires (Gitea): `tea` on PATH and `tea login add` configured for the host.
 open_pull_request() {
     local pr_title="$1" pr_body_file="$2" base="$3" url_out_file="$4" label="${5:-}"
     local remote_url pr_url=""
@@ -4799,7 +4897,24 @@ print_summary() {
     printf "\n"
     printf "  ${C_BOLD}Resume agents manually${C_RESET} ${C_DIM}(single copy-paste commands — handles deleted worktree automatically):${C_RESET}\n"
     print_resume_command "Brain Agent" "$BRAIN_SESSION_ID"
-    print_resume_command "Coding Agent" "$CODER_SESSION_ID"
+    if [[ "$MULTI_REPO_MODE" == "true" ]] && [[ ${#CODER_SESSION_IDS_ARRAY[@]} -gt 0 ]]; then
+        local _ri _csid _cname _csfile
+        for ((_ri=0; _ri<REPO_COUNT; _ri++)); do
+            _csid="${CODER_SESSION_IDS_ARRAY[$_ri]:-}"
+            _cname="${REPO_NAMES_ARRAY[$_ri]:-repo-$_ri}"
+            # Fall back to the on-disk session file if the array entry was
+            # cleared (e.g. on resume before metrics restored the IDs).
+            if [[ -z "$_csid" ]]; then
+                _csfile="${CODING_SESSION_FILES_ARRAY[$_ri]:-}"
+                if [[ -n "$_csfile" ]] && [[ -f "$_csfile" ]] && [[ -s "$_csfile" ]]; then
+                    _csid=$(tr -d '[:space:]' < "$_csfile")
+                fi
+            fi
+            print_resume_command "Coding Agent (${_cname})" "$_csid"
+        done
+    else
+        print_resume_command "Coding Agent" "$CODER_SESSION_ID"
+    fi
     # Independent reviewer sessions (one per QA round)
     local _isfile _isid _ilabel
     for _isfile in "${RUN_DIR}/sessions"/independent-*.session; do
@@ -4963,6 +5078,12 @@ cleanup() {
     local exit_code=$?
     set +e  # Disable errexit inside cleanup — we must not fail here
 
+    # Kill any orphaned background claude process (legacy from non-tmux variant)
+    if [[ -n "$CLAUDE_BG_PID" ]]; then
+        kill "$CLAUDE_BG_PID" 2>/dev/null || true
+        wait "$CLAUDE_BG_PID" 2>/dev/null || true
+    fi
+
     # Tear down the orchestrator tmux session — unless KEEP_TMUX_ON_EXIT=true,
     # in which case panes are left LIVE so the user can attach and inspect each
     # role's conversation (panes are useless if claude has already exited).
@@ -5056,7 +5177,7 @@ auto_name_branch() {
     info "Generating descriptive branch name from task description..."
 
     local raw_name=""
-    raw_name=$(tmux_oneshot haiku "Read this task description and output a short kebab-case Git branch name (2-4 words, lowercase, hyphens only, no spaces, no slashes, no special characters). Examples: deal-rail-cards, booking-page-polish, brand-token-refresh. Output ONLY the branch name, nothing else.
+    raw_name=$(tmux_oneshot haiku "Read this task description and output a short kebab-case Git branch name (2-4 words, lowercase, hyphens only, no spaces, no slashes, no special characters). Examples: pre-event-reminder, crm-bulk-export, whatsapp-group-fix. Output ONLY the branch name, nothing else.
 
 $(head -50 "$task_file")" 2>/dev/null || true)
 
@@ -5129,32 +5250,9 @@ detect_base_branch() {
         verbose "Non-GitHub remote or gh unavailable — base = default branch"
     fi
 
-    # Fallback: the most recently pushed *origin* feature branch (not main/master/HEAD).
-    #
-    # ROOT-CAUSE FIX (multi-remote safety): BASE_BRANCH is interpreted as origin/$BASE_BRANCH
-    # everywhere downstream (worktree base, fetch, merge-back `git pull origin $BASE_BRANCH`),
-    # so we must ONLY ever pick branches that live on `origin`. The source monorepo (VendeBien)
-    # had many remotes (origin + per-service sub-* mirrors); LMO has a single origin, but the
-    # origin-only scan remains correct. The old code ran `git branch -r` across ALL remotes
-    # and only stripped the `origin/` prefix, so a branch like `sub-<service>/feat/x` was
-    # kept verbatim and became the invalid ref `origin/sub-<service>/feat/x` — which
-    # broke worktree creation (exit 128). Scope the scan to refs/remotes/origin/ only.
-    local latest_feature
-    latest_feature=$(git -C "$REPO_ROOT" for-each-ref --sort=-committerdate \
-        --format='%(refname:strip=3)' refs/remotes/origin/ \
-        | grep -vE '^(HEAD|main|master)$' \
-        | head -1 \
-        | tr -d '[:space:]' || true)
-
-    # Only accept it if it actually resolves locally — never commit BASE_BRANCH to a branch
-    # that would require a live fetch from a possibly-unreachable remote to materialize.
-    if [[ -n "$latest_feature" ]] \
-        && git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/${latest_feature}" >/dev/null; then
-        BASE_BRANCH="$latest_feature"
-        success "Base branch: ${BASE_BRANCH} (latest origin feature branch)"
-        git -C "$REPO_ROOT" fetch origin "$BASE_BRANCH" 2>/dev/null || true
-        return 0
-    fi
+    # NOTE: we deliberately do NOT fall back to "most recently pushed remote branch"
+    # here — that blind heuristic grabbed stale feature branches (e.g. on Gitea, where
+    # gh finds no PR) and based runs off old code. With no open PR, use the default branch.
 
     # Final fallback: main or master
     local default_branch
@@ -5199,81 +5297,16 @@ create_worktree() {
     info "Base: ${BASE_BRANCH} (stacked PR target)"
     info "Directory: ${WORKTREE_DIR}"
 
-    # Resolve a concrete, locally-available base ref for the worktree.
-    #
-    # ROOT-CAUSE FIX (offline / unreachable-remote safety): worktree creation must NEVER abort
-    # just because `origin` is unreachable or the chosen base only lives on the remote. The old
-    # code fatal-exited — and because the fetch was an unguarded pipe under `set -euo pipefail`,
-    # it actually aborted mid-fetch with a raw exit 128 before its own error message could print.
-    # Instead, try in order and take the first ref that resolves locally:
-    #   origin/<base> (after a best-effort fetch) -> local <base> -> origin/main -> main
-    #   -> origin/master -> master -> HEAD.
-    # Candidates are FULLY QUALIFIED on purpose: a bare name (e.g. "$BASE_BRANCH") passed to
-    # `git rev-parse` also searches refs/remotes/<any-remote>/, so on this multi-remote repo a
-    # bare fallback could silently re-select a sub-* remote's tracking ref — the exact trap that
-    # caused the original failure. Fully-qualified refs can only match origin or a local head.
-    local base_ref=""
-    local candidate
-    # PREFER LOCAL WHEN AHEAD: this repo's `origin` is an unreachable, perpetually-behind
-    # .local remote, so the dev's local <base> (carrying un-pushed commits — e.g. the keyset
-    # sitemap fix) is the real base. If local <base> exists AND origin's ref is absent or is an
-    # ancestor of it (local ⊇ origin), branch from local — strictly safe, never loses origin's
-    # commits. Otherwise use origin's ref; if neither resolves, fall to the fetch+fallback chain.
-    local _origin_ref="refs/remotes/origin/${BASE_BRANCH}"
-    local _local_ref="refs/heads/${BASE_BRANCH}"
-    if git -C "$REPO_ROOT" rev-parse --verify --quiet "$_local_ref" >/dev/null \
-        && { ! git -C "$REPO_ROOT" rev-parse --verify --quiet "$_origin_ref" >/dev/null \
-             || git -C "$REPO_ROOT" merge-base --is-ancestor "$_origin_ref" "$_local_ref"; }; then
-        base_ref="$_local_ref"
-    elif git -C "$REPO_ROOT" rev-parse --verify --quiet "$_origin_ref" >/dev/null; then
-        base_ref="$_origin_ref"
-    else
-        warn "origin/${BASE_BRANCH} not available locally — attempting a best-effort fetch"
-        # Failure-tolerant on purpose: a dead/unreachable remote must not trip set -euo pipefail.
-        if git -C "$REPO_ROOT" fetch origin "$BASE_BRANCH" >/dev/null 2>&1; then
-            verbose "Fetched origin/${BASE_BRANCH}"
-        else
-            warn "Fetch from origin failed (offline or unreachable remote) — falling back to a local base"
+    # Verify the base ref exists locally (fetch may have failed silently in detect_base_branch)
+    if ! git -C "$REPO_ROOT" rev-parse --verify "origin/${BASE_BRANCH}" &>/dev/null; then
+        warn "origin/${BASE_BRANCH} not found locally — attempting fresh fetch"
+        git -C "$REPO_ROOT" fetch origin "$BASE_BRANCH" 2>&1 | while IFS= read -r line; do verbose "$line"; done
+        if ! git -C "$REPO_ROOT" rev-parse --verify "origin/${BASE_BRANCH}" &>/dev/null; then
+            fatal "Cannot resolve origin/${BASE_BRANCH}. Verify the branch exists and you have network access."
         fi
-        for candidate in \
-            "refs/remotes/origin/${BASE_BRANCH}" \
-            "refs/heads/${BASE_BRANCH}" \
-            "refs/remotes/origin/main" \
-            "refs/heads/main" \
-            "refs/remotes/origin/master" \
-            "refs/heads/master" \
-            "HEAD"; do
-            if git -C "$REPO_ROOT" rev-parse --verify --quiet "${candidate}" >/dev/null; then
-                base_ref="$candidate"
-                break
-            fi
-        done
     fi
 
-    if [[ -z "$base_ref" ]]; then
-        fatal "No usable base ref found (tried origin/${BASE_BRANCH}, local ${BASE_BRANCH}, main, master, HEAD). Repository has no resolvable branch to branch from."
-    fi
-
-    # Derive a clean branch name for honest resume / merge-back messaging.
-    local resolved_base_branch
-    case "$base_ref" in
-        refs/remotes/origin/*) resolved_base_branch="${base_ref#refs/remotes/origin/}" ;;
-        refs/heads/*)          resolved_base_branch="${base_ref#refs/heads/}" ;;
-        HEAD)                  resolved_base_branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)" ;;
-        *)                     resolved_base_branch="$base_ref" ;;
-    esac
-
-    if [[ "$base_ref" != "$_origin_ref" ]]; then
-        if [[ "$base_ref" == "$_local_ref" ]] && git -C "$REPO_ROOT" rev-parse --verify --quiet "$_origin_ref" >/dev/null; then
-            info "Branching from local '${BASE_BRANCH}' (ahead of origin/${BASE_BRANCH})"
-        else
-            warn "Base 'origin/${BASE_BRANCH}' unavailable — branching the worktree from '${base_ref}' instead"
-        fi
-        BASE_BRANCH="$resolved_base_branch"
-    fi
-
-    info "Resolved base ref: ${base_ref}"
-    git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" "$base_ref" 2>&1 \
+    git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$WORKTREE_BRANCH" "origin/${BASE_BRANCH}" 2>&1 \
         | while IFS= read -r line; do verbose "$line"; done
 
     if [[ ! -d "$WORKTREE_DIR" ]]; then
@@ -5286,10 +5319,14 @@ create_worktree() {
     REPO_ROOT="$WORKTREE_DIR"
 
     # Re-derive DOC_DIR in the worktree
-    if [[ -f "${REPO_ROOT}/LMO Brain Agent.md" ]] || [[ -f "${REPO_ROOT}/SERVICE_DOCUMENTATION.md" ]]; then
+    # MULTI-REPO WORKSPACE ADAPTATION: see check_prerequisites — Brain-file marker + workspace-level
+    # shared docs fallback (worktrees are siblings of the repos under the workspace root).
+    if compgen -G "${REPO_ROOT}/*Brain*Agent*.md" > /dev/null 2>&1; then
         DOC_DIR="$REPO_ROOT"
     elif [[ -d "${REPO_ROOT}/LLM coding agent documents" ]]; then
         DOC_DIR="${REPO_ROOT}/LLM coding agent documents"
+    elif [[ -d "$(dirname "$REPO_ROOT")/LLM coding agent documents" ]]; then
+        DOC_DIR="$(dirname "$REPO_ROOT")/LLM coding agent documents"
     fi
 
     # Re-derive agent instruction files in the worktree
@@ -5311,18 +5348,24 @@ create_worktree() {
     local wt_path
     wt_path="${WORKTREE_DIR}"
 
-    for md_file in "$DOC_DIR"/*.md; do
-        if [[ -f "$md_file" ]]; then
-            sed -i '' "s|${main_path}/|${wt_path}/|g" "$md_file"
-        fi
-    done
-    # Also rewrite paths in JSONL files that agents may read
-    for jsonl_file in "$DOC_DIR"/*.jsonl; do
-        if [[ -f "$jsonl_file" ]]; then
-            sed -i '' "s|${main_path}/|${wt_path}/|g" "$jsonl_file"
-        fi
-    done
-    success "Agent instruction paths rewritten to worktree"
+    # MULTI-REPO WORKSPACE ADAPTATION: when DOC_DIR is the shared workspace-level folder (outside
+    # the worktree), do NOT rewrite it — it is canonical and serves all repos.
+    if [[ "$DOC_DIR" == "${wt_path}"* ]]; then
+        for md_file in "$DOC_DIR"/*.md; do
+            if [[ -f "$md_file" ]]; then
+                sed -i '' "s|${main_path}/|${wt_path}/|g" "$md_file"
+            fi
+        done
+        # Also rewrite paths in JSONL files that agents may read
+        for jsonl_file in "$DOC_DIR"/*.jsonl; do
+            if [[ -f "$jsonl_file" ]]; then
+                sed -i '' "s|${main_path}/|${wt_path}/|g" "$jsonl_file"
+            fi
+        done
+        success "Agent instruction paths rewritten to worktree"
+    else
+        info "Shared workspace-level agent documents — skipping worktree path rewrite"
+    fi
 
     # Brain session copy is deferred to copy_sessions_to_worktree(), called
     # after Stage 2 when Claude has created the worktree's project directory.
@@ -5417,32 +5460,3132 @@ copy_sessions_to_worktree() {
     fi
 }
 
+# ─── SECTION 19d-pre: MODEL CONFIGURATION SELECTOR ───────────────────────
+
+select_model_config() {
+    printf "\n"
+    printf "${C_BG_MAGENTA}${C_WHITE}${C_BOLD}                                                                      ${C_RESET}\n"
+    printf "${C_BG_MAGENTA}${C_WHITE}${C_BOLD}  MODEL CONFIGURATION                                                 ${C_RESET}\n"
+    printf "${C_BG_MAGENTA}${C_WHITE}${C_BOLD}                                                                      ${C_RESET}\n"
+    printf "\n"
+
+    printf "  ${C_BOLD}Select agent model configuration:${C_RESET}\n"
+    printf "\n"
+    printf "  ${C_BOLD}${C_CYAN}  1${C_RESET}  Brain ${C_BOLD}Opus${C_RESET} (1M ctx)   +  Coder ${C_BOLD}Opus${C_RESET} (1M ctx)    ${C_DIM}— max quality, max cost${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  2${C_RESET}  Brain ${C_BOLD}Opus${C_RESET} (1M ctx)   +  Coder ${C_BOLD}Sonnet${C_RESET} (200k ctx)  ${C_DIM}— smart planning, fast coding${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  3${C_RESET}  Brain ${C_BOLD}Sonnet${C_RESET} (200k ctx) +  Coder ${C_BOLD}Opus${C_RESET} (1M ctx)    ${C_DIM}— fast planning, thorough coding${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  4${C_RESET}  Brain ${C_BOLD}Sonnet${C_RESET} (200k ctx) +  Coder ${C_BOLD}Sonnet${C_RESET} (200k ctx)  ${C_DIM}— fastest, lowest cost${C_RESET}\n"
+    printf "\n"
+    printf "  ${C_BOLD}Select [1-4] (Enter = 1): ${C_RESET}"
+
+    local model_choice
+    read -r model_choice
+
+    case "${model_choice:-1}" in
+        1)
+            BRAIN_MODEL="claude-opus-4-8"
+            CODER_MODEL="claude-opus-4-8"
+            MODEL_CONFIG_LABEL="Brain Opus (1M) + Coder Opus (1M)"
+            ;;
+        2)
+            BRAIN_MODEL="claude-opus-4-8"
+            CODER_MODEL="claude-sonnet-4-6"
+            MODEL_CONFIG_LABEL="Brain Opus (1M) + Coder Sonnet (200k)"
+            ;;
+        3)
+            BRAIN_MODEL="claude-sonnet-4-6"
+            CODER_MODEL="claude-opus-4-8"
+            MODEL_CONFIG_LABEL="Brain Sonnet (200k) + Coder Opus (1M)"
+            ;;
+        4)
+            BRAIN_MODEL="claude-sonnet-4-6"
+            CODER_MODEL="claude-sonnet-4-6"
+            MODEL_CONFIG_LABEL="Brain Sonnet (200k) + Coder Sonnet (200k)"
+            ;;
+        *)
+            warn "Invalid selection '${model_choice}' — using default (Opus + Opus)"
+            BRAIN_MODEL="claude-opus-4-8"
+            CODER_MODEL="claude-opus-4-8"
+            MODEL_CONFIG_LABEL="Brain Opus (1M) + Coder Opus (1M)"
+            ;;
+    esac
+
+    success "Models: ${MODEL_CONFIG_LABEL}"
+    printf "\n"
+}
+
+# ─── SECTION 19d: INTERACTIVE REPO & BRANCH SELECTOR ──────────────────────
+
+# When run from outside a git repo (e.g., from the canonical location),
+# present an interactive selector for repository and branch. Then cd into
+# the chosen repo so the rest of the script works as normal.
+
+select_repo_and_branch() {
+    # Scan parent directory of this script for git repos
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    local scan_dir
+    scan_dir="$(dirname "$script_dir")"
+
+    printf "\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}                                                                      ${C_RESET}\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}  AGENT ORCHESTRATOR — Repository Selector                             ${C_RESET}\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}                                                                      ${C_RESET}\n"
+    printf "\n"
+
+    info "Scanning for git repositories in: ${scan_dir}"
+    printf "\n"
+
+    # Find all git repos (directories with .git/)
+    local repos=()
+    local repo_names=()
+    while IFS= read -r repo_path; do
+        local repo_dir
+        repo_dir="$(dirname "$repo_path")"
+        # Skip the orchestrator-canonical directory itself
+        if [[ "$(basename "$repo_dir")" == "orchestrator-canonical" ]]; then
+            continue
+        fi
+        repos+=("$repo_dir")
+        repo_names+=("$(basename "$repo_dir")")
+    done < <(find "$scan_dir" -maxdepth 2 -name ".git" -type d 2>/dev/null | sort)
+
+    # Multi-repo workspace: the harness HOST repo holds only the
+    # orchestrator + shared agent docs — the deployable code lives in sibling
+    # service repos. Drop the host from the selectable targets so a run can't
+    # accidentally target the docs repo and produce a docs-only PR. Only fires when
+    # there is more than one repo, so a monorepo layout is unaffected.
+    local _host_repo
+    _host_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+    if [[ ${#repos[@]} -gt 1 && -n "$_host_repo" ]]; then
+        local _frepos=() _fnames=() _ri
+        for _ri in "${!repos[@]}"; do
+            [[ "${repos[$_ri]}" == "$_host_repo" ]] && continue
+            _frepos+=("${repos[$_ri]}"); _fnames+=("${repo_names[$_ri]}")
+        done
+        if [[ ${#_frepos[@]} -gt 0 ]]; then
+            repos=("${_frepos[@]}"); repo_names=("${_fnames[@]}")
+        fi
+    fi
+
+    if [[ ${#repos[@]} -eq 0 ]]; then
+        fatal "No git repositories found in ${scan_dir}"
+    fi
+
+    # Display repo list
+    printf "  ${C_BOLD}Available repositories:${C_RESET}\n"
+    printf "\n"
+    local i
+    for i in "${!repos[@]}"; do
+        local branch
+        branch=$(git -C "${repos[$i]}" symbolic-ref --short HEAD 2>/dev/null || echo "detached")
+        local has_agents=""
+        # MULTI-REPO WORKSPACE ADAPTATION: shared workspace-level docs folder counts as [agents].
+        if [[ -d "${repos[$i]}/LLM coding agent documents" ]] || [[ -d "$(dirname "${repos[$i]}")/LLM coding agent documents" ]]; then
+            has_agents="${C_GREEN}[agents]${C_RESET}"
+        else
+            has_agents="${C_DIM}[no agents]${C_RESET}"
+        fi
+        printf "  ${C_BOLD}${C_CYAN}%3d${C_RESET}  %-40s ${C_DIM}(%s)${C_RESET} %b\n" \
+            "$((i + 1))" "${repo_names[$i]}" "$branch" "$has_agents"
+    done
+
+    printf "\n"
+    printf "  ${C_BOLD}Select repository [1-${#repos[@]}]: ${C_RESET}"
+    local repo_choice
+    read -r repo_choice
+
+    if ! [[ "$repo_choice" =~ ^[0-9]+$ ]] || [[ $repo_choice -lt 1 ]] || [[ $repo_choice -gt ${#repos[@]} ]]; then
+        fatal "Invalid selection: ${repo_choice}"
+    fi
+
+    local selected_repo="${repos[$((repo_choice - 1))]}"
+    local selected_name="${repo_names[$((repo_choice - 1))]}"
+    success "Selected: ${selected_name}"
+
+    # Check for agent documents (repo-local OR shared workspace-level)
+    if [[ ! -d "${selected_repo}/LLM coding agent documents" ]] && [[ ! -d "$(dirname "${selected_repo}")/LLM coding agent documents" ]]; then
+        fatal "${selected_name} does not have 'LLM coding agent documents/' (repo or parent workspace). Run the Creation Playbook first."
+    fi
+
+    # Branch selector
+    printf "\n"
+    printf "  ${C_BOLD}Recent branches:${C_RESET}\n"
+    printf "\n"
+
+    local branches=()
+    while IFS= read -r branch_name; do
+        branch_name=$(echo "$branch_name" | sed 's/^[[:space:]]*//' | sed 's/^\* //')
+        if [[ -n "$branch_name" ]]; then
+            branches+=("$branch_name")
+        fi
+    done < <(git -C "$selected_repo" branch --sort=-committerdate | head -15)
+
+    for i in "${!branches[@]}"; do
+        local marker=""
+        local current
+        current=$(git -C "$selected_repo" symbolic-ref --short HEAD 2>/dev/null || true)
+        if [[ "${branches[$i]}" == "$current" ]]; then
+            marker=" ${C_GREEN}← current${C_RESET}"
+        fi
+        printf "  ${C_BOLD}${C_CYAN}%3d${C_RESET}  %-50s%b\n" "$((i + 1))" "${branches[$i]}" "$marker"
+    done
+
+    printf "\n"
+    printf "  ${C_BOLD}Select branch [1-${#branches[@]}] (Enter = current): ${C_RESET}"
+    local branch_choice
+    read -r branch_choice
+
+    local selected_branch=""
+    if [[ -z "$branch_choice" ]]; then
+        selected_branch=$(git -C "$selected_repo" symbolic-ref --short HEAD 2>/dev/null || echo "main")
+        info "Using current branch: ${selected_branch}"
+    elif [[ "$branch_choice" =~ ^[0-9]+$ ]] && [[ $branch_choice -ge 1 ]] && [[ $branch_choice -le ${#branches[@]} ]]; then
+        selected_branch="${branches[$((branch_choice - 1))]}"
+        git -C "$selected_repo" checkout "$selected_branch" 2>/dev/null || fatal "Failed to checkout ${selected_branch}"
+        success "Switched to: ${selected_branch}"
+    else
+        fatal "Invalid selection: ${branch_choice}"
+    fi
+
+    # The user explicitly chose this branch — use it as the BASE_BRANCH for the worktree.
+    # This overrides detect_base_branch() so the worktree is created from exactly
+    # what the user selected, not from some auto-detected open PR.
+    BASE_BRANCH="$selected_branch"
+
+    # cd into the selected repo
+    cd "$selected_repo"
+    success "Working directory: $(pwd)"
+    printf "\n"
+}
+
+# ─── SECTION 19e: MULTI-REPO SUPPORT (NEW — only active when REPO_COUNT > 1) ─
+#
+# This block adds a parallel code path for orchestrating changes across 2-3
+# repositories when the user's task spans multiple services. The single-repo
+# flow (REPO_COUNT=1) is not touched — see run_stage_1..6 and main() for the
+# original path. All functions here are only called from multi_main_flow,
+# which is invoked from main() only when MULTI_REPO_MODE=true.
+#
+# Pipeline overview (when REPO_COUNT is 2 or 3):
+#   1. prompt_repo_count                  — user picks 1/2/3 (rejects >3)
+#   2. select_repos_and_branches_multi    — select N repos + branches, cd repo[0]
+#   3. check_prerequisites_multi_repos    — agent docs verified for each repo
+#   4. create_worktrees_multi             — N worktrees, arrays populated
+#   5. run_multi_stage_1                  — Brain writes N CCRs (one per repo)
+#   6. run_multi_stage_2                  — N Coding agents run sequentially
+#   7. run_multi_stage_3                  — Brain reviews all; per-repo fix loop
+#   8. run_multi_stage_4                  — Fresh Brain audits all; per-repo loop
+#   9. run_multi_stage_5                  — Per-repo docs update
+#  10. run_multi_stage_6                  — Per-repo commit + PR
+
+prompt_repo_count() {
+    printf "\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}                                                                      ${C_RESET}\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}  AGENT ORCHESTRATOR — Repository Count                                ${C_RESET}\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}                                                                      ${C_RESET}\n"
+    printf "\n"
+    printf "  ${C_BOLD}How many repositories does this implementation span?${C_RESET}\n"
+    printf "\n"
+    printf "  ${C_BOLD}${C_CYAN}  1${C_RESET}  Single repo (classic flow — unchanged)\n"
+    printf "  ${C_BOLD}${C_CYAN}  2${C_RESET}  Two repos (multi-repo flow, 2 parallel PRs)\n"
+    printf "  ${C_BOLD}${C_CYAN}  3${C_RESET}  Three repos (multi-repo flow, 3 parallel PRs — max)\n"
+    printf "\n"
+    printf "  ${C_BOLD}Select [1-3] (Enter = 1): ${C_RESET}"
+
+    local count_choice
+    read -r count_choice
+    count_choice="${count_choice:-1}"
+
+    if ! [[ "$count_choice" =~ ^[0-9]+$ ]]; then
+        fatal "Invalid repo count: '${count_choice}' — must be an integer 1-3"
+    fi
+    if [[ $count_choice -lt 1 ]]; then
+        fatal "Invalid repo count: ${count_choice} — minimum is 1"
+    fi
+    if [[ $count_choice -gt 3 ]]; then
+        fatal "Invalid repo count: ${count_choice} — maximum is 3 repositories per orchestration"
+    fi
+
+    REPO_COUNT=$count_choice
+    if [[ $REPO_COUNT -gt 1 ]]; then
+        MULTI_REPO_MODE=true
+        success "Multi-repo mode: ${REPO_COUNT} repositories"
+    else
+        MULTI_REPO_MODE=false
+        info "Single-repo mode (classic flow)"
+    fi
+    printf "\n"
+}
+
+select_repos_and_branches_multi() {
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    local scan_dir
+    scan_dir="$(dirname "$script_dir")"
+
+    printf "\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}                                                                      ${C_RESET}\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}  AGENT ORCHESTRATOR — Multi-Repo Selector (${REPO_COUNT} repos)                ${C_RESET}\n"
+    printf "${C_BG_BLUE}${C_WHITE}${C_BOLD}                                                                      ${C_RESET}\n"
+    printf "\n"
+
+    info "Scanning for git repositories in: ${scan_dir}"
+    printf "\n"
+
+    local repos=()
+    local repo_names=()
+    while IFS= read -r repo_path; do
+        local repo_dir
+        repo_dir="$(dirname "$repo_path")"
+        if [[ "$(basename "$repo_dir")" == "orchestrator-canonical" ]]; then
+            continue
+        fi
+        repos+=("$repo_dir")
+        repo_names+=("$(basename "$repo_dir")")
+    done < <(find "$scan_dir" -maxdepth 2 -name ".git" -type d 2>/dev/null | sort)
+
+    # Multi-repo workspace: the harness HOST repo holds only the
+    # orchestrator + shared agent docs — the deployable code lives in sibling
+    # service repos. Drop the host from the selectable targets so a run can't
+    # accidentally target the docs repo and produce a docs-only PR. Only fires when
+    # there is more than one repo, so a monorepo layout is unaffected.
+    local _host_repo
+    _host_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+    if [[ ${#repos[@]} -gt 1 && -n "$_host_repo" ]]; then
+        local _frepos=() _fnames=() _ri
+        for _ri in "${!repos[@]}"; do
+            [[ "${repos[$_ri]}" == "$_host_repo" ]] && continue
+            _frepos+=("${repos[$_ri]}"); _fnames+=("${repo_names[$_ri]}")
+        done
+        if [[ ${#_frepos[@]} -gt 0 ]]; then
+            repos=("${_frepos[@]}"); repo_names=("${_fnames[@]}")
+        fi
+    fi
+
+    if [[ ${#repos[@]} -eq 0 ]]; then
+        fatal "No git repositories found in ${scan_dir}"
+    fi
+
+    # Display repo list once — reused for each selection
+    printf "  ${C_BOLD}Available repositories:${C_RESET}\n"
+    printf "\n"
+    local i
+    for i in "${!repos[@]}"; do
+        local branch
+        branch=$(git -C "${repos[$i]}" symbolic-ref --short HEAD 2>/dev/null || echo "detached")
+        local has_agents=""
+        # MULTI-REPO WORKSPACE ADAPTATION: shared workspace-level docs folder counts as [agents].
+        if [[ -d "${repos[$i]}/LLM coding agent documents" ]] || [[ -d "$(dirname "${repos[$i]}")/LLM coding agent documents" ]]; then
+            has_agents="${C_GREEN}[agents]${C_RESET}"
+        else
+            has_agents="${C_DIM}[no agents]${C_RESET}"
+        fi
+        printf "  ${C_BOLD}${C_CYAN}%3d${C_RESET}  %-40s ${C_DIM}(%s)${C_RESET} %b\n" \
+            "$((i + 1))" "${repo_names[$i]}" "$branch" "$has_agents"
+    done
+    printf "\n"
+
+    # Loop once per repo slot — user picks a distinct repo + branch each time
+    local slot
+    for ((slot=0; slot<REPO_COUNT; slot++)); do
+        printf "${C_DIM} ┃${C_RESET}\n"
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}${C_YELLOW}── Repository %d of %d ──${C_RESET}\n" "$((slot + 1))" "$REPO_COUNT"
+        printf "${C_DIM} ┃${C_RESET}\n"
+
+        printf "  ${C_BOLD}Select repo #%d [1-${#repos[@]}]: ${C_RESET}" "$((slot + 1))"
+        local repo_choice
+        read -r repo_choice
+
+        if ! [[ "$repo_choice" =~ ^[0-9]+$ ]] || [[ $repo_choice -lt 1 ]] || [[ $repo_choice -gt ${#repos[@]} ]]; then
+            fatal "Invalid repo selection for slot ${slot}: ${repo_choice}"
+        fi
+
+        local selected_repo="${repos[$((repo_choice - 1))]}"
+        local selected_name="${repo_names[$((repo_choice - 1))]}"
+
+        # Reject duplicates — same repo twice makes no sense and would collide on
+        # worktree names / sessions / PR branches.
+        # Guard array expansion: under `set -u`, expanding an empty array on
+        # bash 3.2 (macOS default) triggers "unbound variable" on slot 0.
+        if [[ ${#REPO_ROOTS_ARRAY[@]} -gt 0 ]]; then
+            local prev
+            for prev in "${REPO_ROOTS_ARRAY[@]}"; do
+                if [[ "$prev" == "$selected_repo" ]]; then
+                    fatal "Repository '${selected_name}' already selected in a previous slot. Each slot must be a distinct repo."
+                fi
+            done
+        fi
+
+        if [[ ! -d "${selected_repo}/LLM coding agent documents" ]] && [[ ! -d "$(dirname "${selected_repo}")/LLM coding agent documents" ]]; then
+            fatal "${selected_name} does not have 'LLM coding agent documents/' (repo or parent workspace). Run the Creation Playbook first."
+        fi
+
+        success "Slot ${slot}: ${selected_name}"
+
+        # Branch selector for this repo
+        printf "\n"
+        printf "  ${C_BOLD}Recent branches for ${selected_name}:${C_RESET}\n"
+        printf "\n"
+
+        local branches=()
+        while IFS= read -r branch_name; do
+            branch_name=$(echo "$branch_name" | sed 's/^[[:space:]]*//' | sed 's/^\* //')
+            if [[ -n "$branch_name" ]]; then
+                branches+=("$branch_name")
+            fi
+        done < <(git -C "$selected_repo" branch --sort=-committerdate | head -15)
+
+        local b
+        for b in "${!branches[@]}"; do
+            local marker=""
+            local current
+            current=$(git -C "$selected_repo" symbolic-ref --short HEAD 2>/dev/null || true)
+            if [[ "${branches[$b]}" == "$current" ]]; then
+                marker=" ${C_GREEN}← current${C_RESET}"
+            fi
+            printf "  ${C_BOLD}${C_CYAN}%3d${C_RESET}  %-50s%b\n" "$((b + 1))" "${branches[$b]}" "$marker"
+        done
+
+        printf "\n"
+        printf "  ${C_BOLD}Select branch [1-${#branches[@]}] (Enter = current): ${C_RESET}"
+        local branch_choice
+        read -r branch_choice
+
+        local selected_branch=""
+        if [[ -z "$branch_choice" ]]; then
+            selected_branch=$(git -C "$selected_repo" symbolic-ref --short HEAD 2>/dev/null || echo "main")
+            info "Using current branch: ${selected_branch}"
+        elif [[ "$branch_choice" =~ ^[0-9]+$ ]] && [[ $branch_choice -ge 1 ]] && [[ $branch_choice -le ${#branches[@]} ]]; then
+            selected_branch="${branches[$((branch_choice - 1))]}"
+            git -C "$selected_repo" checkout "$selected_branch" 2>/dev/null || fatal "Failed to checkout ${selected_branch} in ${selected_name}"
+            success "Switched ${selected_name} to: ${selected_branch}"
+        else
+            fatal "Invalid branch selection: ${branch_choice}"
+        fi
+
+        REPO_ROOTS_ARRAY+=("$selected_repo")
+        REPO_NAMES_ARRAY+=("$selected_name")
+        BASE_BRANCHES_ARRAY+=("$selected_branch")
+        printf "\n"
+    done
+
+    # cd into repo[0] so init_run / check_prerequisites derive REPO_ROOT correctly
+    cd "${REPO_ROOTS_ARRAY[0]}"
+    BASE_BRANCH="${BASE_BRANCHES_ARRAY[0]}"
+
+    printf "\n"
+    printf "${C_DIM} ┃${C_RESET} ${C_BOLD}Multi-repo selection complete:${C_RESET}\n"
+    for i in "${!REPO_ROOTS_ARRAY[@]}"; do
+        printf "${C_DIM} ┃${C_RESET}   ${BULLET} [%d] %s (%s)\n" "$i" "${REPO_NAMES_ARRAY[$i]}" "${BASE_BRANCHES_ARRAY[$i]}"
+    done
+    printf "\n"
+}
+
+# Populate per-repo doc/agent arrays. check_prerequisites already set the
+# scalar values for repo[0] (REPO_ROOT, DOC_DIR, BRAIN_AGENT_FILE, etc.);
+# this function replicates the lookup for repo[1..N-1] and also back-fills
+# the arrays for slot 0 so the rest of the pipeline can use them uniformly.
+check_prerequisites_multi_repos() {
+    printf "\n"
+    separator
+    info "Validating multi-repo prerequisites..."
+    separator
+    printf "\n"
+
+    # Slot 0 is already populated by check_prerequisites — mirror into arrays
+    DOC_DIRS_ARRAY=("$DOC_DIR")
+    BRAIN_AGENT_FILES_ARRAY=("$BRAIN_AGENT_FILE")
+    CODING_AGENT_FILES_ARRAY=("$CODING_AGENT_FILE")
+    FULL_DOC_UPDATE_FILES_ARRAY=("$FULL_DOC_UPDATE_FILE")
+
+    local i
+    for ((i=1; i<REPO_COUNT; i++)); do
+        local repo="${REPO_ROOTS_ARRAY[$i]}"
+        local name="${REPO_NAMES_ARRAY[$i]}"
+
+        local doc_dir=""
+        # MULTI-REPO WORKSPACE ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
+        if compgen -G "${repo}/*Brain*Agent*.md" > /dev/null 2>&1; then
+            doc_dir="$repo"
+        elif [[ -d "${repo}/LLM coding agent documents" ]]; then
+            doc_dir="${repo}/LLM coding agent documents"
+        elif [[ -d "$(dirname "$repo")/LLM coding agent documents" ]]; then
+            doc_dir="$(dirname "$repo")/LLM coding agent documents"
+        else
+            fatal "${name}: 'LLM coding agent documents/' not found in repo or parent workspace — run the Creation Playbook first"
+        fi
+
+        local brain_file
+        brain_file=$(find "$doc_dir" -maxdepth 1 -name "*Brain*Agent*" -name "*.md" -print0 \
+            | tr '\0' '\n' | head -1)
+        if [[ -z "$brain_file" ]] || [[ ! -f "$brain_file" ]]; then
+            fatal "${name}: Brain Agent instruction file not found in ${doc_dir}"
+        fi
+
+        local coding_file
+        coding_file=$(find "$doc_dir" -maxdepth 1 -name "*Coding*Agent*" -name "*.md" -print0 \
+            | tr '\0' '\n' | head -1)
+        if [[ -z "$coding_file" ]] || [[ ! -f "$coding_file" ]]; then
+            fatal "${name}: Coding Agent instruction file not found in ${doc_dir}"
+        fi
+
+        local doc_update_file
+        doc_update_file=$(find "$doc_dir" -maxdepth 1 -name "*FULL*DOCUMENTATION*UPDATE*" -name "*.md" -print0 \
+            | tr '\0' '\n' | head -1 || true)
+
+        DOC_DIRS_ARRAY+=("$doc_dir")
+        BRAIN_AGENT_FILES_ARRAY+=("$brain_file")
+        CODING_AGENT_FILES_ARRAY+=("$coding_file")
+        FULL_DOC_UPDATE_FILES_ARRAY+=("${doc_update_file:-}")
+
+        success "${name}: agents found ($(basename "$brain_file"), $(basename "$coding_file"))"
+    done
+
+    printf "\n"
+    separator
+}
+
+# Create one worktree per repo. All worktrees share WORKTREE_BRANCH (the same
+# feature branch name across all repos) but each has its own base branch and
+# repo root. After this function:
+#   WORKTREE_DIRS_ARRAY[i]           = absolute path to worktree for repo i
+#   ORIGINAL_REPO_ROOTS_ARRAY[i]     = pre-worktree repo path (for cd-back)
+#   ORIGINAL_BRAIN_AGENT_FILES_ARRAY[i] = pre-rewrite brain agent path
+#   BRAIN_AGENT_FILES_ARRAY[i]       = rewritten-to-worktree brain agent path
+#   CODING_AGENT_FILES_ARRAY[i]      = rewritten-to-worktree coding agent path
+#   FULL_DOC_UPDATE_FILES_ARRAY[i]   = rewritten-to-worktree doc runbook path
+#   DOC_DIRS_ARRAY[i]                = worktree-relative doc dir
+#   CODING_SESSION_FILES_ARRAY[i]    = session file for repo i's coding agent
+# The scalar WORKTREE_DIR/REPO_ROOT/BRAIN_AGENT_FILE point at repo[0]'s worktree
+# so Brain-agent calls (which use those scalars) run in repo[0]'s context.
+create_worktrees_multi() {
+    separator
+    info "Creating ${REPO_COUNT} worktrees (shared branch: ${WORKTREE_BRANCH})..."
+    separator
+
+    if [[ -z "$WORKTREE_BRANCH" ]]; then
+        fatal "WORKTREE_BRANCH is empty — auto_name_branch() must run before create_worktrees_multi()"
+    fi
+
+    # Install a cleanup handler so that if ANY repo fails to produce a worktree
+    # (git worktree add fails, base ref missing, etc.), the worktrees already
+    # created for earlier repos are torn down before we fatal out. Otherwise
+    # the user would re-run, hit "branch already checked out" errors, and have
+    # to clean up manually.
+    CREATED_WORKTREES_FOR_CLEANUP=()
+    _cleanup_partial_worktrees() {
+        local idx
+        for idx in "${!CREATED_WORKTREES_FOR_CLEANUP[@]}"; do
+            local pair="${CREATED_WORKTREES_FOR_CLEANUP[$idx]}"
+            # Format: "repo|worktree_dir"
+            local repo_path="${pair%%|*}"
+            local wt_path="${pair##*|}"
+            if [[ -d "$wt_path" ]]; then
+                warn "Rolling back partial worktree: ${wt_path}"
+                git -C "$repo_path" worktree remove --force "$wt_path" 2>/dev/null || true
+            fi
+        done
+        CREATED_WORKTREES_FOR_CLEANUP=()
+    }
+    # ERR trap fires inside the function on any command failure (set -e).
+    # We do not re-raise — fatal calls already exit(1) after calling error.
+    trap '_cleanup_partial_worktrees' ERR
+
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local repo="${REPO_ROOTS_ARRAY[$i]}"
+        local name="${REPO_NAMES_ARRAY[$i]}"
+        local base="${BASE_BRANCHES_ARRAY[$i]}"
+        local doc_dir="${DOC_DIRS_ARRAY[$i]}"
+        local orig_brain="${BRAIN_AGENT_FILES_ARRAY[$i]}"
+
+        printf "\n"
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}── Worktree %d of %d: %s ──${C_RESET}\n" "$((i + 1))" "$REPO_COUNT" "$name"
+
+        local wt_dir
+        wt_dir="$(dirname "$repo")/$(basename "$repo")-wt-${WORKTREE_BRANCH}"
+
+        if git -C "$repo" worktree list --porcelain | grep -q "branch refs/heads/${WORKTREE_BRANCH}$"; then
+            fatal "${name}: branch '${WORKTREE_BRANCH}' is already checked out in another worktree"
+        fi
+
+        info "Branch: ${WORKTREE_BRANCH}"
+        info "Base: ${base}"
+        info "Directory: ${wt_dir}"
+
+        if ! git -C "$repo" rev-parse --verify "origin/${base}" &>/dev/null; then
+            warn "origin/${base} not found locally for ${name} — fetching"
+            git -C "$repo" fetch origin "$base" 2>&1 | while IFS= read -r line; do verbose "$line"; done
+            if ! git -C "$repo" rev-parse --verify "origin/${base}" &>/dev/null; then
+                fatal "${name}: cannot resolve origin/${base}. Verify branch and network access."
+            fi
+        fi
+
+        git -C "$repo" worktree add "$wt_dir" -b "$WORKTREE_BRANCH" "origin/${base}" 2>&1 \
+            | while IFS= read -r line; do verbose "$line"; done
+
+        if [[ ! -d "$wt_dir" ]]; then
+            fatal "${name}: worktree creation failed — directory does not exist: ${wt_dir}"
+        fi
+
+        # Register for cleanup-on-failure BEFORE any further work on this repo
+        # that could fail. Format "repo|worktree_dir" keeps the pair atomic so
+        # the cleanup handler can run 'git worktree remove' with the right cwd.
+        CREATED_WORKTREES_FOR_CLEANUP+=("${repo}|${wt_dir}")
+
+        success "Worktree created: ${wt_dir}"
+
+        # Save originals
+        ORIGINAL_REPO_ROOTS_ARRAY+=("$repo")
+        ORIGINAL_BRAIN_AGENT_FILES_ARRAY+=("$orig_brain")
+        WORKTREE_DIRS_ARRAY+=("$wt_dir")
+
+        # Rewrite agent instruction file paths inside the worktree's doc dir
+        # MULTI-REPO WORKSPACE ADAPTATION: Brain-file marker + workspace-level shared docs fallback;
+        # never rewrite the shared folder (it is canonical, outside the worktree).
+        local wt_doc_dir=""
+        if compgen -G "${wt_dir}/*Brain*Agent*.md" > /dev/null 2>&1; then
+            wt_doc_dir="$wt_dir"
+        elif [[ -d "${wt_dir}/LLM coding agent documents" ]]; then
+            wt_doc_dir="${wt_dir}/LLM coding agent documents"
+        elif [[ -d "$(dirname "$wt_dir")/LLM coding agent documents" ]]; then
+            wt_doc_dir="$(dirname "$wt_dir")/LLM coding agent documents"
+        else
+            fatal "${name}: doc dir not found in worktree ${wt_dir} or parent workspace"
+        fi
+
+        if [[ "$wt_doc_dir" == "${wt_dir}"* ]]; then
+            local md_file
+            for md_file in "$wt_doc_dir"/*.md; do
+                [[ -f "$md_file" ]] && sed -i '' "s|${repo}/|${wt_dir}/|g" "$md_file"
+            done
+            local jsonl_file
+            for jsonl_file in "$wt_doc_dir"/*.jsonl; do
+                [[ -f "$jsonl_file" ]] && sed -i '' "s|${repo}/|${wt_dir}/|g" "$jsonl_file"
+            done
+        else
+            info "${name}: shared workspace-level agent documents — skipping worktree path rewrite"
+        fi
+
+        # Re-derive agent files in worktree (post-rewrite)
+        local wt_brain
+        wt_brain=$(find "$wt_doc_dir" -maxdepth 1 -name "*Brain*Agent*" -name "*.md" -print0 | tr '\0' '\n' | head -1)
+        local wt_coding
+        wt_coding=$(find "$wt_doc_dir" -maxdepth 1 -name "*Coding*Agent*" -name "*.md" -print0 | tr '\0' '\n' | head -1)
+        local wt_docup
+        wt_docup=$(find "$wt_doc_dir" -maxdepth 1 -name "*FULL*DOCUMENTATION*UPDATE*" -name "*.md" -print0 | tr '\0' '\n' | head -1 || true)
+
+        # Replace the array slot with the worktree-relative version so later
+        # stages pass the right (rewritten) file as --append-system-prompt-file.
+        DOC_DIRS_ARRAY[$i]="$wt_doc_dir"
+        BRAIN_AGENT_FILES_ARRAY[$i]="$wt_brain"
+        CODING_AGENT_FILES_ARRAY[$i]="$wt_coding"
+        FULL_DOC_UPDATE_FILES_ARRAY[$i]="${wt_docup:-}"
+
+        # Per-repo coding session (lives under RUN_DIR/sessions/)
+        CODING_SESSION_FILES_ARRAY+=("${RUN_DIR}/sessions/coding-repo-${i}.session")
+
+        success "Agent instruction paths rewritten for ${name}"
+    done
+
+    # Scalar globals point at repo[0] so Brain agent (which uses the scalars)
+    # operates from repo[0]'s worktree.
+    ORIGINAL_REPO_ROOT="${ORIGINAL_REPO_ROOTS_ARRAY[0]}"
+    ORIGINAL_BRAIN_AGENT_FILE="${ORIGINAL_BRAIN_AGENT_FILES_ARRAY[0]}"
+    WORKTREE_DIR="${WORKTREE_DIRS_ARRAY[0]}"
+    REPO_ROOT="$WORKTREE_DIR"
+    DOC_DIR="${DOC_DIRS_ARRAY[0]}"
+    BRAIN_AGENT_FILE="${BRAIN_AGENT_FILES_ARRAY[0]}"
+    CODING_AGENT_FILE="${CODING_AGENT_FILES_ARRAY[0]}"
+    FULL_DOC_UPDATE_FILE="${FULL_DOC_UPDATE_FILES_ARRAY[0]}"
+    BASE_BRANCH="${BASE_BRANCHES_ARRAY[0]}"
+
+    cd "$WORKTREE_DIR"
+
+    # All worktrees created successfully — release the cleanup trap so a later
+    # unrelated error does not tear down the valid worktrees we just built.
+    trap - ERR
+    CREATED_WORKTREES_FOR_CLEANUP=()
+
+    printf "\n"
+    printf "  ${C_BOLD}${C_YELLOW}┌──────────────────────────────────────────────────────────────────┐${C_RESET}\n"
+    printf "  ${C_BOLD}${C_YELLOW}│  Multi-repo worktrees active (${REPO_COUNT} repos, branch ${WORKTREE_BRANCH}) │${C_RESET}\n"
+    printf "  ${C_BOLD}${C_YELLOW}└──────────────────────────────────────────────────────────────────┘${C_RESET}\n"
+    printf "\n"
+}
+
+# Parse a single file that contains N sections delimited by
+#     ===== SECTION FOR REPO <idx>: <repo_name> =====
+#     ...content...
+#     ===== END SECTIONS =====
+# and split into output_dir/prefix_repo_<idx>.md
+#
+# The `END SECTIONS` marker is optional — content after the last section header
+# is written until EOF. Awk used for portability (no bash 4 mapfile needed).
+split_markers_to_files() {
+    local input_file="$1"
+    local out_dir="$2"
+    local prefix="$3"
+
+    mkdir -p "$out_dir"
+
+    # Initialize empty files for all expected repo indices so missing sections
+    # are caught by downstream checks rather than silently treated as "skip".
+    local k
+    for ((k=0; k<REPO_COUNT; k++)); do
+        : > "${out_dir}/${prefix}_repo_${k}.md"
+    done
+
+    awk -v out_dir="$out_dir" -v prefix="$prefix" '
+    /^=====[[:space:]]*SECTION[[:space:]]+FOR[[:space:]]+REPO[[:space:]]+[0-9]+/ {
+        match($0, /REPO[[:space:]]+[0-9]+/)
+        header = substr($0, RSTART, RLENGTH)
+        gsub(/[^0-9]/, "", header)
+        current_idx = header
+        current_file = out_dir "/" prefix "_repo_" current_idx ".md"
+        # Truncate on first entry
+        printf "" > current_file
+        next
+    }
+    /^=====[[:space:]]*END[[:space:]]+SECTIONS/ {
+        current_idx = ""
+        current_file = ""
+        next
+    }
+    current_file != "" {
+        print >> current_file
+    }
+    ' "$input_file"
+
+    # Report which repos got content
+    local idx
+    for ((idx=0; idx<REPO_COUNT; idx++)); do
+        local f="${out_dir}/${prefix}_repo_${idx}.md"
+        if [[ ! -s "$f" ]]; then
+            warn "Repo ${idx} (${REPO_NAMES_ARRAY[$idx]}): no '${prefix}' section found in Brain output"
+        fi
+    done
+}
+
+# Human-readable summary string listing all repo roots for prompt context
+multi_repo_summary() {
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        printf -- "- Repo %d: %s\n" "$i" "${REPO_NAMES_ARRAY[$i]}"
+        printf -- "  - Worktree path (read/edit here): %s\n" "${WORKTREE_DIRS_ARRAY[$i]}"
+        printf -- "  - Base branch (PR target): %s\n" "${BASE_BRANCHES_ARRAY[$i]}"
+    done
+}
+
+# ─── STAGE 1 (MULTI): Brain Agent generates N CCRs ─────────────────────────
+run_multi_stage_1() {
+    local phase_start
+    phase_start=$(date +%s)
+    stage_header "1" "6" "BRAIN AGENT — MODE 1 (PLANNING, ${REPO_COUNT} REPOS)" "Original Thinker" "$C_BG_BLUE"
+
+    subtask "Initializing Brain Agent (instructions from repo[0]: ${REPO_NAMES_ARRAY[0]})"
+    info "Agent instructions: $(basename "$BRAIN_AGENT_FILE")"
+    initialize_agent "brain" "$BRAIN_AGENT_FILE" "$BRAIN_SESSION_FILE"
+    divider
+
+    local repo_summary
+    repo_summary=$(multi_repo_summary)
+
+    # ── 1b: Clarify loop (same structure as single-repo, but task mentions all repos)
+    if [[ $CLARIFY_ROUNDS -gt 0 ]]; then
+        local clarify_round=0
+        local understanding_confirmed=false
+
+        while [[ $clarify_round -lt $CLARIFY_ROUNDS ]] && [[ "$understanding_confirmed" == "false" ]]; do
+            clarify_round=$((clarify_round + 1))
+            subtask "Multi-repo understanding checkpoint (round ${clarify_round}/${CLARIFY_ROUNDS})"
+
+            local clarify_prompt_file="${RUN_DIR}/prompts/phase1_clarify_${clarify_round}.md"
+            local clarify_output="${RUN_DIR}/artifacts/phase1_clarify_${clarify_round}.md"
+
+            if [[ $clarify_round -eq 1 ]]; then
+                {
+                    echo "You are operating in MODE 1 (Planning) — MULTI-REPOSITORY TASK."
+                    echo ""
+                    echo "SCOPE: This single task spans ${REPO_COUNT} repositories. You must plan the"
+                    echo "changes holistically — a change in one repo may require a matching change in"
+                    echo "another for the integration to work. Treat the repos as one logical system."
+                    echo ""
+                    echo "REPOSITORIES IN SCOPE:"
+                    printf '%s\n' "$repo_summary"
+                    echo ""
+                    echo "BUSINESS PROBLEM / CHANGE REQUEST:"
+                    echo "---"
+                    printf '%s\n' "$TASK_DESCRIPTION"
+                    echo "---"
+                    echo ""
+                    echo "Before generating the CCRs, explore ALL ${REPO_COUNT} worktrees (use Read / Glob / Grep"
+                    echo "on the absolute paths above) and lay out your understanding:"
+                    echo "- What the end-to-end business goal is"
+                    echo "- Which repo owns which part of the change and why that split"
+                    echo "- The integration contract / shared data between repos (field names, event names, endpoints, DB tables)"
+                    echo "- Per repo: files/modules expected to change, key assumptions, uncertainties, risks"
+                    echo "- Overall risks of the cross-repo rollout (deploy order, backwards-compat, feature flags)"
+                    echo ""
+                    echo "Be explicit and specific. The user will confirm, refine, or correct."
+                } > "$clarify_prompt_file"
+            fi
+
+            invoke_agent \
+                "$BRAIN_SESSION_FILE" \
+                "$BRAIN_AGENT_FILE" \
+                "$clarify_output" \
+                "Brain Agent Multi-Repo Understanding (round ${clarify_round})" \
+                "$clarify_prompt_file"
+
+            divider
+            printf "${C_DIM} ┃${C_RESET}\n"
+            printf "${C_DIM} ┃${C_RESET} ${C_BOLD}${C_YELLOW}── Brain Agent's Multi-Repo Understanding ──${C_RESET}\n"
+            cat "$clarify_output" | while IFS= read -r display_line; do
+                printf "${C_DIM} ┃${C_RESET}   %s\n" "$display_line"
+            done
+            printf "${C_DIM} ┃${C_RESET}\n"
+
+            local feedback_file
+            feedback_file=$(mktemp "${TMPDIR:-/tmp}/orchestrate-feedback-XXXXXX")
+            {
+                echo "# ═══════════════════════════════════════════════════════════════"
+                echo "# BRAIN AGENT'S MULTI-REPO UNDERSTANDING (round ${clarify_round})"
+                echo "# ═══════════════════════════════════════════════════════════════"
+                echo "#"
+                sed 's/^/# /' "$clarify_output"
+                echo "#"
+                echo "# ═══════════════════════════════════════════════════════════════"
+                echo "# To ACCEPT as-is: save this file empty (or leave only # lines)."
+                echo "# To provide feedback: write below, then save and close."
+                echo "# ═══════════════════════════════════════════════════════════════"
+                echo ""
+            } > "$feedback_file"
+
+            info "Opening editor — confirm, refine, or correct (save empty to accept)..."
+            edit_file "$feedback_file"
+
+            local feedback
+            feedback=$(grep -v '^#' "$feedback_file" || true)
+            feedback=$(printf '%s' "$feedback" | awk 'NF{p=1; for(i=1;i<=b;i++) print ""; b=0; print; next} p{b++}')
+            rm -f "$feedback_file"
+
+            if [[ -z "$(printf '%s' "$feedback" | tr -d '[:space:]')" ]]; then
+                understanding_confirmed=true
+                success "Multi-repo understanding confirmed — proceeding to CCR generation"
+            else
+                echo "$feedback" > "${RUN_DIR}/artifacts/user_feedback_round_${clarify_round}.md"
+                info "User feedback received ($(echo "$feedback" | wc -w | tr -d ' ') words) — refining"
+                local next_round=$((clarify_round + 1))
+                local next_prompt_file="${RUN_DIR}/prompts/phase1_clarify_${next_round}.md"
+                {
+                    echo "The user has reviewed your multi-repo understanding and provided this feedback:"
+                    echo ""
+                    echo "---"
+                    printf '%s\n' "$feedback"
+                    echo "---"
+                    echo ""
+                    echo "Update your understanding. Present your revised plan clearly, per repo,"
+                    echo "and call out any integration contract changes the feedback implies."
+                } > "$next_prompt_file"
+                clarify_prompt_file="$next_prompt_file"
+            fi
+        done
+
+        if [[ "$understanding_confirmed" == "false" ]] && [[ $CLARIFY_ROUNDS -gt 0 ]]; then
+            info "Clarify rounds exhausted — CCR prompt will carry final feedback to Brain"
+        fi
+        divider
+    fi
+
+    # ── 1c: Generate N CCRs (single Brain output, marker-delimited)
+    subtask "Brain Agent generating ${REPO_COUNT} CCRs (one per repo)"
+
+    local ccr_prompt_file="${RUN_DIR}/prompts/phase1_ccr_multi.md"
+    local ccr_output="${RUN_DIR}/artifacts/ccrs_combined.md"
+
+    local unconsumed_feedback_file=""
+    if [[ "${understanding_confirmed:-false}" == "false" ]] && [[ -n "${clarify_round:-}" ]]; then
+        local _last="${RUN_DIR}/artifacts/user_feedback_round_${clarify_round}.md"
+        if [[ -f "$_last" ]] && [[ -s "$_last" ]]; then
+            unconsumed_feedback_file="$_last"
+            warn "Unconsumed feedback from clarify round ${clarify_round} — injecting into CCR prompt"
+        fi
+    fi
+
+    {
+        echo "You are operating in MODE 1 (Planning) — MULTI-REPOSITORY TASK."
+        echo ""
+        echo "You have already explored the ${REPO_COUNT} repos and presented your understanding."
+        echo ""
+        if [[ -n "$unconsumed_feedback_file" ]]; then
+            echo "CRITICAL — FINAL USER FEEDBACK (not yet in your conversation history):"
+            echo ""
+            echo "<user_feedback_final_round>"
+            cat "$unconsumed_feedback_file"
+            echo "</user_feedback_final_round>"
+            echo ""
+            echo "Integrate this feedback. If it conflicts with earlier conclusions, the feedback wins."
+            echo ""
+        else
+            echo "The user has confirmed your latest understanding."
+            echo ""
+        fi
+
+        echo "REPOSITORIES IN SCOPE:"
+        printf '%s\n' "$repo_summary"
+        echo ""
+        echo "Now produce ${REPO_COUNT} COMPLETE Code Change Request Forms — ONE PER REPOSITORY."
+        echo ""
+        echo "Each CCR must be SELF-CONTAINED and actionable by a Coding Agent that will only see"
+        echo "its own repo's CCR (not the others). That means:"
+        echo "- Each CCR must specify the integration contract (shared field names, endpoint paths,"
+        echo "  event schemas, DB columns) that the OTHER repos will produce/consume."
+        echo "- Do not say 'see the other CCR' — duplicate the contract spec into each side."
+        echo "- Each CCR must include per-repo file lists, testing tiers, rollout order notes."
+        echo ""
+        echo "FORMAT — use these EXACT marker lines (the orchestrator splits on them):"
+        echo ""
+        echo "## My Understanding (Multi-Repo)"
+        echo "[cross-repo business goal, integration contract, rollout order, risks]"
+        echo ""
+        local i
+        for ((i=0; i<REPO_COUNT; i++)); do
+            echo "===== SECTION FOR REPO ${i}: ${REPO_NAMES_ARRAY[$i]} ====="
+            echo "[Complete CCR for ${REPO_NAMES_ARRAY[$i]} — Header + Sections 1-8, self-contained]"
+            echo ""
+        done
+        echo "===== END SECTIONS ====="
+        echo ""
+        echo "CRITICAL DELIVERY INSTRUCTION: Your FINAL message must contain the complete output in"
+        echo "the exact format above. The orchestrator extracts only the last message and splits on"
+        echo "the marker lines. If you summarize or split across messages, the CCRs are LOST."
+        echo "Do NOT run tool calls after emitting the CCRs — the CCRs must be the last thing you write."
+    } > "$ccr_prompt_file"
+
+    invoke_agent \
+        "$BRAIN_SESSION_FILE" \
+        "$BRAIN_AGENT_FILE" \
+        "$ccr_output" \
+        "Brain Agent Mode 1 (Multi-Repo CCR Generation)" \
+        "$ccr_prompt_file"
+
+    # Split the combined output into per-repo files
+    split_markers_to_files "$ccr_output" "${RUN_DIR}/artifacts" "ccr"
+
+    # Sanity check — every repo must have a non-empty CCR
+    local missing=0
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local f="${RUN_DIR}/artifacts/ccr_repo_${i}.md"
+        if [[ ! -s "$f" ]]; then
+            warn "CCR missing for repo ${i} (${REPO_NAMES_ARRAY[$i]}) — Brain did not emit its section"
+            missing=$((missing + 1))
+        else
+            local w
+            w=$(wc -w < "$f" | tr -d ' ')
+            success "CCR for ${REPO_NAMES_ARRAY[$i]}: ${w} words"
+        fi
+    done
+
+    if [[ $missing -gt 0 ]]; then
+        warn "Attempting CCR regeneration — ${missing} repo section(s) missing"
+        local regen_prompt="${RUN_DIR}/prompts/phase1_ccr_multi_regen.md"
+        {
+            echo "Your previous response did not include a complete CCR for every repo (${missing} missing)."
+            echo ""
+            echo "Please reproduce the FULL output using the EXACT marker format:"
+            echo ""
+            for ((i=0; i<REPO_COUNT; i++)); do
+                echo "===== SECTION FOR REPO ${i}: ${REPO_NAMES_ARRAY[$i]} ====="
+                echo "[complete CCR here]"
+                echo ""
+            done
+            echo "===== END SECTIONS ====="
+            echo ""
+            echo "This message must be self-contained — pretend the reader has seen nothing before."
+        } > "$regen_prompt"
+
+        invoke_agent \
+            "$BRAIN_SESSION_FILE" \
+            "$BRAIN_AGENT_FILE" \
+            "$ccr_output" \
+            "Brain Agent (Multi-Repo CCR Regeneration)" \
+            "$regen_prompt"
+
+        split_markers_to_files "$ccr_output" "${RUN_DIR}/artifacts" "ccr"
+
+        # Re-check after regeneration. A still-missing CCR means Brain could
+        # not produce a full plan — fatal rather than continue with half a
+        # plan, because Stage 2/3/4/5/6 all iterate every repo and would
+        # produce nonsense artifacts (reviews of empty implementations, PRs
+        # with no code) that are harder to diagnose than a clean abort.
+        local still_missing=0
+        local still_missing_names=""
+        local j
+        for ((j=0; j<REPO_COUNT; j++)); do
+            if [[ ! -s "${RUN_DIR}/artifacts/ccr_repo_${j}.md" ]]; then
+                still_missing=$((still_missing + 1))
+                still_missing_names+="${REPO_NAMES_ARRAY[$j]} "
+            fi
+        done
+        if [[ $still_missing -gt 0 ]]; then
+            fatal "Brain Agent did not produce CCRs for: ${still_missing_names}after regeneration retry.
+       Combined output: ${ccr_output}
+       The multi-repo plan is incomplete — aborting to avoid generating garbage artifacts downstream.
+       Fix the Brain's output manually or re-run with a clearer task description."
+        fi
+    fi
+
+    # ── 1d: User checkpoint (show all CCRs, allow edits) ────────────────
+    # Same skip logic as the single-repo Stage 1 checkpoint — opt-out via
+    # --skip-ccr-review or the wizard prompt.
+    if [[ "$SKIP_CCR_REVIEW" == "true" ]]; then
+        info "CCR review skipped (user opted out during setup wizard / --skip-ccr-review)"
+    elif [[ $CLARIFY_ROUNDS -gt 0 ]]; then
+        divider
+        printf "${C_DIM} ┃${C_RESET}\n"
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}${C_YELLOW}── CCR Previews (first 15 lines each) ──${C_RESET}\n"
+        for ((i=0; i<REPO_COUNT; i++)); do
+            local f="${RUN_DIR}/artifacts/ccr_repo_${i}.md"
+            printf "${C_DIM} ┃${C_RESET} ${C_BOLD}Repo ${i} (${REPO_NAMES_ARRAY[$i]}):${C_RESET}\n"
+            if [[ -s "$f" ]]; then
+                head -15 "$f" | while IFS= read -r line; do
+                    printf "${C_DIM} ┃${C_RESET}   %s\n" "$line"
+                done
+            else
+                printf "${C_DIM} ┃${C_RESET}   ${C_RED}(empty — regeneration still failed)${C_RESET}\n"
+            fi
+            printf "${C_DIM} ┃${C_RESET}\n"
+        done
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}Review the CCRs before implementation.${C_RESET}\n"
+        printf "${C_DIM} ┃${C_RESET}   ${C_CYAN}Enter${C_RESET}  ${ARROW} Proceed\n"
+        printf "${C_DIM} ┃${C_RESET}   ${C_CYAN}v N${C_RESET}    ${ARROW} View full CCR for repo N\n"
+        printf "${C_DIM} ┃${C_RESET}   ${C_CYAN}e N${C_RESET}    ${ARROW} Edit CCR for repo N\n"
+        printf "${C_DIM} ┃${C_RESET}   ${C_CYAN}q${C_RESET}      ${ARROW} Abort\n"
+        printf "${C_DIM} ┃${C_RESET}\n"
+
+        while true; do
+            printf "${C_DIM} ┃${C_RESET}   ${C_BOLD}>${C_RESET} "
+            local choice
+            read -r choice
+            case "$(echo "$choice" | tr '[:upper:]' '[:lower:]')" in
+                v\ [0-9]*)
+                    local n="${choice#v }"; n="${n// /}"
+                    if [[ "$n" =~ ^[0-9]+$ ]] && [[ $n -lt $REPO_COUNT ]]; then
+                        ${PAGER:-less} "${RUN_DIR}/artifacts/ccr_repo_${n}.md"
+                    else
+                        warn "Invalid repo index: ${n}"
+                    fi
+                    ;;
+                e\ [0-9]*)
+                    local n="${choice#e }"; n="${n// /}"
+                    if [[ "$n" =~ ^[0-9]+$ ]] && [[ $n -lt $REPO_COUNT ]]; then
+                        edit_file "${RUN_DIR}/artifacts/ccr_repo_${n}.md"
+                        info "CCR for repo ${n} updated"
+                    else
+                        warn "Invalid repo index: ${n}"
+                    fi
+                    ;;
+                q) fatal "Aborted by user at multi-repo CCR review" ;;
+                *) break ;;
+            esac
+        done
+    else
+        info "CCR review skipped (--clarify-rounds 0)"
+    fi
+
+    success "All ${REPO_COUNT} CCRs approved for implementation"
+    stage_complete "1" "$phase_start" "$ccr_output"
+}
+
+# ─── STAGE 2 (MULTI): Sequential coding — one agent per repo ───────────────
+run_multi_stage_2() {
+    local phase_start
+    phase_start=$(date +%s)
+    stage_header "2" "6" "CODING AGENTS — SEQUENTIAL IMPLEMENTATION (${REPO_COUNT} REPOS)" "Coding Agents" "$C_BG_GREEN"
+
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local repo_name="${REPO_NAMES_ARRAY[$i]}"
+        local wt="${WORKTREE_DIRS_ARRAY[$i]}"
+        local coding_agent_file="${CODING_AGENT_FILES_ARRAY[$i]}"
+        local coding_session="${CODING_SESSION_FILES_ARRAY[$i]}"
+        local ccr_file="${RUN_DIR}/artifacts/ccr_repo_${i}.md"
+
+        printf "\n"
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}${C_GREEN}── Repo %d/%d: %s ──${C_RESET}\n" "$((i + 1))" "$REPO_COUNT" "$repo_name"
+
+        if [[ ! -s "$ccr_file" ]]; then
+            warn "Skipping ${repo_name}: CCR is empty (Brain did not produce a section)"
+            continue
+        fi
+
+        subtask "Initializing Coding Agent for ${repo_name}"
+        info "Agent instructions: $(basename "$coding_agent_file")"
+
+        # Each coding agent runs from its own worktree so sessions + file edits
+        # stay isolated per repo.
+        cd "$wt"
+        initialize_agent "coding" "$coding_agent_file" "$coding_session" "coding-repo-${i}"
+
+        divider
+        subtask "Coding Agent implementing CCR for ${repo_name}"
+
+        local impl_prompt_file="${RUN_DIR}/prompts/phase2_implement_repo_${i}.md"
+        local impl_output="${RUN_DIR}/artifacts/implementation_report_repo_${i}.md"
+
+        {
+            echo "IMPORTANT CONTEXT: Multi-repo orchestration — ${REPO_COUNT} repositories, this is repo ${i} (${repo_name})."
+            echo ""
+            echo "You are working on ONLY THIS REPO (${repo_name}). Other repos are implemented by separate"
+            echo "Coding Agents. Your CCR below contains the integration contract (shared field names, endpoints, etc.)"
+            echo "that matches what the other repos' agents are implementing — trust the CCR, do not invent your own contract."
+            echo ""
+            echo "<original_business_problem>"
+            cat "${RUN_DIR}/artifacts/business_problem.md"
+            echo "</original_business_problem>"
+            echo ""
+            local cf
+            for cf in "${RUN_DIR}/artifacts/phase1_clarify_"*.md; do
+                if [[ -f "$cf" ]]; then
+                    echo "<brain_agent_understanding_$(basename "$cf" .md)>"
+                    cat "$cf"
+                    echo "</brain_agent_understanding_$(basename "$cf" .md)>"
+                    echo ""
+                fi
+            done
+            local fb
+            for fb in "${RUN_DIR}/artifacts/user_feedback_round_"*.md; do
+                if [[ -f "$fb" ]]; then
+                    echo "<user_clarification_$(basename "$fb" .md)>"
+                    cat "$fb"
+                    echo "</user_clarification_$(basename "$fb" .md)>"
+                    echo ""
+                fi
+            done
+            echo "YOUR CCR (for ${repo_name} only):"
+            echo ""
+            echo "<code_change_request>"
+            cat "$ccr_file"
+            echo "</code_change_request>"
+            echo ""
+            echo "For context, here is the list of other repos involved (read-only to you — do NOT edit):"
+            local j
+            for ((j=0; j<REPO_COUNT; j++)); do
+                if [[ $j -ne $i ]]; then
+                    echo "  - ${REPO_NAMES_ARRAY[$j]}: ${WORKTREE_DIRS_ARRAY[$j]} (CCR: ${RUN_DIR}/artifacts/ccr_repo_${j}.md)"
+                fi
+            done
+            echo ""
+            echo "You MAY Read files from the other worktrees to understand the integration contract,"
+            echo "but you MUST NOT Edit, Write, or modify ANY files outside your own worktree (${wt})."
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════════╗"
+            echo "║  ORCHESTRATION OVERRIDE — READ THIS FIRST                       ║"
+            echo "║                                                                 ║"
+            echo "║  Your instruction file tells you to create branches, commit,    ║"
+            echo "║  push, and open PRs. THOSE RULES ARE SUSPENDED for this run.    ║"
+            echo "║  You are running inside a pre-created git worktree at:          ║"
+            printf "║    %-62s║\n" "$wt"
+            echo "║  The branch '${WORKTREE_BRANCH}' already exists and is checked out."
+            echo "║                                                                 ║"
+            echo "║  HARD GATE: Do NOT run 'git commit' at any point.               ║"
+            echo "║  Do NOT run 'git push', 'git checkout -b', or 'gh pr create'.   ║"
+            echo "║  Do NOT run 'git checkout', 'git switch', or 'git branch'.      ║"
+            echo "║  ONLY use 'git add <file>' to stage changes in YOUR worktree.   ║"
+            echo "║                                                                 ║"
+            echo "║  Do NOT modify files in other repos' worktrees (read-only).     ║"
+            echo "╚══════════════════════════════════════════════════════════════════╝"
+            echo ""
+            echo "Now implement the CCR fully, following the Agentic IDE Contract and all Coding Principles."
+            echo "Run pre-commit hooks. Update SERVICE_DOCUMENTATION.md / TEST_DOCUMENTATION.md."
+            echo "Stage all changes with 'git add <file>' but do NOT commit."
+            echo ""
+            echo "End your response with the completed Code Change Request Form reflecting what you actually did."
+        } > "$impl_prompt_file"
+
+        invoke_agent \
+            "$coding_session" \
+            "$coding_agent_file" \
+            "$impl_output" \
+            "Coding Agent Implementation (${repo_name})" \
+            "$impl_prompt_file"
+
+        local impl_lines
+        impl_lines=$(wc -l < "$impl_output" | tr -d ' ')
+        success "${repo_name} implementation: ${impl_lines} lines"
+
+        # Best-effort subtractive reduction for this repo, before doc update
+        run_reduction_pass_multi "phase2-post-impl-repo-${i}" "$i"
+
+        # Best-effort inline doc update for this repo
+        run_doc_update_pass_multi "phase2-post-impl-repo-${i}" "$i"
+    done
+
+    cd "$WORKTREE_DIR"  # back to repo[0] for Brain-agent calls
+    stage_complete "2" "$phase_start"
+}
+
+# Doc-update pass targeting a specific repo (replicates run_doc_update_pass
+# but uses per-repo session / agent file / runbook / worktree).
+run_doc_update_pass_multi() {
+    local phase_label="${1:-doc-update}"
+    local repo_idx="$2"
+
+    local doc_runbook="${FULL_DOC_UPDATE_FILES_ARRAY[$repo_idx]}"
+    if [[ -z "$doc_runbook" ]] || [[ ! -f "$doc_runbook" ]]; then
+        verbose "Repo ${repo_idx}: doc runbook not found — skipping inline doc update (${phase_label})"
+        return 0
+    fi
+
+    local wt="${WORKTREE_DIRS_ARRAY[$repo_idx]}"
+    local coding_agent_file="${CODING_AGENT_FILES_ARRAY[$repo_idx]}"
+    local coding_session="${CODING_SESSION_FILES_ARRAY[$repo_idx]}"
+
+    subtask "Coding Agent doc update (${phase_label}) for ${REPO_NAMES_ARRAY[$repo_idx]}"
+
+    local doc_prompt="${RUN_DIR}/prompts/${phase_label}_docs.md"
+    local doc_output="${RUN_DIR}/artifacts/${phase_label}_docs.md"
+
+    {
+        echo "REMINDER (ORCHESTRATION OVERRIDE): Your instruction file's git branching/commit/push/PR rules are SUSPENDED. Do NOT run 'git commit', 'git push', 'git checkout -b', or 'gh pr create'. Stage changes with 'git add' only. You are in a pre-created worktree."
+        echo ""
+        echo "Execute the Full Documentation Update Runbook for this repo:"
+        echo ""
+        echo "<full_documentation_update_runbook>"
+        cat "$doc_runbook"
+        echo "</full_documentation_update_runbook>"
+        echo ""
+        echo "Execute EVERY step in order, staging results with 'git add' only."
+        echo ""
+        echo "PR BODY — canonical source of truth: PR_DESCRIPTION_TEMPLATE.md ships alongside the orchestrator; Stage 6 (step 6b2) injects it verbatim. It SUPERSEDES any repo .github/pull_request_template.md and any 'PR Description Standard' in your instruction file (older/looser, drift). Do not hand-roll a PR body in this turn — runbook step 6 is the dedicated Stage-6 step's job."
+        echo "Do NOT mark any mandatory output 'N/A'. If blocked, write 'BLOCKED: <named artifact + reason>' — a bare N/A on a mandatory output is itself a finding."
+    } > "$doc_prompt"
+
+    cd "$wt"
+    invoke_agent \
+        "$coding_session" \
+        "$coding_agent_file" \
+        "$doc_output" \
+        "Coding Agent Doc Update ${REPO_NAMES_ARRAY[$repo_idx]} (${phase_label})" \
+        "$doc_prompt"
+    cd "$WORKTREE_DIR"
+
+    local doc_words
+    doc_words=$(wc -w < "$doc_output" | tr -d ' ')
+    success "Doc update ${REPO_NAMES_ARRAY[$repo_idx]}: ${doc_words} words"
+}
+
+# ─── REDUCTION PASS (MULTI): per-repo subtractive turn before doc update ───
+# Replicates run_reduction_pass but uses per-repo session / agent file /
+# worktree, and reminds the agent to stay inside its own worktree.
+run_reduction_pass_multi() {
+    local phase_label="${1:-reduction}"
+    local repo_idx="$2"
+
+    local wt="${WORKTREE_DIRS_ARRAY[$repo_idx]}"
+    local coding_agent_file="${CODING_AGENT_FILES_ARRAY[$repo_idx]}"
+    local coding_session="${CODING_SESSION_FILES_ARRAY[$repo_idx]}"
+
+    subtask "Coding Agent subtractive reduction (${phase_label}) for ${REPO_NAMES_ARRAY[$repo_idx]}"
+
+    local reduce_prompt="${RUN_DIR}/prompts/${phase_label}_reduce.md"
+    local reduce_output="${RUN_DIR}/artifacts/${phase_label}_reduce.md"
+
+    {
+        echo "REMINDER (ORCHESTRATION OVERRIDE): Your instruction file's git branching/commit/push/PR rules are SUSPENDED. Do NOT run 'git commit', 'git push', 'git checkout -b', or 'gh pr create'. Stage changes with 'git add' only. You are in a pre-created worktree."
+        echo ""
+        echo "Work ONLY inside your own worktree (${wt}) for ${REPO_NAMES_ARRAY[$repo_idx]}. Do NOT modify files in any other repo's worktree."
+        echo ""
+        echo "SUBTRACTIVE REDUCTION PASS — your implementation for this repo is complete and tests are green. This turn has exactly ONE job: cut unnecessary RUNTIME CODE and complexity in THIS repo without changing what it does. The target is executed code, NOT raw line count — comments and blank lines do not count and are left alone."
+        echo ""
+        echo "This is Principle 0 (Minimum Entropy) enforced as a dedicated step: every line of code is a liability, and the best diff is net-negative. You just wrote this code; now read it back as a hostile reviewer whose only goal is justified deletion."
+        echo ""
+        echo "HARD CONSTRAINTS — a reduction that violates ANY of these is a regression; revert it:"
+        echo "1. ZERO behavior change. No change to output, return values, API/response shape, side effects, DB writes, the cross-repo integration contract, or business outcome. Same inputs MUST yield the same outputs."
+        echo "2. Readable, usable variable and function names STAY. This is NOT code golf. Do not shorten names, collapse clear logic into dense one-liners, merge functions that should stay separate, or trade clarity for line count. Clarity outranks brevity — and in security, concurrency, migration, financial, or parsing code, clarity wins outright."
+        echo "3. TEST-GATED. Before reducing: run the full validation/test suite (pre-commit hooks + tests) and confirm GREEN — that is your baseline. After each reduction: re-run the SAME suite. If anything regresses or behavior shifts, REVERT that specific reduction and keep the working version. Never leave a reduction you did not re-verify green."
+        echo ""
+        echo "4. COMMENTS, DOCSTRINGS, BLANK LINES, AND LOGGING ARE NOT LINES OF CODE. They do not count toward any reduction and are PRESERVED — never remove a comment, docstring, or log line to lower a count. A comment is a useful pointer for the next reader or agent; the default is KEEP. The ONLY removable comment is one that is extremely redundant (it restates the immediately adjacent code token-for-token and adds zero context, such as a comment saying increment i sitting directly above i += 1) or is stale and wrong. When in doubt, keep it."
+        echo ""
+        echo "LEGITIMATE TARGETS (these are RUNTIME CODE, never comments; subtract — do NOT compress). Remove only:"
+        echo "(a) dead branches and unreachable code"
+        echo "(b) defensive checks for conditions that cannot occur"
+        echo "(c) a comment ONLY if it is extremely redundant — it restates the adjacent code token-for-token with zero added context, or is stale/wrong (default: KEEP every comment as a pointer)"
+        echo "(d) helper functions called from exactly one place that can be inlined"
+        echo "(e) abstractions added 'for future reuse' with no current second caller"
+        echo "(f) an empty or auto-generated placeholder docstring that states nothing (keep every docstring that gives intent, a contract, or a non-obvious why)"
+        echo "(g) blank scaffolding, placeholder stubs, empty init files"
+        echo "(h) re-exports or indirection that duplicate an existing path"
+        echo "Plus speculative parameters or config knobs, redundant state, and any unit you cannot trace to a user-visible requirement in the CCR."
+        echo ""
+        echo "PROCESS:"
+        echo "1. Measure current footprint: 'git diff --stat' against the branch point; note the runtime code your implementation added (ignore comment-only and blank-line changes)."
+        echo "2. Confirm the suite is GREEN (baseline)."
+        echo "3. Apply (a)-(h) deletions, lowest-risk first. Re-run tests after each meaningful cut; revert any cut that breaks or changes behavior."
+        echo "4. Re-stage with 'git add'. Do NOT run 'git commit'."
+        echo "5. ARBITRARY EXIT: when no further reduction is viable WITHOUT golfing or risking behavior, STOP. Do not invent reductions to hit a number. An already-minimal diff is a valid, expected outcome — say so and move on."
+        echo ""
+        echo "End your response with a REDUCTION REPORT: net RUNTIME-CODE change before -> after (comments and blank lines excluded from the count) or 'no viable reduction'; what was removed by category (a-h / other), or why nothing more could go without sacrificing clarity, comments, or behavior; and confirmation that the full suite is GREEN after reduction."
+    } > "$reduce_prompt"
+
+    cd "$wt"
+    invoke_agent \
+        "$coding_session" \
+        "$coding_agent_file" \
+        "$reduce_output" \
+        "Coding Agent Reduction ${REPO_NAMES_ARRAY[$repo_idx]} (${phase_label})" \
+        "$reduce_prompt"
+    cd "$WORKTREE_DIR"
+
+    local reduce_words
+    reduce_words=$(wc -w < "$reduce_output" | tr -d ' ')
+    success "Reduction ${REPO_NAMES_ARRAY[$repo_idx]}: ${reduce_words} words"
+}
+
+# ─── STAGE 3 (MULTI): Brain reviews all repos; per-repo fix loop ───────────
+#
+# Resume contract — skip_to is one of:
+#   ""              → run everything (initial review + fix loop + audit prompt)
+#   "audit_prompt"  → skip to audit-prompt generation (3d)
+#   "loop:N:fix"    → start fix loop at iteration N, fix step
+#   "loop:N:review" → start fix loop at iteration N, re-review step (fix done)
+run_multi_stage_3() {
+    local skip_to="${1:-}"
+    local phase_start
+    phase_start=$(date +%s)
+    stage_header "3" "6" "ORIGINAL THINKER — MULTI-REPO QA + FIX LOOP" "Brain Agent (Mode 2) ↔ Coding Agents" "$C_BG_YELLOW"
+
+    local brain_system_prompt="${ORIGINAL_BRAIN_AGENT_FILE:-$BRAIN_AGENT_FILE}"
+    local repo_summary
+    repo_summary=$(multi_repo_summary)
+    local loop_count=0
+
+    # Parse resume marker
+    local resume_iter=0 resume_step=""
+    if [[ "$skip_to" == "audit_prompt" ]]; then
+        info "Resuming Stage 3 at audit-prompt generation (fix loop already converged)"
+    elif [[ "$skip_to" == loop:* ]]; then
+        resume_iter=$(echo "$skip_to" | cut -d: -f2)
+        resume_step=$(echo "$skip_to" | cut -d: -f3)
+        loop_count=$((resume_iter - 1))
+        info "Resuming Stage 3 at fix iteration ${resume_iter} (${resume_step})"
+    fi
+
+    local -a findings_per_repo=()
+    local total_findings=0
+
+    local review_prompt_file="${RUN_DIR}/prompts/phase3_review_0.md"
+    local review_combined="${RUN_DIR}/artifacts/phase3_review_0_combined.md"
+
+    # When jumping to audit_prompt, the entire initial review + fix loop is
+    # skipped. Mirror the single-repo Stage 3 resume behaviour by guarding all
+    # pre-3d steps behind a single skip flag.
+    if [[ "$skip_to" == "audit_prompt" ]]; then
+        :   # falls through to 3d below
+    else
+
+    {
+        echo "Now switch to MODE 2 (Post-Implementation QA Review) — MULTI-REPOSITORY."
+        echo ""
+        echo "${REPO_COUNT} Coding Agents have finished implementing. Each implemented ONLY its own repo."
+        echo "You must audit ALL ${REPO_COUNT} implementations holistically — both the per-repo quality AND"
+        echo "the cross-repo integration contract."
+        echo ""
+        echo "REPOSITORIES:"
+        printf '%s\n' "$repo_summary"
+        echo ""
+        local i
+        for ((i=0; i<REPO_COUNT; i++)); do
+            echo "IMPLEMENTATION REPORT — repo ${i} (${REPO_NAMES_ARRAY[$i]}):"
+            echo "<implementation_report_repo_${i}>"
+            local ir="${RUN_DIR}/artifacts/implementation_report_repo_${i}.md"
+            if [[ -f "$ir" ]]; then cat "$ir"; else echo "(missing)"; fi
+            echo "</implementation_report_repo_${i}>"
+            echo ""
+        done
+        echo "REVIEW INSTRUCTIONS:"
+        echo "1. Read each implementation report to understand what each agent did."
+        echo "2. READ THE ACTUAL SOURCE CODE in each worktree — run 'git -C <worktree> diff' for each repo."
+        echo "3. Verify the integration contract: does the field name / endpoint / event name emitted by one repo match what the others consume?"
+        echo "4. Check per-repo correctness (business logic, DB, edge cases, tests, docs, CHANGELOG untouched)."
+        echo "5. Run Deployment Conditions checklist per repo."
+        echo ""
+        echo "OUTPUT FORMAT (exact marker lines — orchestrator splits on them):"
+        echo ""
+        for ((i=0; i<REPO_COUNT; i++)); do
+            echo "===== SECTION FOR REPO ${i}: ${REPO_NAMES_ARRAY[$i]} ====="
+            echo "[Your complete Risk Assessment Report for ${REPO_NAMES_ARRAY[$i]}, severity levels included.]"
+            echo ""
+            echo "NEW_FINDINGS_COUNT: N"
+            echo "(N = total count of Must Fix + Should Address Soon findings FOR THIS REPO)"
+            echo ""
+        done
+        echo "===== END SECTIONS ====="
+        echo ""
+        echo "Each section MUST end with its own 'NEW_FINDINGS_COUNT: N' line — the orchestrator parses per repo."
+    } > "$review_prompt_file"
+
+    if [[ -z "$skip_to" ]]; then
+        # Fresh run — call Brain for initial review
+        invoke_agent \
+            "$BRAIN_SESSION_FILE" \
+            "$brain_system_prompt" \
+            "$review_combined" \
+            "Brain Agent Mode 2 (Multi-Repo QA)" \
+            "$review_prompt_file"
+
+        split_markers_to_files "$review_combined" "${RUN_DIR}/artifacts" "phase3_review_0"
+
+        for ((i=0; i<REPO_COUNT; i++)); do
+            local rf="${RUN_DIR}/artifacts/phase3_review_0_repo_${i}.md"
+            local n
+            n=$(extract_findings_count "$rf")
+            [[ -z "$n" ]] && n=0
+            findings_per_repo+=("$n")
+            total_findings=$((total_findings + n))
+            findings_display "$n" "Initial QA — ${REPO_NAMES_ARRAY[$i]}"
+        done
+        info "Total initial findings across all repos: ${total_findings}"
+    else
+        # Resuming mid-loop — reload findings from the appropriate prior review
+        # so the loop entry condition and per-repo skip logic behave correctly.
+        if [[ "$resume_step" == "fix" ]]; then
+            # Fixes for iter=resume_iter not yet applied. Findings source is
+            # review_{resume_iter - 1} (initial for iter=1, re-review for >1).
+            local src_iter=$((resume_iter - 1))
+            for ((i=0; i<REPO_COUNT; i++)); do
+                local rf="${RUN_DIR}/artifacts/phase3_review_${src_iter}_repo_${i}.md"
+                local n
+                n=$(extract_findings_count "$rf")
+                [[ -z "$n" ]] && n=0
+                findings_per_repo+=("$n")
+                total_findings=$((total_findings + n))
+            done
+        elif [[ "$resume_step" == "review" ]]; then
+            # Fixes for iter=resume_iter done, re-review not done. Force the
+            # loop to enter at least once with a non-zero sentinel; the
+            # re-review step inside the loop will recount properly.
+            for ((i=0; i<REPO_COUNT; i++)); do findings_per_repo+=("1"); done
+            total_findings=1
+        fi
+        info "Resumed findings loaded: total=${total_findings}"
+    fi
+
+    # ── 3b/3c: Fix loop — for each iteration, coding agents fix per-repo findings, then Brain re-reviews ALL
+    local skip_first_fix=false
+    if [[ "$resume_step" == "review" ]]; then
+        skip_first_fix=true
+    fi
+    while [[ $total_findings -gt 0 ]] && [[ $loop_count -lt $MAX_FIX_LOOPS ]]; do
+        loop_count=$((loop_count + 1))
+        divider
+        printf '%b\n' "${C_DIM} ┃${C_RESET}  $(progress_bar "$loop_count" "$MAX_FIX_LOOPS")  ${C_YELLOW}Multi-Repo QA Iteration ${loop_count}/${MAX_FIX_LOOPS}${C_RESET}  (${total_findings} findings total)"
+
+        if [[ "$skip_first_fix" == "true" ]]; then
+            # Resuming at re-review — fix was already applied in the prior run
+            skip_first_fix=false
+            info "Resuming iteration ${loop_count} at re-review (fix already applied)"
+        else
+        # 3b: Per repo — fire coding agent only if this repo has findings
+        for ((i=0; i<REPO_COUNT; i++)); do
+            local n="${findings_per_repo[$i]}"
+            if [[ $n -le 0 ]]; then
+                info "Repo ${i} (${REPO_NAMES_ARRAY[$i]}): 0 findings — skipping fix for this repo"
+                continue
+            fi
+
+            local repo_name="${REPO_NAMES_ARRAY[$i]}"
+            local wt="${WORKTREE_DIRS_ARRAY[$i]}"
+            local coding_agent_file="${CODING_AGENT_FILES_ARRAY[$i]}"
+            local coding_session="${CODING_SESSION_FILES_ARRAY[$i]}"
+            local rf="${RUN_DIR}/artifacts/phase3_review_$((loop_count - 1))_repo_${i}.md"
+            # On iteration 1 rf came from review_0 split; on later iterations from previous rereview split
+            if [[ $loop_count -eq 1 ]]; then
+                rf="${RUN_DIR}/artifacts/phase3_review_0_repo_${i}.md"
+            else
+                rf="${RUN_DIR}/artifacts/phase3_review_$((loop_count - 1))_repo_${i}.md"
+            fi
+
+            subtask "Coding Agent fixing ${repo_name} (iteration ${loop_count}, ${n} findings)"
+
+            local fix_prompt_file="${RUN_DIR}/prompts/phase3_fix_${loop_count}_repo_${i}.md"
+            local fixes_file="${RUN_DIR}/artifacts/phase3_fixes_${loop_count}_repo_${i}.md"
+
+            {
+                echo "REMINDER (ORCHESTRATION OVERRIDE): Your instruction file's git branching/commit/push/PR rules are SUSPENDED. Do NOT run 'git commit', 'git push', 'git checkout -b', or 'gh pr create'. Stage changes with 'git add' only. You are in a pre-created worktree at ${wt}."
+                echo ""
+                echo "Multi-repo QA — this is repo ${i} (${repo_name}). Apply ONLY the findings for this repo."
+                echo "The other repos have separate fix prompts going to their own agents."
+                echo ""
+                echo "<qa_report_for_${repo_name}>"
+                cat "$rf"
+                echo "</qa_report_for_${repo_name}>"
+                echo ""
+                echo "For each finding: evaluate viability, implement if viable, explain if not."
+                echo "Run pre-commit hooks after fixes. Stage with 'git add' only — do NOT commit."
+                echo ""
+                echo "Do NOT modify other repos' worktrees. Only ${wt}."
+            } > "$fix_prompt_file"
+
+            cd "$wt"
+            invoke_agent \
+                "$coding_session" \
+                "$coding_agent_file" \
+                "$fixes_file" \
+                "Coding Agent Fix ${repo_name} (iter ${loop_count})" \
+                "$fix_prompt_file"
+
+            # Per-repo doc update after fixes
+            run_doc_update_pass_multi "phase3-fix${loop_count}-repo-${i}" "$i"
+
+            cd "$WORKTREE_DIR"
+        done
+        fi  # skip_first_fix
+
+        # 3c: Brain re-reviews ALL repos from scratch
+        subtask "Brain Agent re-reviewing all ${REPO_COUNT} repos (iteration ${loop_count})"
+
+        local rereview_prompt_file="${RUN_DIR}/prompts/phase3_rereview_${loop_count}.md"
+        local rereview_combined="${RUN_DIR}/artifacts/phase3_review_${loop_count}_combined.md"
+
+        {
+            echo "Coding Agents have applied fixes across ${REPO_COUNT} repos. Review ALL of them from scratch."
+            echo ""
+            for ((i=0; i<REPO_COUNT; i++)); do
+                local ff="${RUN_DIR}/artifacts/phase3_fixes_${loop_count}_repo_${i}.md"
+                echo "FIX REPORT — repo ${i} (${REPO_NAMES_ARRAY[$i]}):"
+                echo "<fix_report_repo_${i}>"
+                if [[ -f "$ff" ]]; then cat "$ff"; else echo "(no fix run for this repo — had 0 findings)"; fi
+                echo "</fix_report_repo_${i}>"
+                echo ""
+            done
+            echo "Verify ALL previous findings are correctly implemented by reading the actual source code"
+            echo "in each worktree (git diff). Then hunt for MORE findings objectively (roughly 50-50 odds a"
+            echo "second pass finds something — do not invent issues, but do not undersell real ones)."
+            echo ""
+            echo "Output format (exact markers, one section per repo, each ending with NEW_FINDINGS_COUNT):"
+            echo ""
+            for ((i=0; i<REPO_COUNT; i++)); do
+                echo "===== SECTION FOR REPO ${i}: ${REPO_NAMES_ARRAY[$i]} ====="
+                echo "[Updated Risk Assessment for ${REPO_NAMES_ARRAY[$i]}]"
+                echo ""
+                echo "NEW_FINDINGS_COUNT: N"
+                echo ""
+            done
+            echo "===== END SECTIONS ====="
+        } > "$rereview_prompt_file"
+
+        invoke_agent \
+            "$BRAIN_SESSION_FILE" \
+            "$brain_system_prompt" \
+            "$rereview_combined" \
+            "Brain Agent Multi-Repo Re-review (iter ${loop_count})" \
+            "$rereview_prompt_file"
+
+        split_markers_to_files "$rereview_combined" "${RUN_DIR}/artifacts" "phase3_review_${loop_count}"
+
+        # Recount
+        findings_per_repo=()
+        total_findings=0
+        for ((i=0; i<REPO_COUNT; i++)); do
+            local rf2="${RUN_DIR}/artifacts/phase3_review_${loop_count}_repo_${i}.md"
+            local n2
+            n2=$(extract_findings_count "$rf2")
+            [[ -z "$n2" ]] && n2=0
+            findings_per_repo+=("$n2")
+            total_findings=$((total_findings + n2))
+            findings_display "$n2" "Iter ${loop_count} — ${REPO_NAMES_ARRAY[$i]}"
+        done
+        TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + total_findings))
+        info "Total remaining findings: ${total_findings}"
+    done
+
+    if [[ $loop_count -ge $MAX_FIX_LOOPS ]] && [[ $total_findings -gt 0 ]]; then
+        warn "Max fix loops (${MAX_FIX_LOOPS}) reached with ${total_findings} findings across all repos"
+    fi
+
+    fi  # end: skip_to != audit_prompt
+
+    # ── 3d: Generate independent audit prompt (single prompt covering all repos)
+    divider
+    subtask "Brain Agent generating independent multi-repo audit prompt"
+
+    local gen_prompt_file="${RUN_DIR}/prompts/phase3_independent_prompt_gen.md"
+    local audit_prompt_raw="${RUN_DIR}/artifacts/phase3_independent_prompt_raw.md"
+
+    {
+        echo "Fix cycle complete across ${REPO_COUNT} repos. Generate a SINGLE independent audit prompt"
+        echo "that will be given to a fresh Brain Agent (no prior context) to audit all ${REPO_COUNT} repos."
+        echo ""
+        echo "The prompt must:"
+        echo "1. Explain the cross-repo business/technical intention at a high level"
+        echo "2. Summarize what changed per repo (no subjective assessments)"
+        echo "3. List files modified per repo"
+        echo "4. Describe the integration contract between repos"
+        echo "5. Instruct the reviewer to audit each repo AND the cross-repo integration"
+        echo "6. Instruct the reviewer to emit per-repo findings using the marker format:"
+        echo "   ===== SECTION FOR REPO <idx>: <name> ====="
+        echo "   ...findings..."
+        echo "   NEW_FINDINGS_COUNT: N"
+        echo "   ===== END SECTIONS ====="
+        echo "7. NOT include your biases or findings"
+        echo ""
+        echo "Output the prompt between these exact markers:"
+        echo "---BEGIN INDEPENDENT AUDIT PROMPT---"
+        echo "[your complete prompt here]"
+        echo "---END INDEPENDENT AUDIT PROMPT---"
+    } > "$gen_prompt_file"
+
+    invoke_agent \
+        "$BRAIN_SESSION_FILE" \
+        "$brain_system_prompt" \
+        "$audit_prompt_raw" \
+        "Brain Agent (Multi-Repo Audit Prompt Generation)" \
+        "$gen_prompt_file"
+
+    local extracted_prompt
+    extracted_prompt=$(extract_between_markers "$audit_prompt_raw" \
+        "---BEGIN INDEPENDENT AUDIT PROMPT---" \
+        "---END INDEPENDENT AUDIT PROMPT---")
+
+    if [[ -z "$extracted_prompt" ]]; then
+        warn "Could not extract audit prompt between markers — using full output"
+        extracted_prompt=$(cat "$audit_prompt_raw")
+    fi
+
+    echo "$extracted_prompt" > "${RUN_DIR}/artifacts/independent_audit_prompt.md"
+    local pw
+    pw=$(echo "$extracted_prompt" | wc -w | tr -d ' ')
+    success "Independent audit prompt generated (${pw} words)"
+
+    stage_complete "3" "$phase_start" "${RUN_DIR}/artifacts/independent_audit_prompt.md"
+}
+
+# ─── STAGE 4 (MULTI): Independent Reviewer(s), QA_ROUNDS times, per-repo findings ─
+run_multi_stage_4() {
+    local skip_to="${1:-}"
+    local phase_start
+    phase_start=$(date +%s)
+    stage_header "4" "6" "INDEPENDENT REVIEWER(S) — ${QA_ROUNDS} ROUND(S) × ${REPO_COUNT} REPOS" "Fresh Brain Agent (Mode 2)" "$C_BG_RED"
+
+    if [[ "${QA_ROUNDS:-0}" -le 0 ]]; then
+        info "QA rounds set to 0 — skipping independent review across all repos (full autopilot, no QA)"
+        stage_complete "4" "$phase_start"
+        return 0
+    fi
+
+    # Parse resume marker — "round:N" | "round:N:loop:M:fix" | "round:N:loop:M:review"
+    local resume_round=0 resume_loop_iter=0 resume_loop_step=""
+    if [[ "$skip_to" == round:* ]]; then
+        resume_round=$(echo "$skip_to" | cut -d: -f2)
+        if echo "$skip_to" | grep -q "loop:"; then
+            resume_loop_iter=$(echo "$skip_to" | cut -d: -f4)
+            resume_loop_step=$(echo "$skip_to" | cut -d: -f5)
+        fi
+        info "Resuming Stage 4 at round ${resume_round}${resume_loop_iter:+, iter ${resume_loop_iter} (${resume_loop_step})}"
+    fi
+
+    local independent_prompt
+    independent_prompt=$(cat "${RUN_DIR}/artifacts/independent_audit_prompt.md")
+
+    local repo_summary
+    repo_summary=$(multi_repo_summary)
+
+    local round
+    for round in $(seq 1 "$QA_ROUNDS"); do
+        # Skip fully completed rounds
+        if [[ $round -lt $resume_round ]]; then
+            info "Round ${round}: already complete — skipping"
+            continue
+        fi
+
+        divider
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}${C_WHITE}── INDEPENDENT MULTI-REPO REVIEW — Round %d of %d ──${C_RESET}\n" "$round" "$QA_ROUNDS"
+
+        local ind_session_file="${RUN_DIR}/sessions/independent-${round}.session"
+
+        # Skip init + initial review if we're resuming mid-round
+        local skip_round_init=false
+        local round_resume_loop=0
+        local round_resume_step=""
+        if [[ $round -eq $resume_round ]] && [[ $resume_loop_iter -gt 0 ]]; then
+            skip_round_init=true
+            round_resume_loop=$((resume_loop_iter - 1))
+            round_resume_step="$resume_loop_step"
+        fi
+
+        if [[ "$skip_round_init" == "false" ]]; then
+        rm -f "$ind_session_file"
+        subtask "Initializing independent Brain Agent (Round ${round})"
+        initialize_agent "brain" "$BRAIN_AGENT_FILE" "$ind_session_file" "independent-${round}"
+        divider
+
+        subtask "Independent Brain Agent reviewing ${REPO_COUNT} repos (Round ${round})"
+
+        local ind_review_prompt="${RUN_DIR}/prompts/phase4_r${round}_review.md"
+        local ind_review_combined="${RUN_DIR}/artifacts/phase4_r${round}_review_0_combined.md"
+
+        {
+            echo "Now switch to MODE 2 (Independent Post-Implementation Review) — MULTI-REPOSITORY."
+            echo "You have NO prior context about this implementation — this is a bias-free review."
+            echo ""
+            echo "REPOSITORIES IN SCOPE:"
+            printf '%s\n' "$repo_summary"
+            echo ""
+            echo "THE INDEPENDENT AUDIT BRIEF:"
+            echo "---"
+            echo "${independent_prompt}"
+            echo "---"
+            echo ""
+            echo "REVIEW INSTRUCTIONS:"
+            echo "1. You have Brain Agent instructions internalized. Also read each repo's Coding Agent"
+            echo "   instruction file to understand the rules you must verify compliance against."
+            echo "2. Read actual source code in each worktree — check git diff in each."
+            echo "3. Verify per-repo compliance AND the cross-repo integration contract."
+            echo "4. Look for unexpected side effects outside the intended scope."
+            echo "5. Do NOT invent findings. Real findings only."
+            echo ""
+            echo "OUTPUT FORMAT (exact markers — each section ends with NEW_FINDINGS_COUNT):"
+            echo ""
+            local i
+            for ((i=0; i<REPO_COUNT; i++)); do
+                echo "===== SECTION FOR REPO ${i}: ${REPO_NAMES_ARRAY[$i]} ====="
+                echo "[Complete Risk Assessment for ${REPO_NAMES_ARRAY[$i]}]"
+                echo ""
+                echo "NEW_FINDINGS_COUNT: N"
+                echo ""
+            done
+            echo "===== END SECTIONS ====="
+        } > "$ind_review_prompt"
+
+        invoke_agent \
+            "$ind_session_file" \
+            "$BRAIN_AGENT_FILE" \
+            "$ind_review_combined" \
+            "Independent Reviewer Multi (Round ${round})" \
+            "$ind_review_prompt"
+
+        split_markers_to_files "$ind_review_combined" "${RUN_DIR}/artifacts" "phase4_r${round}_review_0"
+
+        local -a findings_per_repo=()
+        local total_findings=0
+        local i
+        for ((i=0; i<REPO_COUNT; i++)); do
+            local rf="${RUN_DIR}/artifacts/phase4_r${round}_review_0_repo_${i}.md"
+            local n
+            n=$(extract_findings_count "$rf")
+            [[ -z "$n" ]] && n=0
+            findings_per_repo+=("$n")
+            total_findings=$((total_findings + n))
+            findings_display "$n" "R${round} Initial — ${REPO_NAMES_ARRAY[$i]}"
+        done
+        info "R${round} total findings across all repos: ${total_findings}"
+
+        fi  # end skip_round_init == false
+
+        # Resuming mid-round: reload findings from the right artifact.
+        # findings_per_repo and total_findings must exist when entering the loop.
+        if [[ "$skip_round_init" == "true" ]]; then
+            local -a findings_per_repo=()
+            local total_findings=0
+            local i
+            if [[ "$round_resume_step" == "fix" ]]; then
+                local src_iter=$round_resume_loop
+                for ((i=0; i<REPO_COUNT; i++)); do
+                    local rf
+                    if [[ $src_iter -le 0 ]]; then
+                        rf="${RUN_DIR}/artifacts/phase4_r${round}_review_0_repo_${i}.md"
+                    else
+                        rf="${RUN_DIR}/artifacts/phase4_r${round}_rereview_${src_iter}_repo_${i}.md"
+                    fi
+                    local n
+                    n=$(extract_findings_count "$rf")
+                    [[ -z "$n" ]] && n=0
+                    findings_per_repo+=("$n")
+                    total_findings=$((total_findings + n))
+                done
+            elif [[ "$round_resume_step" == "review" ]]; then
+                for ((i=0; i<REPO_COUNT; i++)); do findings_per_repo+=("1"); done
+                total_findings=1
+            fi
+            info "R${round} resumed findings loaded: total=${total_findings}"
+        fi
+
+        # ── 4c/4d: Fix loop per round, per repo
+        local loop_count=$round_resume_loop
+        local skip_first_fix_r=false
+        if [[ "$skip_round_init" == "true" ]] && [[ "$round_resume_step" == "review" ]]; then
+            skip_first_fix_r=true
+        fi
+        while [[ $total_findings -gt 0 ]] && [[ $loop_count -lt $MAX_FIX_LOOPS ]]; do
+            loop_count=$((loop_count + 1))
+            divider
+            printf '%b\n' "${C_DIM} ┃${C_RESET}  $(progress_bar "$loop_count" "$MAX_FIX_LOOPS")  ${C_YELLOW}Independent Fix R${round}.${loop_count} (${total_findings} findings total)${C_RESET}"
+
+            if [[ "$skip_first_fix_r" == "true" ]]; then
+                skip_first_fix_r=false
+                info "R${round}.${loop_count}: resuming at re-review (fix already applied)"
+            else
+            # 4c: Per-repo coding fixes (skip if 0 findings)
+            for ((i=0; i<REPO_COUNT; i++)); do
+                local n="${findings_per_repo[$i]}"
+                if [[ $n -le 0 ]]; then
+                    info "Repo ${i} (${REPO_NAMES_ARRAY[$i]}): 0 findings — skipping fix"
+                    continue
+                fi
+
+                local repo_name="${REPO_NAMES_ARRAY[$i]}"
+                local wt="${WORKTREE_DIRS_ARRAY[$i]}"
+                local coding_agent_file="${CODING_AGENT_FILES_ARRAY[$i]}"
+                local coding_session="${CODING_SESSION_FILES_ARRAY[$i]}"
+
+                # Source of findings for this iteration
+                local rf_src
+                if [[ $loop_count -eq 1 ]]; then
+                    rf_src="${RUN_DIR}/artifacts/phase4_r${round}_review_0_repo_${i}.md"
+                else
+                    rf_src="${RUN_DIR}/artifacts/phase4_r${round}_rereview_$((loop_count - 1))_repo_${i}.md"
+                fi
+
+                subtask "Coding fix ${repo_name} (R${round}.${loop_count}, ${n} findings)"
+
+                local fix_prompt_file="${RUN_DIR}/prompts/phase4_r${round}_fix_${loop_count}_repo_${i}.md"
+                local fixes_file="${RUN_DIR}/artifacts/phase4_r${round}_fixes_${loop_count}_repo_${i}.md"
+
+                {
+                    echo "REMINDER (ORCHESTRATION OVERRIDE): Your instruction file's git branching/commit/push/PR rules are SUSPENDED. Do NOT run 'git commit', 'git push', 'git checkout -b', or 'gh pr create'. Stage changes with 'git add' only. You are in a pre-created worktree at ${wt}."
+                    echo ""
+                    echo "Multi-repo independent review — Round ${round}, iteration ${loop_count}, repo ${i} (${repo_name})."
+                    echo ""
+                    echo "<independent_qa_report_for_${repo_name}>"
+                    cat "$rf_src"
+                    echo "</independent_qa_report_for_${repo_name}>"
+                    echo ""
+                    echo "Evaluate each finding with critical thinking. Implement viable fixes, explain deferrals."
+                    echo "Run pre-commit hooks. Stage with 'git add' only. Do NOT touch other repos' worktrees."
+                } > "$fix_prompt_file"
+
+                cd "$wt"
+                invoke_agent \
+                    "$coding_session" \
+                    "$coding_agent_file" \
+                    "$fixes_file" \
+                    "Coding Fix ${repo_name} (R${round}.${loop_count})" \
+                    "$fix_prompt_file"
+
+                run_doc_update_pass_multi "phase4-r${round}-fix${loop_count}-repo-${i}" "$i"
+                cd "$WORKTREE_DIR"
+            done
+            fi  # end skip_first_fix_r
+
+            # 4d: Same independent reviewer follows up on ALL repos
+            subtask "Independent Reviewer follow-up on all ${REPO_COUNT} repos (R${round}.${loop_count})"
+
+            local rereview_prompt_file="${RUN_DIR}/prompts/phase4_r${round}_rereview_${loop_count}.md"
+            local rereview_combined="${RUN_DIR}/artifacts/phase4_r${round}_rereview_${loop_count}_combined.md"
+
+            {
+                echo "Coding Agents applied fixes for Round ${round} findings across ${REPO_COUNT} repos."
+                echo "Verify each finding YOU raised against the actual source (git diff in each worktree)."
+                echo ""
+                for ((i=0; i<REPO_COUNT; i++)); do
+                    local ff="${RUN_DIR}/artifacts/phase4_r${round}_fixes_${loop_count}_repo_${i}.md"
+                    echo "FIX REPORT — repo ${i} (${REPO_NAMES_ARRAY[$i]}):"
+                    echo "<fix_report_repo_${i}>"
+                    if [[ -f "$ff" ]]; then cat "$ff"; else echo "(no fix run — 0 findings this iteration)"; fi
+                    echo "</fix_report_repo_${i}>"
+                    echo ""
+                done
+                echo "For each repo: confirm prior findings are resolved, then sweep for any genuinely NEW findings."
+                echo "A clean follow-up is a valid outcome. Do not invent findings."
+                echo ""
+                echo "OUTPUT FORMAT:"
+                for ((i=0; i<REPO_COUNT; i++)); do
+                    echo "===== SECTION FOR REPO ${i}: ${REPO_NAMES_ARRAY[$i]} ====="
+                    echo "[Status of prior findings + any new findings for this repo]"
+                    echo ""
+                    echo "NEW_FINDINGS_COUNT: N"
+                    echo ""
+                done
+                echo "===== END SECTIONS ====="
+            } > "$rereview_prompt_file"
+
+            invoke_agent \
+                "$ind_session_file" \
+                "$BRAIN_AGENT_FILE" \
+                "$rereview_combined" \
+                "Independent Reviewer Re-review Multi (R${round}.${loop_count})" \
+                "$rereview_prompt_file"
+
+            split_markers_to_files "$rereview_combined" "${RUN_DIR}/artifacts" "phase4_r${round}_rereview_${loop_count}"
+
+            findings_per_repo=()
+            total_findings=0
+            for ((i=0; i<REPO_COUNT; i++)); do
+                local rfn="${RUN_DIR}/artifacts/phase4_r${round}_rereview_${loop_count}_repo_${i}.md"
+                local nn
+                nn=$(extract_findings_count "$rfn")
+                [[ -z "$nn" ]] && nn=0
+                findings_per_repo+=("$nn")
+                total_findings=$((total_findings + nn))
+                findings_display "$nn" "R${round}.${loop_count} — ${REPO_NAMES_ARRAY[$i]}"
+            done
+            TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + total_findings))
+        done
+
+        if [[ $loop_count -ge $MAX_FIX_LOOPS ]] && [[ $total_findings -gt 0 ]]; then
+            warn "R${round}: max fix loops reached with ${total_findings} findings across all repos"
+        else
+            success "R${round} complete — all findings resolved across ${REPO_COUNT} repos"
+        fi
+    done
+
+    stage_complete "4" "$phase_start"
+}
+
+# ─── STAGE 5 (MULTI): Per-repo documentation finalization ──────────────────
+run_multi_stage_5() {
+    local phase_start
+    phase_start=$(date +%s)
+    stage_header "5" "6" "DOCUMENTATION FINALIZATION (${REPO_COUNT} REPOS)" "Coding Agents" "$C_BG_MAGENTA"
+
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local repo_name="${REPO_NAMES_ARRAY[$i]}"
+        local wt="${WORKTREE_DIRS_ARRAY[$i]}"
+        local coding_agent_file="${CODING_AGENT_FILES_ARRAY[$i]}"
+        local coding_session="${CODING_SESSION_FILES_ARRAY[$i]}"
+        local doc_runbook="${FULL_DOC_UPDATE_FILES_ARRAY[$i]}"
+
+        divider
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}── Doc finalization: %s ──${C_RESET}\n" "$repo_name"
+
+        if [[ -z "$doc_runbook" ]] || [[ ! -f "$doc_runbook" ]]; then
+            warn "${repo_name}: FULL_DOCUMENTATION_UPDATE runbook missing — skipping"
+            continue
+        fi
+
+        subtask "Executing Full Documentation Update Runbook (${repo_name})"
+
+        local doc_prompt_file="${RUN_DIR}/prompts/phase5_docs_repo_${i}.md"
+        local doc_output="${RUN_DIR}/artifacts/documentation_report_repo_${i}.md"
+
+        {
+            echo "REMINDER (ORCHESTRATION OVERRIDE): Your instruction file's git branching/commit/push/PR rules are SUSPENDED. Do NOT run 'git commit', 'git push', 'git checkout -b', or 'gh pr create'. Stage changes with 'git add' only. You are in a pre-created worktree at ${wt}."
+            echo ""
+            echo "All QA rounds complete across ${REPO_COUNT} repos. For this repo (${repo_name}), execute"
+            echo "the Full Documentation Update Runbook:"
+            echo ""
+            echo "<full_documentation_update_runbook>"
+            cat "$doc_runbook"
+            echo "</full_documentation_update_runbook>"
+            echo ""
+            echo "Execute EVERY step in order. Do NOT commit. Stage only."
+            echo ""
+            echo "PR BODY — canonical source of truth: PR_DESCRIPTION_TEMPLATE.md ships alongside the orchestrator; Stage 6 (step 6b2) injects it verbatim. It SUPERSEDES any repo .github/pull_request_template.md and any 'PR Description Standard' in your instruction file (older/looser, drift). Do not hand-roll a PR body in this turn — runbook step 6 is the dedicated Stage-6 step's job."
+            echo "Do NOT mark any mandatory output 'N/A'. If blocked, write 'BLOCKED: <named artifact + reason>' — a bare N/A on a mandatory output is itself a finding."
+            echo "At the end, report the full Verification Checklist results."
+        } > "$doc_prompt_file"
+
+        cd "$wt"
+        invoke_agent \
+            "$coding_session" \
+            "$coding_agent_file" \
+            "$doc_output" \
+            "Coding Agent Doc Finalization (${repo_name})" \
+            "$doc_prompt_file"
+        cd "$WORKTREE_DIR"
+    done
+
+    stage_complete "5" "$phase_start"
+}
+
+# Emits the "Multi-Repo Orchestration" sibling-PR list + "Orchestration
+# Metrics" table shared verbatim by both PR-body branches in run_multi_stage_6
+# (agent-authored body vs. fallback template). Single source of truth so the
+# two metrics tables never drift. Takes this repo's index as $1 (to mark the
+# current PR in the sibling list); reads REPO_COUNT/REPO_NAMES_ARRAY and the
+# TOTAL_* / MODEL_CONFIG_LABEL globals directly, as the rest of the script does.
+emit_multi_repo_pr_section() {
+    local i="$1"
+    echo "## Multi-Repo Orchestration"
+    echo ""
+    echo "This PR is **part of a ${REPO_COUNT}-repo change set** — one logical feature spanning:"
+    local j
+    for ((j=0; j<REPO_COUNT; j++)); do
+        local marker="${REPO_NAMES_ARRAY[$j]}"
+        if [[ $j -eq $i ]]; then
+            echo "- **${marker}** (this PR)"
+        else
+            echo "- ${marker}"
+        fi
+    done
+    echo ""
+    echo "Merge the sibling PRs together (or coordinate rollout) — the feature only works when all repos are deployed."
+    echo ""
+    echo "## Orchestration Metrics"
+    echo ""
+    echo "| Metric | Value |"
+    echo "|--------|-------|"
+    echo "| Wall-clock time | $(elapsed_total) |"
+    echo "| Claude calls | ${TOTAL_CLAUDE_CALLS} |"
+    echo "| Total turns | ${TOTAL_TURNS} |"
+    echo "| QA rounds | ${QA_ROUNDS} |"
+    echo "| Repos in set | ${REPO_COUNT} |"
+    echo "| Model | ${MODEL_CONFIG_LABEL} |"
+    echo ""
+}
+
+# ─── STAGE 6 (MULTI): Per-repo commit, worktree close, PR ──────────────────
+run_multi_stage_6() {
+    local phase_start
+    phase_start=$(date +%s)
+    stage_header "6" "6" "MERGE WORKTREES → PRs (${REPO_COUNT} PRs)" "Git Operations" "$C_BG_BLUE"
+
+    # Resolve the canonical PR description template alongside this script —
+    # used by the per-repo Coding Agent body-generation step further down.
+    local _stage6_script_dir
+    _stage6_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local pr_template_file="${_stage6_script_dir}/PR_DESCRIPTION_TEMPLATE.md"
+
+    PR_URLS_ARRAY=()
+
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local repo_name="${REPO_NAMES_ARRAY[$i]}"
+        local wt="${WORKTREE_DIRS_ARRAY[$i]}"
+        local original_repo="${ORIGINAL_REPO_ROOTS_ARRAY[$i]}"
+        local base="${BASE_BRANCHES_ARRAY[$i]}"
+        local ccr_file="${RUN_DIR}/artifacts/ccr_repo_${i}.md"
+
+        divider
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}── PR %d/%d: %s ──${C_RESET}\n" "$((i + 1))" "$REPO_COUNT" "$repo_name"
+
+        # Generate per-repo PR metadata via the Coding Agent
+        subtask "Generating PR metadata for ${repo_name} via the Coding Agent"
+
+        local task_file="${RUN_DIR}/artifacts/business_problem.md"
+        local task_text=""
+        local ccr_text=""
+        [[ -f "$task_file" ]] && task_text=$(cat "$task_file")
+        [[ -f "$ccr_file" ]] && ccr_text=$(head -400 "$ccr_file")
+
+        local meta_prompt
+        meta_prompt=$(cat <<PROMPT_BOUNDARY
+You are generating pull request metadata for a completed code-change request in repo ${repo_name} (part of a multi-repo orchestration across ${REPO_COUNT} repos).
+
+Read the BUSINESS PROBLEM and the CCR for THIS REPO and produce a single JSON object:
+
+{
+  "commit_message": "<Conventional Commit SUBJECT LINE ONLY. Format: type(scope): description — type is one of feat|fix|docs|style|refactor|perf|test|build|ci|chore. Imperative mood, lower-case description, no trailing period. Example good: 'feat(booking): add seat-hold expiry'. NO newlines, NO body, NO bullets, NO 'Why:' prose. Maximum 160 characters total.>",
+  "what": "<2-4 sentences on what THIS repo PR changes>",
+  "why": "<2-4 sentences on motivation, referencing cross-repo context if relevant>",
+  "how": "<2-4 sentences on implementation approach for this repo>"
+}
+
+Do NOT wrap in markdown. Output ONLY the JSON object.
+
+REPO: ${repo_name} (1 of ${REPO_COUNT} in this multi-repo PR set)
+
+BUSINESS PROBLEM:
+---
+${task_text:-(not provided)}
+---
+
+CCR FOR ${repo_name}:
+---
+${ccr_text:-(not provided)}
+---
+PROMPT_BOUNDARY
+)
+
+        local inner=""
+        # PR metadata from this repo's warm Coding Agent (reflects what it actually
+        # implemented — not a cold Haiku read of the CCR).
+        local _meta_prompt_file="${RUN_DIR}/prompts/phase6_pr_metadata_repo_${i}.md"
+        printf '%s\n' "$meta_prompt" > "$_meta_prompt_file"
+        local _meta_output="${RUN_DIR}/artifacts/pr_metadata_repo_${i}.md"
+        invoke_agent "${CODING_SESSION_FILES_ARRAY[$i]}" "${CODING_AGENT_FILES_ARRAY[$i]:-${BRAIN_AGENT_FILES_ARRAY[$i]}}" "$_meta_output" "Coding Agent PR metadata (${repo_name})" "$_meta_prompt_file"
+        inner=$(cat "$_meta_output" 2>/dev/null || true)
+        if [[ -n "$inner" ]]; then
+            inner=$(echo "$inner" | sed -E 's/^[[:space:]]*```(json)?[[:space:]]*//; s/```[[:space:]]*$//' | sed '/^$/d')
+        fi
+
+        local commit_msg="" pr_what="" pr_why="" pr_how=""
+        if [[ -n "$inner" ]] && jq -e . <<< "$inner" >/dev/null 2>&1; then
+            commit_msg=$(jq -r '.commit_message // empty' <<< "$inner" 2>/dev/null || true)
+            pr_what=$(jq -r '.what // empty' <<< "$inner" 2>/dev/null || true)
+            pr_why=$(jq -r '.why // empty' <<< "$inner" 2>/dev/null || true)
+            pr_how=$(jq -r '.how // empty' <<< "$inner" 2>/dev/null || true)
+        fi
+
+        if [[ -n "$commit_msg" ]]; then
+            commit_msg=$(printf '%s\n' "$commit_msg" | awk 'NF{print; exit}')
+        fi
+
+        local conventional_re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?: .+'  # Conventional Commits
+        local commit_msg_len=${#commit_msg}
+        if ! [[ "$commit_msg" =~ $conventional_re ]] || (( commit_msg_len > 160 )); then
+            local humanized="${WORKTREE_BRANCH//-/ }"
+            local fallback_msg="chore: ${humanized} (orchestrated change)"
+            if (( ${#fallback_msg} > 160 )); then
+                fallback_msg="${fallback_msg:0:157}..."
+            fi
+            warn "${repo_name}: Haiku commit msg failed validation — using fallback"
+            commit_msg="$fallback_msg"
+        else
+            success "${repo_name} commit: ${commit_msg}"
+        fi
+
+        local pr_title="$commit_msg"
+        : "${pr_what:=See the CCR artifact for this repo code changes.}"
+        : "${pr_why:=See the CCR artifact for motivation and business context.}"
+        : "${pr_how:=See the CCR artifact for implementation approach.}"
+
+        # 6b: Commit in worktree
+        subtask "Committing in worktree ${repo_name}"
+        cd "$wt"
+        git add -A
+
+        local changed_files
+        changed_files=$(git diff --cached --name-only | wc -l | tr -d ' ')
+        if [[ "$changed_files" -eq 0 ]]; then
+            warn "${repo_name}: no changes to commit — skipping PR"
+            # Return to a guaranteed-existing directory — $WORKTREE_DIR points at
+            # repo[0]'s worktree which may have already been removed in a prior
+            # iteration of this loop, so use the original repo[0] root instead.
+            cd "${ORIGINAL_REPO_ROOTS_ARRAY[0]}"
+            PR_URLS_ARRAY+=("(no-changes)")
+            continue
+        fi
+
+        # 6b2: Coding Agent writes the per-repo PR body (template-compliant)
+        # while staged changes are still visible in the worktree. Same
+        # contract as the single-repo path: agent output goes to
+        # pr_body_agent_repo_${i}.md; assembly later prefers it over the
+        # Haiku fallback when canonical headings are present.
+        local pr_body_agent_file="${RUN_DIR}/artifacts/pr_body_agent_repo_${i}.md"
+        if [[ -f "$pr_template_file" ]]; then
+            subtask "${repo_name}: Coding Agent writing PR body to template"
+
+            local pr_body_prompt_file="${RUN_DIR}/prompts/phase6_pr_body_repo_${i}.md"
+            local _impl_report="${RUN_DIR}/artifacts/implementation_report_repo_${i}.md"
+            local _doc_report="${RUN_DIR}/artifacts/documentation_report_repo_${i}.md"
+            local _impl_text="" _doc_text="" _ccr_text_full=""
+            [[ -f "$_impl_report" ]] && _impl_text=$(head -300 "$_impl_report")
+            [[ -f "$_doc_report" ]] && _doc_text=$(head -200 "$_doc_report")
+            [[ -f "$ccr_file" ]] && _ccr_text_full=$(head -600 "$ccr_file")
+            local _diff_stat
+            _diff_stat=$(git diff --cached --stat 2>/dev/null | tail -20)
+
+            local _sibling_list=""
+            local _sj
+            for ((_sj=0; _sj<REPO_COUNT; _sj++)); do
+                local _smark="${REPO_NAMES_ARRAY[$_sj]}"
+                if [[ $_sj -eq $i ]]; then
+                    _sibling_list+="- **${_smark}** (this PR)"$'\n'
+                else
+                    _sibling_list+="- ${_smark}"$'\n'
+                fi
+            done
+
+            {
+                echo "REMINDER (ORCHESTRATION OVERRIDE): Your instruction file's git branching/commit/push/PR rules are SUSPENDED. Do NOT run 'git commit', 'git push', 'git checkout -b', or 'gh pr create'. You are writing the PR description text only."
+                echo ""
+                echo "You shipped the ${repo_name} portion of a ${REPO_COUNT}-repo orchestrated change. Write the GitHub pull-request description for THIS repo's PR."
+                echo ""
+                echo "Output a SINGLE markdown document. NO preface, NO commentary, NO trailing notes — your entire response is captured verbatim into the PR body. Start with \`## TL;DR\` on the first line."
+                echo ""
+                echo "The PR body MUST follow the canonical PR template exactly. Read the template spec below and produce every required section in order, with byte-exact headings. The \`## What / Why?\` heading is validated by the PR-description CI check — a missing \`?\` or wrong spacing fails CI."
+                echo ""
+                echo "<pr_template_spec>"
+                cat "$pr_template_file"
+                echo "</pr_template_spec>"
+                echo ""
+                echo "If your project keeps exemplar PRs, mirror their structure (not their prose); otherwise follow the template spec above."
+                echo ""
+                echo "Multi-repo context:"
+                echo "- This is PR $((i + 1)) of ${REPO_COUNT} in the same change set."
+                echo "- Sibling repos in the set:"
+                printf '%s' "$_sibling_list"
+                echo "- The orchestrator will append a \`## Multi-Repo Orchestration\` section listing the siblings. You may reference cross-repo dependencies in your \`### Section 6: User Impact > Operational Changes\` and \`## How? > Feature Flag > Rollout plan\` sections, but do NOT duplicate the sibling list."
+                echo ""
+                echo "The change you shipped in ${repo_name}:"
+                echo "- Branch: ${WORKTREE_BRANCH}"
+                echo "- Base: ${base}"
+                echo "- Files staged: ${changed_files}"
+                echo ""
+                echo "Diff stat (\`git diff --cached --stat\`):"
+                echo '```'
+                printf '%s\n' "$_diff_stat"
+                echo '```'
+                echo ""
+                echo "<business_problem>"
+                printf '%s\n' "${task_text:-(not provided)}"
+                echo "</business_problem>"
+                echo ""
+                echo "<code_change_request_${repo_name}>"
+                printf '%s\n' "${_ccr_text_full:-(not provided)}"
+                echo "</code_change_request_${repo_name}>"
+                echo ""
+                echo "<implementation_report>"
+                printf '%s\n' "${_impl_text:-(not provided)}"
+                echo "</implementation_report>"
+                echo ""
+                echo "<documentation_report>"
+                printf '%s\n' "${_doc_text:-(Stage 5 was skipped or produced no artifact)}"
+                echo "</documentation_report>"
+                echo ""
+                echo "Hard rules:"
+                echo "- Use REAL captured evidence — paste actual test output / curl transcripts / migration logs you ran during implementation. Do NOT fabricate. If a test wasn't run, state so under \"Known test gaps\" in Section 5."
+                echo "- Do NOT emit \`## Orchestration Metrics\` or \`## Multi-Repo Orchestration\` — the orchestrator appends those."
+                echo "- Do NOT emit anything BEFORE \`## TL;DR\` or AFTER the last template section. \`gh pr create --body-file\` ingests your response verbatim."
+                echo "- Use \`git diff --cached\`, \`git log -1\`, and the Read tool to verify your claims against the actual staged changes before you write."
+                echo "- The \`## What / Why?\` heading is byte-exact: two hashes, space, the word What, space, slash, space, the word Why, question mark."
+                echo ""
+                echo "Write the complete PR body now."
+            } > "$pr_body_prompt_file"
+
+            local coding_session="${CODING_SESSION_FILES_ARRAY[$i]}"
+            local coding_agent_file="${CODING_AGENT_FILES_ARRAY[$i]:-${BRAIN_AGENT_FILES_ARRAY[$i]}}"
+
+            invoke_agent \
+                "$coding_session" \
+                "$coding_agent_file" \
+                "$pr_body_agent_file" \
+                "Coding Agent PR body (${repo_name})" \
+                "$pr_body_prompt_file"
+
+            if [[ -s "$pr_body_agent_file" ]]; then
+                local _word_count
+                _word_count=$(wc -w < "$pr_body_agent_file" | tr -d ' ')
+                success "${repo_name} PR body: ${_word_count} words"
+            else
+                warn "${repo_name}: Coding Agent PR body output empty — will use Haiku template fallback"
+            fi
+        else
+            warn "PR template not found at ${pr_template_file} — using Haiku template fallback for ${repo_name}"
+        fi
+
+        git commit -m "${commit_msg}
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" 2>&1 \
+            | while IFS= read -r line; do verbose "$line"; done
+
+        success "Committed ${changed_files} files in ${repo_name} worktree"
+
+        # 6c: Push this repo's worktree branch directly (standalone PR per repo).
+        # No worktree-remove + re-checkout (which corrupted the running script) and
+        # no cherry-pick — Stage 6b already committed onto the standalone worktree
+        # branch. Push straight from the worktree.
+        subtask "${repo_name}: pushing worktree branch ${WORKTREE_BRANCH}"
+        git -C "$wt" push -u origin "$WORKTREE_BRANCH" 2>&1 \
+            | while IFS= read -r line; do verbose "$line"; done
+        success "${repo_name}: pushed origin/${WORKTREE_BRANCH}"
+
+        local slack_url=""
+        if [[ -n "$task_text" ]]; then
+            slack_url=$(printf '%s\n' "$task_text" \
+                | grep -oE 'https://[a-zA-Z0-9.-]+\.slack\.com/[^[:space:]]+' \
+                | head -1 || true)
+        fi
+
+        local pr_body_file="${RUN_DIR}/artifacts/pr_body_repo_${i}.md"
+        local _use_agent_body=false
+        if [[ -s "$pr_body_agent_file" ]]; then
+            if grep -q '^## TL;DR' "$pr_body_agent_file" \
+                && grep -qE '^## What / Why\?' "$pr_body_agent_file" \
+                && grep -q '^## How?' "$pr_body_agent_file" \
+                && grep -q '^## Code Change Request Form' "$pr_body_agent_file"; then
+                _use_agent_body=true
+                success "${repo_name} PR body: using Coding Agent's template-compliant output"
+            else
+                warn "${repo_name} PR body: Coding Agent output missing required headings — falling back to Haiku template"
+            fi
+        fi
+
+        if [[ "$_use_agent_body" == "true" ]]; then
+            # Use the agent's body; strip any Orchestration Metrics block it
+            # may have emitted (we own that footer); then append the
+            # Multi-Repo Orchestration block + Orchestration Metrics.
+            awk '
+                /^## Orchestration Metrics[[:space:]]*$/ { skip=1; next }
+                /^## Multi-Repo Orchestration[[:space:]]*$/ { skip=1; next }
+                skip && /^## / && !/^## Orchestration Metrics/ && !/^## Multi-Repo Orchestration/ { skip=0 }
+                !skip { print }
+            ' "$pr_body_agent_file" > "$pr_body_file"
+            {
+                echo ""
+                echo "---"
+                echo ""
+                emit_multi_repo_pr_section "$i"
+                printf '🤖 Generated with [Claude Code](https://claude.com/claude-code) — multi-repo orchestration (%d calls, %d turns, %d QA rounds, %d repos)\n' \
+                    "$TOTAL_CLAUDE_CALLS" "$TOTAL_TURNS" "$QA_ROUNDS" "$REPO_COUNT"
+            } >> "$pr_body_file"
+        else
+            {
+                echo "## What / Why?"
+                echo ""
+                echo "${pr_what}"
+                echo ""
+                if [[ -n "$slack_url" ]]; then
+                    echo "Slack Thread: ${slack_url}"
+                    echo ""
+                fi
+                echo "${pr_why}"
+                echo ""
+                echo "## How?"
+                echo ""
+                echo "${pr_how}"
+                echo ""
+                emit_multi_repo_pr_section "$i"
+                if [[ "$base" != "main" ]] && [[ "$base" != "master" ]]; then
+                    echo "## Stacked PR"
+                    echo ""
+                    echo "Depends on the PR for \`${base}\` in ${repo_name} — must be merged first."
+                    echo ""
+                fi
+                echo "## Test plan"
+                echo ""
+                echo "- [ ] All unit tests pass in this repo"
+                echo "- [ ] Pre-commit hooks pass"
+                echo "- [ ] Integration tested against sibling PRs in the ${REPO_COUNT}-repo set"
+                echo ""
+                printf '🤖 Generated with [Claude Code](https://claude.com/claude-code) — multi-repo orchestration (%d calls, %d turns, %d QA rounds, %d repos)\n' \
+                    "$TOTAL_CLAUDE_CALLS" "$TOTAL_TURNS" "$QA_ROUNDS" "$REPO_COUNT"
+            } > "$pr_body_file"
+        fi
+
+        cd "$wt" 2>/dev/null || true
+        open_pull_request "$pr_title" "$pr_body_file" "$base" "${RUN_DIR}/artifacts/pr_url_repo_${i}.txt" "${repo_name}: "
+        PR_URLS_ARRAY+=("$(cat "${RUN_DIR}/artifacts/pr_url_repo_${i}.txt" 2>/dev/null || echo '(failed)')")
+
+        # Return to repo[0] original root so subsequent loop iterations work
+        cd "${ORIGINAL_REPO_ROOTS_ARRAY[0]}"
+    done
+
+    # Summary of all PRs
+    printf "\n"
+    divider
+    printf "${C_DIM} ┃${C_RESET} ${C_BOLD}Multi-Repo PR Summary:${C_RESET}\n"
+    for ((i=0; i<REPO_COUNT; i++)); do
+        printf "${C_DIM} ┃${C_RESET}   ${BULLET} [%d] %s ${ARROW} %s\n" "$i" "${REPO_NAMES_ARRAY[$i]}" "${PR_URLS_ARRAY[$i]:-(n/a)}"
+    done
+    divider
+
+    stage_complete "6" "$phase_start"
+}
+
+# Write a machine-readable snapshot of the multi-repo state. Called at several
+# points in multi_main_flow so resume (--resume-run) can detect and restore a
+# multi-repo run even if the script crashed after init but before worktrees
+# were created. Safe to call multiple times — overwrites atomically.
+#
+# Fields populated depend on how far init got:
+#   - after selector: repo_roots + base_branches + worktree_branch (if named)
+#   - after create_worktrees_multi: worktree_dirs filled in
+#   - after any stage: coder_session_ids array populated
+save_multi_repo_state() {
+    local state_file="${RUN_DIR}/multi_repo_state.json"
+    local tmp="${state_file}.tmp"
+
+    local repos_json=""
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local name="${REPO_NAMES_ARRAY[$i]:-}"
+        local root="${REPO_ROOTS_ARRAY[$i]:-}"
+        local wt="${WORKTREE_DIRS_ARRAY[$i]:-}"
+        local base="${BASE_BRANCHES_ARRAY[$i]:-}"
+        local cid="${CODER_SESSION_IDS_ARRAY[$i]:-}"
+        # Escape double quotes in paths (paths with spaces are fine — jq handles them)
+        name="${name//\"/\\\"}"
+        root="${root//\"/\\\"}"
+        wt="${wt//\"/\\\"}"
+        base="${base//\"/\\\"}"
+        cid="${cid//\"/\\\"}"
+
+        if [[ $i -gt 0 ]]; then repos_json+=","; fi
+        repos_json+=$'\n        '"{\"index\": ${i}, \"name\": \"${name}\", \"repo_root\": \"${root}\", \"worktree_dir\": \"${wt}\", \"base_branch\": \"${base}\", \"coder_session_id\": \"${cid}\"}"
+    done
+
+    cat > "$tmp" <<MULTI_STATE_EOF
+{
+    "multi_repo_mode": true,
+    "repo_count": ${REPO_COUNT},
+    "worktree_branch": "${WORKTREE_BRANCH}",
+    "repos": [${repos_json}
+    ],
+    "timestamp": "$(timestamp)"
+}
+MULTI_STATE_EOF
+    mv "$tmp" "$state_file"
+}
+
+# Is this RUN_DIR a multi-repo run? True when the sidecar file has
+# multi_repo_mode=true. Called from the resume path in main() to decide which
+# pipeline to hand off to.
+is_multi_repo_run() {
+    local state_file="${RUN_DIR}/multi_repo_state.json"
+    [[ -f "$state_file" ]] || return 1
+    local flag
+    flag=$(jq -r '.multi_repo_mode // false' "$state_file" 2>/dev/null || echo "false")
+    [[ "$flag" == "true" ]]
+}
+
+# Read multi_repo_state.json and rebuild every parallel array, plus repoint
+# the scalar globals (REPO_ROOT, WORKTREE_DIR, BRAIN/CODING_AGENT_FILE, etc.)
+# to repo[0]'s worktree. This is the multi-repo analog of restore_run_state +
+# recover_missing_state, and is idempotent — safe to call with already-set
+# state.
+#
+# Re-derives doc dirs and agent files from the filesystem rather than trusting
+# the sidecar, because worktrees may have been modified (paths rewritten) and
+# the original repos may have been moved between resumes.
+restore_multi_repo_state() {
+    local state_file="${RUN_DIR}/multi_repo_state.json"
+    if [[ ! -f "$state_file" ]]; then
+        fatal "restore_multi_repo_state: ${state_file} missing — cannot resume multi-repo run"
+    fi
+
+    MULTI_REPO_MODE=true
+    REPO_COUNT=$(jq -r '.repo_count // 0' "$state_file")
+    if [[ $REPO_COUNT -lt 2 ]] || [[ $REPO_COUNT -gt 3 ]]; then
+        fatal "restore_multi_repo_state: invalid repo_count=${REPO_COUNT} in ${state_file}"
+    fi
+    local wt_branch_saved
+    wt_branch_saved=$(jq -r '.worktree_branch // empty' "$state_file")
+    if [[ -n "$wt_branch_saved" ]]; then
+        WORKTREE_BRANCH="$wt_branch_saved"
+    fi
+
+    # Clear then rehydrate the parallel arrays in one pass so partial restores
+    # from an earlier resume do not leak stale entries.
+    REPO_ROOTS_ARRAY=()
+    REPO_NAMES_ARRAY=()
+    BASE_BRANCHES_ARRAY=()
+    WORKTREE_DIRS_ARRAY=()
+    ORIGINAL_REPO_ROOTS_ARRAY=()
+    ORIGINAL_BRAIN_AGENT_FILES_ARRAY=()
+    DOC_DIRS_ARRAY=()
+    BRAIN_AGENT_FILES_ARRAY=()
+    CODING_AGENT_FILES_ARRAY=()
+    FULL_DOC_UPDATE_FILES_ARRAY=()
+    CODING_SESSION_FILES_ARRAY=()
+    CODER_SESSION_IDS_ARRAY=()
+
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local root name base wt cid
+        root=$(jq -r ".repos[$i].repo_root // empty" "$state_file")
+        name=$(jq -r ".repos[$i].name // empty" "$state_file")
+        base=$(jq -r ".repos[$i].base_branch // empty" "$state_file")
+        wt=$(jq -r ".repos[$i].worktree_dir // empty" "$state_file")
+        cid=$(jq -r ".repos[$i].coder_session_id // empty" "$state_file")
+
+        if [[ -z "$root" ]]; then
+            fatal "restore_multi_repo_state: repos[$i].repo_root is empty in ${state_file}"
+        fi
+
+        # Fallback: derive worktree dir by naming convention if the sidecar
+        # lost it (e.g. crash after repo-root save but before worktree save).
+        if [[ -z "$wt" ]] && [[ -n "$WORKTREE_BRANCH" ]]; then
+            wt="$(dirname "$root")/$(basename "$root")-wt-${WORKTREE_BRANCH}"
+        fi
+
+        REPO_ROOTS_ARRAY+=("$root")
+        REPO_NAMES_ARRAY+=("${name:-$(basename "$root")}")
+        BASE_BRANCHES_ARRAY+=("${base:-main}")
+        WORKTREE_DIRS_ARRAY+=("$wt")
+        ORIGINAL_REPO_ROOTS_ARRAY+=("$root")
+        CODER_SESSION_IDS_ARRAY+=("$cid")
+        CODING_SESSION_FILES_ARRAY+=("${RUN_DIR}/sessions/coding-repo-${i}.session")
+
+        # Resolve ORIGINAL doc dir + brain file (pre-rewrite, still on disk)
+        # MULTI-REPO WORKSPACE ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
+        local orig_doc=""
+        if compgen -G "${root}/*Brain*Agent*.md" > /dev/null 2>&1; then
+            orig_doc="$root"
+        elif [[ -d "${root}/LLM coding agent documents" ]]; then
+            orig_doc="${root}/LLM coding agent documents"
+        elif [[ -d "$(dirname "$root")/LLM coding agent documents" ]]; then
+            orig_doc="$(dirname "$root")/LLM coding agent documents"
+        fi
+        local orig_brain=""
+        if [[ -n "$orig_doc" ]]; then
+            orig_brain=$(find "$orig_doc" -maxdepth 1 -name "*Brain*Agent*" -name "*.md" -print0 2>/dev/null \
+                | tr '\0' '\n' | head -1 || true)
+        fi
+        ORIGINAL_BRAIN_AGENT_FILES_ARRAY+=("$orig_brain")
+
+        # Resolve WORKTREE doc dir + agent files (paths already rewritten)
+        local wt_doc=""
+        if [[ -n "$wt" ]] && [[ -d "$wt" ]]; then
+            # MULTI-REPO WORKSPACE ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
+            if compgen -G "${wt}/*Brain*Agent*.md" > /dev/null 2>&1; then
+                wt_doc="$wt"
+            elif [[ -d "${wt}/LLM coding agent documents" ]]; then
+                wt_doc="${wt}/LLM coding agent documents"
+            elif [[ -d "$(dirname "$wt")/LLM coding agent documents" ]]; then
+                wt_doc="$(dirname "$wt")/LLM coding agent documents"
+            fi
+        fi
+
+        local wt_brain="" wt_coding="" wt_docup=""
+        if [[ -n "$wt_doc" ]]; then
+            wt_brain=$(find "$wt_doc" -maxdepth 1 -name "*Brain*Agent*" -name "*.md" -print0 2>/dev/null | tr '\0' '\n' | head -1 || true)
+            wt_coding=$(find "$wt_doc" -maxdepth 1 -name "*Coding*Agent*" -name "*.md" -print0 2>/dev/null | tr '\0' '\n' | head -1 || true)
+            wt_docup=$(find "$wt_doc" -maxdepth 1 -name "*FULL*DOCUMENTATION*UPDATE*" -name "*.md" -print0 2>/dev/null | tr '\0' '\n' | head -1 || true)
+        fi
+        DOC_DIRS_ARRAY+=("$wt_doc")
+        BRAIN_AGENT_FILES_ARRAY+=("$wt_brain")
+        CODING_AGENT_FILES_ARRAY+=("$wt_coding")
+        FULL_DOC_UPDATE_FILES_ARRAY+=("$wt_docup")
+    done
+
+    # Scalars mirror repo[0] so brain calls and shared helpers run against it.
+    WORKTREE_DIR="${WORKTREE_DIRS_ARRAY[0]}"
+    ORIGINAL_REPO_ROOT="${ORIGINAL_REPO_ROOTS_ARRAY[0]}"
+    ORIGINAL_BRAIN_AGENT_FILE="${ORIGINAL_BRAIN_AGENT_FILES_ARRAY[0]}"
+    BRAIN_AGENT_FILE="${BRAIN_AGENT_FILES_ARRAY[0]}"
+    CODING_AGENT_FILE="${CODING_AGENT_FILES_ARRAY[0]}"
+    FULL_DOC_UPDATE_FILE="${FULL_DOC_UPDATE_FILES_ARRAY[0]}"
+    DOC_DIR="${DOC_DIRS_ARRAY[0]}"
+    BASE_BRANCH="${BASE_BRANCHES_ARRAY[0]}"
+    REPO_ROOT="${WORKTREE_DIR:-$ORIGINAL_REPO_ROOT}"
+
+    success "Multi-repo state restored: ${REPO_COUNT} repos, branch ${WORKTREE_BRANCH:-<unset>}"
+}
+
+# Per-stage completion detection for multi-repo runs. Mirrors
+# detect_completed_stages but looks at per-repo artifacts so a stage is only
+# considered done when ALL repos produced their expected output.
+detect_completed_stages_multi() {
+    local a="${RUN_DIR}/artifacts"
+    STAGE_1_COMPLETE=false
+    STAGE_2_COMPLETE=false
+    STAGE_3_COMPLETE=false
+    STAGE_4_COMPLETE=false
+    STAGE_5_COMPLETE=false
+    STAGE_6_COMPLETE=false
+
+    local completed_json="[]"
+    if [[ -f "${RUN_DIR}/run_state.json" ]]; then
+        completed_json=$(jq -r '.completed_stages // []' "${RUN_DIR}/run_state.json" 2>/dev/null || echo "[]")
+    fi
+
+    local all=true
+    local i
+
+    # Stage 1: every ccr_repo_i.md non-empty
+    all=true
+    for ((i=0; i<REPO_COUNT; i++)); do
+        if [[ ! -s "${a}/ccr_repo_${i}.md" ]]; then all=false; break; fi
+    done
+    [[ "$all" == "true" ]] && STAGE_1_COMPLETE=true
+
+    # Stage 2: every implementation_report_repo_i.md non-empty
+    if [[ "$STAGE_1_COMPLETE" == "true" ]]; then
+        all=true
+        for ((i=0; i<REPO_COUNT; i++)); do
+            if [[ ! -s "${a}/implementation_report_repo_${i}.md" ]]; then all=false; break; fi
+        done
+        [[ "$all" == "true" ]] && STAGE_2_COMPLETE=true
+    fi
+
+    # Stage 3: independent_audit_prompt.md exists (final output of stage 3)
+    if [[ -s "${a}/independent_audit_prompt.md" ]]; then
+        STAGE_3_COMPLETE=true
+    fi
+
+    # Stage 4: explicit completed_stages marker is authoritative. Initial
+    # review files (phase4_r${r}_review_0_repo_${i}.md) exist after every
+    # round's first reviewer pass — including rounds where fix loops are
+    # still pending or the script crashed mid-iteration. Without this gate a
+    # mid-Stage-4 crash followed by --resume-run would skip ahead to Stage 5
+    # with broken state (the exact bug that hit the medium-risk-repricing
+    # multi-repo run on 2026-05-10).
+    if [[ "$STAGE_3_COMPLETE" == "true" ]]; then
+        if echo "$completed_json" | jq -e 'index(4)' >/dev/null 2>&1; then
+            STAGE_4_COMPLETE=true
+        else
+            # Fallback for state-file loss: every round must show converged
+            # findings across all repos (last combined re-review = 0, or
+            # combined initial review = 0 with no per-repo fix files).
+            all=true
+            local r
+            for ((r=1; r<=QA_ROUNDS; r++)); do
+                local present=true
+                for ((i=0; i<REPO_COUNT; i++)); do
+                    if [[ ! -f "${a}/phase4_r${r}_review_0_repo_${i}.md" ]]; then
+                        present=false
+                        break
+                    fi
+                done
+                if [[ "$present" != "true" ]]; then
+                    all=false
+                    break
+                fi
+                local round_done=false
+                local last_rev
+                last_rev=$(ls -1 "${a}/phase4_r${r}_rereview_"*"_combined.md" 2>/dev/null | sort -V | tail -1 || true)
+                if [[ -n "$last_rev" ]] && [[ -f "$last_rev" ]]; then
+                    local n
+                    n=$(extract_findings_count "$last_rev" 2>/dev/null | grep -oE '^[0-9]+$' | head -1 || true)
+                    [[ "$n" == "0" ]] && round_done=true
+                fi
+                if [[ "$round_done" != "true" ]]; then
+                    if ! ls -1 "${a}/phase4_r${r}_fix_"*.md >/dev/null 2>&1 \
+                        && ! ls -1 "${a}/phase4_r${r}_fixes_"*.md >/dev/null 2>&1; then
+                        local round_total=0
+                        for ((i=0; i<REPO_COUNT; i++)); do
+                            local n
+                            n=$(extract_findings_count "${a}/phase4_r${r}_review_0_repo_${i}.md" 2>/dev/null | grep -oE '^[0-9]+$' | head -1 || echo 0)
+                            [[ -z "$n" ]] && n=0
+                            round_total=$((round_total + n))
+                        done
+                        [[ $round_total -eq 0 ]] && round_done=true
+                    fi
+                fi
+                if [[ "$round_done" != "true" ]]; then
+                    all=false
+                    break
+                fi
+            done
+            [[ "$all" == "true" ]] && STAGE_4_COMPLETE=true
+        fi
+    fi
+
+    # Stage 5: every repo with a doc runbook has a documentation_report; repos
+    # without a runbook are considered done because the stage legitimately
+    # skipped them.
+    all=true
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local runbook="${FULL_DOC_UPDATE_FILES_ARRAY[$i]:-}"
+        if [[ -n "$runbook" ]] && [[ -f "$runbook" ]]; then
+            if [[ ! -s "${a}/documentation_report_repo_${i}.md" ]]; then
+                all=false
+                break
+            fi
+        fi
+    done
+    # run_state.json marker also counts — stage may have run but produced no
+    # artifacts if every repo lacks a runbook.
+    if echo "$completed_json" | jq -e 'index(5)' >/dev/null 2>&1; then
+        all=true
+    fi
+    [[ "$all" == "true" ]] && STAGE_5_COMPLETE=true
+
+    # Stage 6: every pr_url_repo_i.txt present (even "(no-changes)" is written
+    # as an artifact? — no, only real PR URLs are written. Fall back to the
+    # run_state marker.
+    all=true
+    for ((i=0; i<REPO_COUNT; i++)); do
+        if [[ ! -s "${a}/pr_url_repo_${i}.txt" ]]; then all=false; break; fi
+    done
+    if echo "$completed_json" | jq -e 'index(6)' >/dev/null 2>&1; then
+        all=true
+    fi
+    [[ "$all" == "true" ]] && STAGE_6_COMPLETE=true
+    return 0
+}
+
+# Detect a resume point inside run_multi_stage_3. Returns:
+#   ""              — stage not started (or restart from top)
+#   "audit_prompt"  — fix loop converged; only audit-prompt generation remains
+#   "loop:N:fix"    — fix iteration N, fix step not yet done
+#   "loop:N:review" — fix iteration N, fix done but re-review not done
+#
+# Mirrors detect_stage3_resume_point but uses the per-repo combined/split
+# artifacts.
+detect_stage3_multi_resume_point() {
+    local a="${RUN_DIR}/artifacts"
+
+    # Fully complete?
+    if [[ -s "${a}/independent_audit_prompt.md" ]]; then
+        echo ""
+        return 0
+    fi
+
+    # Initial review not done, OR any per-repo artifact corrupt?
+    if [[ ! -f "${a}/phase3_review_0_combined.md" ]]; then
+        echo ""
+        return 0
+    fi
+    local i n
+    for ((i=0; i<REPO_COUNT; i++)); do
+        if is_corrupt_review_artifact "${a}/phase3_review_0_repo_${i}.md"; then
+            echo ""
+            return 0
+        fi
+    done
+
+    # If initial findings were all zero, only the audit prompt remains.
+    local total=0
+    for ((i=0; i<REPO_COUNT; i++)); do
+        n=$(extract_findings_count "${a}/phase3_review_0_repo_${i}.md")
+        [[ -z "$n" ]] && n=0
+        total=$((total + n))
+    done
+    if [[ $total -eq 0 ]]; then
+        echo "audit_prompt"
+        return 0
+    fi
+
+    # Walk fix-loop iterations.
+    local iter
+    for ((iter=1; iter<=MAX_FIX_LOOPS; iter++)); do
+        # Any fix file for this iteration?
+        local any_fix=false
+        for ((i=0; i<REPO_COUNT; i++)); do
+            if [[ -f "${a}/phase3_fixes_${iter}_repo_${i}.md" ]]; then
+                any_fix=true
+                break
+            fi
+        done
+
+        if [[ "$any_fix" == "true" ]]; then
+            # Re-review for this iter done (and not corrupt)?
+            local any_corrupt=false
+            for ((i=0; i<REPO_COUNT; i++)); do
+                if is_corrupt_review_artifact "${a}/phase3_review_${iter}_repo_${i}.md"; then
+                    any_corrupt=true; break
+                fi
+            done
+            if [[ -f "${a}/phase3_review_${iter}_combined.md" ]] && [[ "$any_corrupt" == "false" ]]; then
+                # Both fix + re-review done. Sum new findings to decide if we can exit.
+                local iter_total=0
+                for ((i=0; i<REPO_COUNT; i++)); do
+                    n=$(extract_findings_count "${a}/phase3_review_${iter}_repo_${i}.md")
+                    [[ -z "$n" ]] && n=0
+                    iter_total=$((iter_total + n))
+                done
+                if [[ $iter_total -eq 0 ]]; then
+                    echo "audit_prompt"
+                    return 0
+                fi
+                continue
+            else
+                echo "loop:${iter}:review"
+                return 0
+            fi
+        else
+            echo "loop:${iter}:fix"
+            return 0
+        fi
+    done
+
+    # Loops exhausted with findings still pending — audit prompt is the only
+    # forward action left for stage 3.
+    echo "audit_prompt"
+}
+
+# Detect resume point inside run_multi_stage_4. Returns one of:
+#   ""                                   — stage not started
+#   "round:N"                            — round N initial review not done
+#   "round:N:loop:M:fix"                 — round N, fix iteration M needs fixes
+#   "round:N:loop:M:review"              — round N, fix done, re-review pending
+detect_stage4_multi_resume_point() {
+    local a="${RUN_DIR}/artifacts"
+    local r i n
+
+    for ((r=1; r<=QA_ROUNDS; r++)); do
+        # Initial review (loop 0) for this round not done?
+        if [[ ! -f "${a}/phase4_r${r}_review_0_combined.md" ]]; then
+            echo "round:${r}"
+            return 0
+        fi
+        # Any per-repo artifact corrupt? Re-run round from scratch.
+        local round_corrupt=false
+        for ((i=0; i<REPO_COUNT; i++)); do
+            if is_corrupt_review_artifact "${a}/phase4_r${r}_review_0_repo_${i}.md"; then
+                round_corrupt=true; break
+            fi
+        done
+        if [[ "$round_corrupt" == "true" ]]; then
+            echo "round:${r}"
+            return 0
+        fi
+
+        # Total initial findings for this round
+        local round_total=0
+        for ((i=0; i<REPO_COUNT; i++)); do
+            n=$(extract_findings_count "${a}/phase4_r${r}_review_0_repo_${i}.md")
+            [[ -z "$n" ]] && n=0
+            round_total=$((round_total + n))
+        done
+        if [[ $round_total -eq 0 ]]; then
+            # Round complete — move to next
+            continue
+        fi
+
+        # Walk this round's fix-loop iterations
+        local iter
+        for ((iter=1; iter<=MAX_FIX_LOOPS; iter++)); do
+            local any_fix=false
+            for ((i=0; i<REPO_COUNT; i++)); do
+                if [[ -f "${a}/phase4_r${r}_fixes_${iter}_repo_${i}.md" ]]; then
+                    any_fix=true
+                    break
+                fi
+            done
+
+            if [[ "$any_fix" == "true" ]]; then
+                local iter_corrupt=false
+                for ((i=0; i<REPO_COUNT; i++)); do
+                    if is_corrupt_review_artifact "${a}/phase4_r${r}_rereview_${iter}_repo_${i}.md"; then
+                        iter_corrupt=true; break
+                    fi
+                done
+                if [[ -f "${a}/phase4_r${r}_rereview_${iter}_combined.md" ]] && [[ "$iter_corrupt" == "false" ]]; then
+                    local iter_total=0
+                    for ((i=0; i<REPO_COUNT; i++)); do
+                        n=$(extract_findings_count "${a}/phase4_r${r}_rereview_${iter}_repo_${i}.md")
+                        [[ -z "$n" ]] && n=0
+                        iter_total=$((iter_total + n))
+                    done
+                    if [[ $iter_total -eq 0 ]]; then
+                        break  # round done
+                    fi
+                    continue
+                else
+                    echo "round:${r}:loop:${iter}:review"
+                    return 0
+                fi
+            else
+                echo "round:${r}:loop:${iter}:fix"
+                return 0
+            fi
+        done
+    done
+
+    # All rounds converged
+    echo ""
+}
+
+# Restore worktrees for a multi-repo resume. Verifies every worktree path
+# still exists on disk; fatals if any are gone (since subsequent stages
+# assume their presence). Repoints scalar globals to repo[0].
+restore_multi_repo_worktrees() {
+    info "Verifying multi-repo worktrees on disk..."
+    local missing=()
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local wt="${WORKTREE_DIRS_ARRAY[$i]:-}"
+        if [[ -z "$wt" ]] || [[ ! -d "$wt" ]]; then
+            missing+=("${REPO_NAMES_ARRAY[$i]} (expected: ${wt:-<unset>})")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        local msg="Multi-repo resume failed — ${#missing[@]} worktree(s) missing:
+"
+        local m
+        for m in "${missing[@]}"; do msg+="       - ${m}
+"; done
+        msg+="       Stages already ran inside these worktrees — work cannot be recovered.
+       To start over: re-run without --resume-run."
+        fatal "$msg"
+    fi
+
+    cd "${WORKTREE_DIRS_ARRAY[0]}"
+    success "All ${REPO_COUNT} worktrees present; working dir = ${WORKTREE_DIRS_ARRAY[0]}"
+}
+
+# ─── Multi-repo main flow orchestrator ─────────────────────────────────────
+multi_main_flow() {
+    prompt_run_config
+    banner
+
+    printf "${C_BOLD}${C_CYAN}  Starting 6-stage MULTI-REPO orchestration (${REPO_COUNT} repos)...${C_RESET}\n"
+    printf "${C_DIM}  Brain Agent (planning, ${REPO_COUNT} CCRs) ${ARROW} Coding Agents (${REPO_COUNT} sequential)${C_RESET}\n"
+    printf "${C_DIM}  Brain Agent (QA) ${ARROW} Independent Reviewers ${ARROW} Docs ${ARROW} ${REPO_COUNT} PRs${C_RESET}\n"
+    printf "\n"
+
+    # Write the multi-repo marker ASAP so a crash during task collection /
+    # branch naming is recoverable (or at least detectable) on resume.
+    save_multi_repo_state
+
+    collect_task
+
+    if [[ -z "$WORKTREE_BRANCH" ]]; then
+        auto_name_branch
+    fi
+
+    # Update with the branch name before we touch any worktree state.
+    save_multi_repo_state
+
+    create_worktrees_multi
+
+    # Final pre-stage save: worktree dirs are now populated.
+    save_multi_repo_state
+
+    save_run_state
+
+    run_multi_stage_1
+    save_run_state 1
+
+    run_multi_stage_2
+    save_run_state 2
+
+    run_multi_stage_3
+    save_run_state 3
+
+    run_multi_stage_4
+    save_run_state 4
+
+    run_multi_stage_5
+    save_run_state 5
+
+    run_multi_stage_6
+    save_run_state 6
+
+    print_summary
+    return 0
+}
+
+# ─── Multi-repo resume flow ──────────────────────────────────────────────
+# Mirrors the single-repo resume branch of main(): only runs stages that are
+# not yet marked complete, feeds the mid-stage skip_to marker to stages 3 and
+# 4, refreshes Brain/Coding sessions that are stale (>20h), and records
+# completion into run_state.json after each stage so subsequent --resume-run
+# calls pick up where we left off.
+multi_main_resume_flow() {
+    # ── Worktree state check ──────────────────────────────────────────────
+    # Three possible states on resume:
+    #   1. All N worktrees exist on disk       → repoint scalars + run stages
+    #   2. Any missing AND Stage 1 complete    → fatal (stages ran inside dead worktrees, work lost)
+    #   3. Any missing AND Stage 1 NOT complete → pre-create worktrees, then run stages
+    local all_exist=true
+    local i
+    for ((i=0; i<REPO_COUNT; i++)); do
+        local wt="${WORKTREE_DIRS_ARRAY[$i]:-}"
+        if [[ -z "$wt" ]] || [[ ! -d "$wt" ]]; then
+            all_exist=false
+            break
+        fi
+    done
+
+    if [[ "$all_exist" == "true" ]]; then
+        restore_multi_repo_worktrees
+    elif [[ "$STAGE_1_COMPLETE" == "true" ]]; then
+        # Stages already ran against those worktrees — nothing to recover.
+        restore_multi_repo_worktrees   # will fatal with the missing list
+    else
+        # Resume before any stage ran — rebuild worktrees and re-save state.
+        warn "No worktrees on disk yet — creating them before resuming stages"
+        if [[ -z "$TASK_DESCRIPTION" ]]; then
+            collect_task
+        fi
+        if [[ -z "$WORKTREE_BRANCH" ]]; then
+            auto_name_branch
+        fi
+        # Reset array accumulators so create_worktrees_multi re-populates cleanly.
+        ORIGINAL_REPO_ROOTS_ARRAY=()
+        ORIGINAL_BRAIN_AGENT_FILES_ARRAY=()
+        WORKTREE_DIRS_ARRAY=()
+        DOC_DIRS_ARRAY=()
+        BRAIN_AGENT_FILES_ARRAY=()
+        CODING_AGENT_FILES_ARRAY=()
+        FULL_DOC_UPDATE_FILES_ARRAY=()
+        CODING_SESSION_FILES_ARRAY=()
+        # Re-run multi-repo pre-flight so the arrays are freshly populated from
+        # the original (pre-worktree) repo paths before we create worktrees.
+        check_prerequisites_multi_repos
+        create_worktrees_multi
+        save_multi_repo_state
+        save_run_state
+    fi
+
+    # ── Stage 1 ──────────────────────────────────────────────────────────
+    if [[ "$STAGE_1_COMPLETE" != "true" ]]; then
+        if [[ -z "$TASK_DESCRIPTION" ]]; then
+            collect_task
+        fi
+        run_multi_stage_1
+        save_run_state 1
+        STAGE_1_COMPLETE=true
+    fi
+
+    # ── Stage 2 ──────────────────────────────────────────────────────────
+    if [[ "$STAGE_2_COMPLETE" != "true" ]]; then
+        run_multi_stage_2
+        save_run_state 2
+        STAGE_2_COMPLETE=true
+    fi
+
+    # ── Stage 3 ──────────────────────────────────────────────────────────
+    if [[ "$STAGE_3_COMPLETE" != "true" ]]; then
+        # Re-initialize Brain if session file is missing or older than 20h
+        # (Claude sessions expire ~24h). Without this the --resume call would
+        # fail on a stale session ID.
+        local brain_stale=false
+        if [[ ! -f "$BRAIN_SESSION_FILE" ]] || [[ ! -s "$BRAIN_SESSION_FILE" ]]; then
+            brain_stale=true
+        elif [[ -f "$BRAIN_SESSION_FILE" ]]; then
+            local session_age=$(( $(date +%s) - $(stat -f %m "$BRAIN_SESSION_FILE" 2>/dev/null || stat -c %Y "$BRAIN_SESSION_FILE" 2>/dev/null || echo "0") ))
+            if [[ $session_age -gt 72000 ]]; then
+                brain_stale=true
+                warn "Brain Agent session is ${session_age}s old (>20h) — likely expired"
+            fi
+        fi
+        if [[ "$brain_stale" == "true" ]]; then
+            warn "Brain Agent session missing or expired — re-initializing"
+            initialize_agent "brain" "$BRAIN_AGENT_FILE" "$BRAIN_SESSION_FILE"
+        fi
+
+        local s3_skip_to=""
+        if [[ -f "${RUN_DIR}/artifacts/phase3_review_0_combined.md" ]]; then
+            s3_skip_to=$(detect_stage3_multi_resume_point)
+        fi
+        run_multi_stage_3 "$s3_skip_to"
+        save_run_state 3
+        STAGE_3_COMPLETE=true
+    fi
+
+    # ── Stage 4 ──────────────────────────────────────────────────────────
+    if [[ "$STAGE_4_COMPLETE" != "true" ]]; then
+        # Brain session re-init for Stage 3→4 hop is not strictly required
+        # because Stage 4 uses fresh `independent-N.session` files per round,
+        # but we check anyway so a resumed Stage 4 round-1 init can hand off.
+        local brain_stale_s4=false
+        if [[ ! -f "$BRAIN_SESSION_FILE" ]] || [[ ! -s "$BRAIN_SESSION_FILE" ]]; then
+            brain_stale_s4=true
+        elif [[ -f "$BRAIN_SESSION_FILE" ]]; then
+            local session_age_s4=$(( $(date +%s) - $(stat -f %m "$BRAIN_SESSION_FILE" 2>/dev/null || stat -c %Y "$BRAIN_SESSION_FILE" 2>/dev/null || echo "0") ))
+            if [[ $session_age_s4 -gt 72000 ]]; then
+                brain_stale_s4=true
+                warn "Brain Agent session is ${session_age_s4}s old (>20h) — likely expired"
+            fi
+        fi
+        if [[ "$brain_stale_s4" == "true" ]]; then
+            warn "Brain Agent session missing or expired — re-initializing"
+            initialize_agent "brain" "$BRAIN_AGENT_FILE" "$BRAIN_SESSION_FILE"
+        fi
+
+        local s4_skip_to=""
+        s4_skip_to=$(detect_stage4_multi_resume_point)
+        run_multi_stage_4 "$s4_skip_to"
+        save_run_state 4
+        STAGE_4_COMPLETE=true
+    fi
+
+    # ── Stage 5 ──────────────────────────────────────────────────────────
+    if [[ "$STAGE_5_COMPLETE" != "true" ]]; then
+        # Re-init per-repo coding agents whose sessions are stale. Each repo
+        # has its own session file, so check them independently and only
+        # re-initialize the ones that need it.
+        local i
+        for ((i=0; i<REPO_COUNT; i++)); do
+            local coder_session="${CODING_SESSION_FILES_ARRAY[$i]}"
+            local coding_agent_file="${CODING_AGENT_FILES_ARRAY[$i]}"
+            local wt="${WORKTREE_DIRS_ARRAY[$i]}"
+            local coder_stale=false
+            if [[ ! -f "$coder_session" ]] || [[ ! -s "$coder_session" ]]; then
+                coder_stale=true
+            elif [[ -f "$coder_session" ]]; then
+                local session_age_cd=$(( $(date +%s) - $(stat -f %m "$coder_session" 2>/dev/null || stat -c %Y "$coder_session" 2>/dev/null || echo "0") ))
+                if [[ $session_age_cd -gt 72000 ]]; then
+                    coder_stale=true
+                    warn "Coding Agent for ${REPO_NAMES_ARRAY[$i]} session is ${session_age_cd}s old (>20h) — likely expired"
+                fi
+            fi
+            if [[ "$coder_stale" == "true" ]]; then
+                warn "Coding Agent session for ${REPO_NAMES_ARRAY[$i]} missing or expired — re-initializing"
+                cd "$wt"
+                initialize_agent "coding" "$coding_agent_file" "$coder_session" "coding-repo-${i}"
+                cd "$WORKTREE_DIR"
+            fi
+        done
+        run_multi_stage_5
+        save_run_state 5
+        STAGE_5_COMPLETE=true
+    fi
+
+    # ── Stage 6 ──────────────────────────────────────────────────────────
+    if [[ "$STAGE_6_COMPLETE" != "true" ]]; then
+        run_multi_stage_6
+        save_run_state 6
+        STAGE_6_COMPLETE=true
+    fi
+
+    print_summary
+    return 0
+}
+
 # ─── SECTION 20: MAIN ───────────────────────────────────────────────────────
 
 main() {
     parse_args "$@"
 
+    # Show interactive repo/branch selector if:
+    # - Not inside a git repo, OR
+    # - Inside a git repo that has no agent documents (e.g., orchestrator-canonical itself)
+    local current_root
+    current_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+
+    # ── Multi-repo WORKSPACE-HOST guard (docs-host + nested service repos) ──
+    # The host repo holds the shared "LLM coding agent documents/" but its
+    # deployable code lives in nested SIBLING service repos — each its own .git,
+    # which the host repo .gitignores. Running an orchestration against the HOST
+    # silently strands code: `git worktree add` on the host CANNOT contain the
+    # gitignored service repos, so the Coding Agent edits the real service repo
+    # in place (outside the worktree), and Stage 6 commits/pushes/PRs the docs
+    # worktree — leaving the actual fix staged-but-uncommitted in the service
+    # repo (the false-green merge-gate failures we kept hitting). When we detect
+    # we are sitting in such a host repo, FORCE the selector so a SERVICE repo
+    # becomes the worktree target (the selector already excludes the host).
+    # Monorepos (a single repo with no nested sibling .git repos) have no nested
+    # sibling repos, so this never fires for them.
+    local _workspace_host=false
+    if [[ -n "$current_root" ]]; then
+        local _host_candidate
+        _host_candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+        if [[ "$current_root" == "$_host_candidate" ]] \
+            && find "$current_root" -mindepth 2 -maxdepth 2 -name .git -print -quit 2>/dev/null | grep -q .; then
+            _workspace_host=true
+            warn "In multi-repo workspace host ($(basename "$current_root")) — deployable code lives in nested service repos."
+            warn "Forcing the repo selector so the worktree targets a SERVICE repo, not the docs host (prevents stranded-code false-greens)."
+        fi
+    fi
+
+    # Skip interactive selectors on resume — run_state.json (+ recovery fallbacks)
+    # supplies the repo, branch, model, and config. The selectors would overwrite
+    # $(pwd) and discard the resume context.
+    if [[ -z "$RESUME_RUN" ]] && { [[ -z "$current_root" ]] \
+        || [[ "$_workspace_host" == "true" ]] \
+        || { [[ ! -d "${current_root}/LLM coding agent documents" ]] && [[ ! -f "${current_root}/SERVICE_DOCUMENTATION.md" ]]; }; }; then
+        select_model_config
+        prompt_repo_count
+        if [[ "$MULTI_REPO_MODE" == "true" ]]; then
+            select_repos_and_branches_multi
+        else
+            select_repo_and_branch
+        fi
+    fi
+
     # On resume, cd into the original repo before prereq checks so they pass
     # regardless of where the script was invoked from. Priority:
-    #   1. original_repo_root field in run_state.json
-    #   2. RUN_DIR path layout: .../<repo>/runs/<repo>/<ts> → strip 3 levels
+    #   1. multi_repo_state.json → repos[0].repo_root (multi-repo runs)
+    #   2. original_repo_root field in run_state.json (single-repo runs)
+    #   3. RUN_DIR path layout: .../<repo>/runs/<repo>/<ts> → strip 3 levels
     if [[ -n "$RESUME_RUN" ]]; then
         local _resume_root=""
-        if [[ -f "${RUN_DIR}/run_state.json" ]]; then
+        # Prefer the multi-repo sidecar if present — it knows repo[0] for the
+        # multi-repo run and has priority over the single-repo state file.
+        if [[ -f "${RUN_DIR}/multi_repo_state.json" ]]; then
+            _resume_root=$(jq -r '.repos[0].repo_root // empty' "${RUN_DIR}/multi_repo_state.json" 2>/dev/null || true)
+            MULTI_REPO_MODE=true
+        fi
+        if [[ -z "$_resume_root" ]] && [[ -f "${RUN_DIR}/run_state.json" ]]; then
             _resume_root=$(jq -r '.original_repo_root // empty' "${RUN_DIR}/run_state.json" 2>/dev/null || true)
         fi
         if [[ -z "$_resume_root" ]] || [[ ! -d "$_resume_root" ]]; then
             _resume_root=$(dirname "$(dirname "$(dirname "$RUN_DIR")")")
         fi
-        # Accept the resume root if it looks like a git repo OR carries the
-        # docs subdir / SERVICE_DOCUMENTATION.md marker. The docs-only probe
-        # used to be the sole gate; a fresh clone of a target repo
-        # (e.g. a fresh clone of lastminuteoutdoors) that doesn't carry
-        # the docs subdir would then fatal even though it is the correct
-        # cwd — the .git fallback fixes that.
-        if [[ -d "${_resume_root}/.git" ]] || [[ -f "${_resume_root}/.git" ]] \
-            || [[ -d "${_resume_root}/LLM coding agent documents" ]] \
-            || [[ -f "${_resume_root}/SERVICE_DOCUMENTATION.md" ]]; then
+        if [[ -d "${_resume_root}/LLM coding agent documents" ]] || [[ -f "${_resume_root}/SERVICE_DOCUMENTATION.md" ]]; then
             cd "$_resume_root" || fatal "Cannot cd to original repo root: $_resume_root"
         else
             fatal "Cannot locate original repo for resume. Tried: $_resume_root"
@@ -5451,6 +8594,25 @@ main() {
 
     # Pre-flight
     check_prerequisites
+
+    # Multi-repo pre-flight runs AFTER check_prerequisites so slot 0's
+    # DOC_DIR/BRAIN_AGENT_FILE/etc (derived by check_prerequisites from cwd
+    # = repo[0]) are mirrored into the parallel arrays, and slots 1..N-1 are
+    # validated + populated. Skipped on resume — restore_multi_repo_state
+    # rebuilds the arrays from the on-disk sidecar state instead.
+    if [[ "$MULTI_REPO_MODE" == "true" ]] && [[ -z "$RESUME_RUN" ]]; then
+        check_prerequisites_multi_repos
+        # Override RUN_DIR so multi-repo runs are stored under a distinct
+        # subdirectory (<repo0>-multi) from single-repo runs of the same repo.
+        if [[ -z "$RUN_DIR" ]]; then
+            local _script_dir
+            _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            local _ts
+            _ts=$(date +%Y%m%d_%H%M%S)
+            RUN_DIR="${_script_dir}/runs/${REPO_NAMES_ARRAY[0]}-multi/${_ts}"
+        fi
+    fi
+
     init_run
 
     # Bring up the orchestrator tmux session as soon as RUN_DIR is known. All
@@ -5458,8 +8620,51 @@ main() {
     # so this just creates the empty session + control window.
     tmux_session_init
 
+    # Drop the multi-repo marker as early as possible so any crash from here
+    # on is detected as a multi-repo run by --resume-run (and not silently
+    # treated as single-repo). Must run after init_run (which creates RUN_DIR).
+    if [[ "$MULTI_REPO_MODE" == "true" ]] && [[ -z "$RESUME_RUN" ]]; then
+        save_multi_repo_state
+    fi
+
     # ── RESUME PATH ──────────────────────────────────────────────────────
     if [[ -n "$RESUME_RUN" ]]; then
+        # Multi-repo resume path — entered whenever the sidecar exists. All
+        # arrays, scalars, and stage flags are rebuilt from the sidecar +
+        # artifacts; the flow then hands off to multi_main_resume_flow which
+        # calls only the stages that are still incomplete.
+        if is_multi_repo_run; then
+            restore_run_state
+            restore_multi_repo_state
+            detect_completed_stages_multi
+
+            printf "\n"
+            separator
+            printf "${C_BOLD} Multi-Repo Resume Analysis (${REPO_COUNT} repos)${C_RESET}\n"
+            separator
+            printf "\n"
+            for _stage_num in 1 2 3 4 5 6; do
+                local _var="STAGE_${_stage_num}_COMPLETE"
+                if [[ "${!_var}" == "true" ]]; then
+                    success "Stage ${_stage_num}: complete (will skip)"
+                else
+                    info "Stage ${_stage_num}: incomplete (will run)"
+                fi
+            done
+            printf "\n"
+
+            if [[ "$DRY_RUN" == "true" ]]; then
+                banner
+                show_dry_run
+                exit 0
+            fi
+
+            banner
+            printf "${C_BOLD}${C_CYAN}  Resuming multi-repo orchestration from checkpoint...${C_RESET}\n\n"
+
+            multi_main_resume_flow
+            return 0
+        fi
         restore_run_state
         detect_completed_stages
 
@@ -5600,8 +8805,12 @@ main() {
             STAGE_5_COMPLETE=true
         fi
 
-        run_stage_6
-        save_run_state 6
+        # ── Stage 6 ──────────────────────────────────────────────────
+        if [[ "$STAGE_6_COMPLETE" != "true" ]]; then
+            run_stage_6
+            save_run_state 6
+            STAGE_6_COMPLETE=true
+        fi
 
         print_summary
         return 0
@@ -5614,13 +8823,19 @@ main() {
         exit 0
     fi
 
+    # Multi-repo normal path — runs its own full pipeline and returns.
+    # Single-repo path below is untouched.
+    if [[ "$MULTI_REPO_MODE" == "true" ]]; then
+        multi_main_flow
+        return 0
+    fi
+
     prompt_run_config
     banner
 
-    printf "${C_BOLD}${C_CYAN}  Starting 6-stage orchestration...${C_RESET}\n"
+    printf "${C_BOLD}${C_CYAN}  Starting 5-stage orchestration...${C_RESET}\n"
     printf "${C_DIM}  Brain Agent (planning) ${ARROW} Coding Agent (implementation) ${ARROW}${C_RESET}\n"
     printf "${C_DIM}  Brain Agent (QA) ${ARROW} Independent Reviewers ${ARROW} Documentation${C_RESET}\n"
-    printf "${C_DIM}  Stage 6 commits the change and opens a draft PR (GitHub via gh)${C_RESET}\n"
     printf "\n"
 
     collect_task
@@ -5652,11 +8867,6 @@ main() {
 
     run_stage_6
     save_run_state 6
-
-    # Orchestration ends after Stage 6: the change is committed on its branch
-    # and opened as a draft PR for full backward traceability (the TPM
-    # evaluates from the run's phase files + the PR). print_summary prints the
-    # PR URL, or the manual merge-back fallback if PR creation was skipped.
 
     print_summary
     return 0
