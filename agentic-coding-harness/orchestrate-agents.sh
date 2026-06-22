@@ -4484,53 +4484,19 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
 
     success "Committed ${changed_files} files in worktree"
 
-    # ── 6c: Save commit, remove worktree to free the branch name ────
-    subtask "Removing worktree to free branch for PR"
+    # ── 6c: Push the worktree's branch directly (standalone PR to base) ──
+    # Stage 6b already committed all changes as a single commit on the worktree
+    # branch, created off ${BASE_BRANCH} at run start — it is already a standalone
+    # branch. Push it straight from the worktree. We deliberately DO NOT remove the
+    # worktree and re-'git checkout -b' the branch in ORIGINAL_REPO_ROOT (the old
+    # flow): that branch switch rewrote THIS running script on disk mid-execution.
+    # Pushing from the worktree also lets many concurrent worktrees/runs each queue
+    # an independent standalone PR to the base branch with no cross-run conflicts.
+    subtask "Pushing worktree branch ${WORKTREE_BRANCH}"
 
-    local worktree_commit
-    worktree_commit=$(git -C "$WORKTREE_DIR" rev-parse HEAD)
-    verbose "Worktree commit: ${worktree_commit}"
-
-    cd "$ORIGINAL_REPO_ROOT"
-    git worktree remove "$WORKTREE_DIR" 2>/dev/null || true
-    success "Worktree removed"
-
-    # ── 6d: Recreate PR branch from BASE_BRANCH and cherry-pick ─────
-    subtask "Creating PR branch from ${BASE_BRANCH}"
-
-    git fetch origin "$BASE_BRANCH" 2>/dev/null || true
-    git branch -D "$WORKTREE_BRANCH" 2>/dev/null || true
-    git checkout -b "$WORKTREE_BRANCH" "origin/${BASE_BRANCH}" 2>&1 \
+    git -C "$WORKTREE_DIR" push -u origin "$WORKTREE_BRANCH" 2>&1 \
         | while IFS= read -r line; do verbose "$line"; done
-    success "Branch created: ${WORKTREE_BRANCH} (from origin/${BASE_BRANCH})"
 
-    subtask "Cherry-picking worktree commit"
-    git cherry-pick "$worktree_commit" --no-commit 2>&1 || true
-
-    local conflicts
-    conflicts=$(git diff --name-only --diff-filter=U 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "$conflicts" -gt 0 ]]; then
-        git diff --name-only --diff-filter=U | while IFS= read -r conflicted; do
-            git checkout --theirs "$conflicted" 2>/dev/null && git add "$conflicted" 2>/dev/null
-        done
-        warn "Resolved ${conflicts} conflicts (accepted worktree version)"
-    fi
-
-    git add -u
-    local final_files final_stat
-    final_files=$(git diff --cached --name-only | wc -l | tr -d ' ')
-    final_stat=$(git diff --cached --stat | tail -1)
-
-    git commit -m "${commit_msg}
-
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
-        | while IFS= read -r line; do verbose "$line"; done
-    success "Squash-merged: ${final_files} files (${final_stat})"
-
-    # ── 6e: Push and create PR ──────────────────────────────────────
-    subtask "Pushing branch and creating PR"
-    git push -u origin "$WORKTREE_BRANCH" 2>&1 \
-        | while IFS= read -r line; do verbose "$line"; done
     success "Pushed: origin/${WORKTREE_BRANCH}"
 
     # Assemble the PR body: prefer the agent's template-compliant output;
@@ -4612,6 +4578,8 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>&1 \
     fi
 
     # Draft PR via the right CLI for the remote (gh for LMO's GitHub).
+    # Open the PR from inside the worktree so tea/gh detect the right repo.
+    cd "$WORKTREE_DIR" 2>/dev/null || true
     open_pull_request "$pr_title" "$pr_body_file" "$BASE_BRANCH" "${RUN_DIR}/artifacts/pr_url.txt"
 
     stage_complete "6" "$phase_start"
