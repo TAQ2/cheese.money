@@ -5127,8 +5127,12 @@ detect_base_branch() {
 
     info "Detecting base branch (stacked PR philosophy)..."
 
-    # Try gh CLI first — most reliable for finding open PRs
-    if command -v gh &>/dev/null; then
+    # Try gh CLI first — most reliable for finding open PRs. GitHub remotes ONLY:
+    # gh cannot talk to Gitea/self-hosted, so it must not drive base detection there
+    # (it returns nothing and the run would otherwise mis-base off a stale branch).
+    local _origin_url
+    _origin_url=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || echo "")
+    if [[ "$_origin_url" == *github.com* ]] && command -v gh &>/dev/null; then
         local latest_pr_branch
         latest_pr_branch=$(gh pr list --state open --json headRefName,updatedAt \
             --jq 'sort_by(.updatedAt) | reverse | .[0].headRefName' 2>/dev/null || true)
@@ -5147,7 +5151,7 @@ detect_base_branch() {
             verbose "No open PRs found via gh CLI"
         fi
     else
-        verbose "gh CLI not installed — skipping PR detection"
+        verbose "Non-GitHub remote or gh unavailable — base = default branch"
     fi
 
     # Fallback: the most recently pushed *origin* feature branch (not main/master/HEAD).
@@ -5683,4 +5687,8 @@ main() {
     return 0
 }
 
-main "$@"
+# Stage 6 (open_pull_request) runs `git checkout -b` in this same working tree,
+# which can rewrite THIS file on disk while bash is still reading it by byte-offset.
+# Exit the instant main returns so bash never parses past here into swapped-out
+# bytes — that stray read caused a phantom "syntax error near `('" at exit.
+main "$@"; exit $?
