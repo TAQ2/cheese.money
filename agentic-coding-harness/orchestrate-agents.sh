@@ -4724,8 +4724,22 @@ open_pull_request() {
             warn "${label}tea CLI not installed — branch pushed; install with 'brew install tea' and 'tea login add', then open the Gitea PR manually."
             echo "(failed)" > "$url_out_file"; return 0
         fi
-        pr_url=$(tea pull create ${TEA_LOGIN:+--login $TEA_LOGIN} --head "$WORKTREE_BRANCH" --base "$base" \
-            --title "WIP: ${pr_title}" --description "$(cat "$pr_body_file")" 2>&1) || true
+        # Build argv as an ARRAY so --login and its value are always two
+        # separate argv entries — immune to IFS. This script sets IFS=$'\n\t'
+        # (no space), so the old unquoted `${TEA_LOGIN:+--login $TEA_LOGIN}` did
+        # NOT word-split `--login <name>`; tea received it as ONE token and
+        # failed with "flag provided but not defined: -login <name>". An array
+        # passes them as distinct args regardless of IFS or any quoting.
+        local -a tea_args=(pull create --head "$WORKTREE_BRANCH" --base "$base"
+                           --title "WIP: ${pr_title}" --description "$(cat "$pr_body_file")")
+        [[ -n "$TEA_LOGIN" ]] && tea_args+=(--login "$TEA_LOGIN")
+        pr_url=$(tea "${tea_args[@]}" 2>&1) || true
+        # Fallback: explicit --login rejected (stale tea / login drift) -> retry
+        # via cwd auto-detect + default login (we are already inside the worktree).
+        if [[ -n "$TEA_LOGIN" ]] && ! echo "$pr_url" | grep -qE 'https?://'; then
+            pr_url=$(tea pull create --head "$WORKTREE_BRANCH" --base "$base" \
+                --title "WIP: ${pr_title}" --description "$(cat "$pr_body_file")" 2>&1) || true
+        fi
         if echo "$pr_url" | grep -qE 'https?://'; then
             success "${label}PR created: $(echo "$pr_url" | grep -oE 'https?://[^[:space:]]+' | head -1)"
             echo "$pr_url" | grep -oE 'https?://[^[:space:]]+' | head -1 > "$url_out_file"
