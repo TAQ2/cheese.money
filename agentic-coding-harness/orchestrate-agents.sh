@@ -4304,8 +4304,8 @@ run_stage_6() {
     _stage6_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local pr_template_file="${_stage6_script_dir}/PR_DESCRIPTION_TEMPLATE.md"
 
-    # ── 6a: Commit message + fallback What/Why/How via Haiku ─────────
-    subtask "Generating PR metadata (commit + fallback What/Why/How) via Haiku"
+    # ── 6a: Commit message + fallback What/Why/How via the Coding Agent ─────────
+    subtask "Generating PR metadata (commit + fallback What/Why/How) via the Coding Agent"
 
     local ccr_file="${RUN_DIR}/artifacts/ccr.md"
     local task_file="${RUN_DIR}/artifacts/business_problem.md"
@@ -4313,8 +4313,8 @@ run_stage_6() {
     [[ -f "$task_file" ]] && task_text=$(cat "$task_file")
     [[ -f "$ccr_file" ]] && ccr_text=$(head -400 "$ccr_file")
 
-    local haiku_prompt
-    haiku_prompt=$(cat <<PROMPT_BOUNDARY
+    local meta_prompt
+    meta_prompt=$(cat <<PROMPT_BOUNDARY
 You are generating pull request metadata from a completed code-change request.
 
 Read the BUSINESS PROBLEM and the CCR below and produce a single JSON object with EXACTLY these four string fields (no extra keys, no code fences, no commentary — just the JSON object):
@@ -4341,7 +4341,14 @@ PROMPT_BOUNDARY
 )
 
     local inner=""
-    inner=$(tmux_oneshot haiku "$haiku_prompt" 2>/dev/null || true)
+    # PR metadata from the warm Coding Agent (it just implemented this change, so the
+    # commit message + What/Why/How reflect what was actually done — not a cold Haiku
+    # read of the CCR). The agent's response is the JSON object specified above.
+    local _meta_prompt_file="${RUN_DIR}/prompts/phase6_pr_metadata.md"
+    printf '%s\n' "$meta_prompt" > "$_meta_prompt_file"
+    local _meta_output="${RUN_DIR}/artifacts/pr_metadata.md"
+    invoke_agent "$CODING_SESSION_FILE" "$CODING_AGENT_FILE" "$_meta_output" "Coding Agent (PR metadata)" "$_meta_prompt_file"
+    inner=$(cat "$_meta_output" 2>/dev/null || true)
     if [[ -n "$inner" ]]; then
         inner=$(echo "$inner" | sed -E 's/^[[:space:]]*```(json)?[[:space:]]*//; s/```[[:space:]]*$//' | sed '/^$/d')
     fi
@@ -4370,7 +4377,7 @@ PROMPT_BOUNDARY
         if [[ -n "$commit_msg" ]]; then
             warn "Haiku commit message failed validation (len=${commit_msg_len}): '${commit_msg}'"
         else
-            warn "Could not generate commit message via Haiku — using branch-name fallback"
+            warn "Could not generate commit message via the Coding Agent — using branch-name fallback"
         fi
         commit_msg="$fallback_msg"
     else
