@@ -39,4 +39,4 @@ A brief is **validated problem + acceptance, not a solution design** (that's the
 
 ## Handoff
 
-Confirm the brief with the human, then paste it verbatim as the orchestrator's `--task` (or `--task-file`) so Stage 1 plans from it. A good brief makes the Brain Agent's first move obvious: *can this shrink or disappear?* — and if not, *what is the smallest correct shape?*
+Deliver the brief **INLINE, in the conversation — never write it to a `.md` (or any) file.** It is the handoff payload, not a repo artifact: a file breaks readability and traceability (the brief drifts from the decision it justifies) and leaves untracked/unstaged `.md` clutter that pollutes every later `git status` and can ride into the wrong commit. Confirm the brief with the human, then paste it verbatim as the orchestrator's `--task` (or `--task-file`) so Stage 1 plans from it — the conversation (and the orchestrator's own saved `business_problem.md` run artifact) is the record, not a hand-authored brief file. A good brief makes the Brain Agent's first move obvious: *can this shrink or disappear?* — and if not, *what is the smallest correct shape?*
