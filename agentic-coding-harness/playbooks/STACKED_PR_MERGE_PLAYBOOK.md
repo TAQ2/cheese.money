@@ -1,5 +1,7 @@
 # Stacked PR Merge-Forward Playbook
 
+> **Applies only to `STAGE6_MODE=pr`.** In the default `STAGE6_MODE=commit` the orchestrator opens no pull requests — it lands a rich, template-compliant commit on the worktree branch that you fast-forward into the base (see `WORKTREE_TO_MAIN_PLAYBOOK.md`), so there is no stacked-PR chain to merge-forward. Use this playbook only when you deliberately run Stage 6 in PR mode.
+
 ## Context
 
 Many teams use **squash-and-merge**. When a PR is squash-merged, the host (GitHub/Gitea) creates a new commit hash on the base branch that does not match the original branch's commits. Downstream branches in a **stacked PR chain** can't recognize that squash commit, so they show conflicts with the base even though the content is logically identical.

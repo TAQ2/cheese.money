@@ -63,7 +63,7 @@ The doctrine is carried in three places that must stay in agreement:
 | `bash` ≥ 4 | Uses `mapfile` (macOS ships 3.2 — `brew install bash`) |
 | `jq` | Parses the Claude CLI stream-json output |
 | `git` with worktrees | All stages run inside a disposable worktree |
-| `gh` (GitHub) **or** `tea` (Gitea) | Stage 6 opens the PR — pick the one matching your remote |
+| `gh` (GitHub) **or** `tea` (Gitea) | Only for `STAGE6_MODE=pr` — Stage 6 opens a draft PR (pick the one matching your remote). Not needed in the default commit mode |
 
 ---
 
