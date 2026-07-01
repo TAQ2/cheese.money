@@ -17,7 +17,8 @@ Stage 2  Coding Agent             Implementation of the CCR
 Stage 3  Brain Agent (Mode 2)     QA review + fix loop until convergence
 Stage 4  Independent Reviewer(s)  Fresh Brain sessions + fix loops (N rounds)
 Stage 5  Coding Agent             Documentation finalization via runbook
-Stage 6  Git Operations           Commit → push → open a draft PR (GitHub `gh` or Gitea `tea`)
+Stage 6  Git Operations           Rich commit (full template body) → push branch  [STAGE6_MODE=commit, default]
+                                   — or — subject-only commit → push → draft PR   [STAGE6_MODE=pr, gh / tea]
 ```
 
 Everything runs inside a disposable **git worktree** branched from the tip of the current PR stack. Nothing is committed to the working repo until Stage 6. Every prompt, raw output, session, and artifact is persisted under `runs/<repo>/<timestamp>/` so any run is fully resumable and auditable.
@@ -28,7 +29,7 @@ Everything runs inside a disposable **git worktree** branched from the tip of th
 
 | Path | What it is | Adapt? |
 |---|---|---|
-| `orchestrate-agents.sh` | The orchestrator engine (tmux variant). | Edit the **CONFIG / ADAPT** header block (workspace dir, VCS host, commit convention). |
+| `orchestrate-agents.sh` | The orchestrator engine (tmux variant). | Edit the **CONFIG / ADAPT** header block (workspace dir, VCS host, commit convention, `STAGE6_MODE`). |
 | `doctrine/MINIMUM_ENTROPY_MANIFESTO.md` | The complexity doctrine — *how much* you build. Prime directive: Principle 0. | Language- and codebase-agnostic; keep verbatim (swap the one project-anchored example in 0.7). |
 | `doctrine/CAVEMAN_CODE.md` | Operational companion — smallest-diff, read-before-write working mode. | Keep verbatim. |
 | `templates/BRAIN_AGENT.template.md` | Brain Agent (planner/reviewer) instructions. | Fill `{{PLACEHOLDERS}}`. |
@@ -84,5 +85,5 @@ Full step-by-step in [`INSTANTIATE.md`](./INSTANTIATE.md).
 
 - Runs inside a **git worktree** — agents can only mutate the worktree, never the original repo root.
 - **Staged-but-not-committed** until Stage 6 — bail at any checkpoint and inspect with `git diff`.
-- **Draft PRs only** — Stage 6 opens the PR as a draft (`gh --draft` / Gitea `WIP:` prefix); a human marks it ready.
+- **Rich commit by default, or draft PR** — by default (`STAGE6_MODE=commit`) Stage 6 ends with one rich, template-compliant commit pushed to the worktree branch (no PR), for a human to fast-forward into `main`; set `STAGE6_MODE=pr` to open a draft instead (`gh --draft` / Gitea `WIP:` prefix) that a human marks ready.
 - Global + inactivity timeouts kill hung runs; an oversized-prompt guard rejects prompts before they hit Claude.
