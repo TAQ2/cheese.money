@@ -90,6 +90,6 @@ Stay attached (`tmux attach`) and supervise. Stage 1 pauses for you to approve t
 
 - `bash -n orchestrate-agents.sh` clean.
 - A `--dry-run` shows your repo, base branch, and the model picker.
-- A real run on a tiny task produces a draft PR whose body follows the template.
+- A real run on a tiny task ends with a rich commit whose message follows the template (or a draft PR in `STAGE6_MODE=pr`).
 
 That last one — a real end-to-end run on a throwaway task — is the only true proof. Do it once before relying on the harness.

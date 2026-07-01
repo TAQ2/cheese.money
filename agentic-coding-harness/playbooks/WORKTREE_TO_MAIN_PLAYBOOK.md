@@ -1,6 +1,6 @@
 # Worktree to Main — Manual Merge Playbook
 
-How to merge a completed orchestration worktree back into the base branch as **staged (uncommitted)** changes, so you review them in your editor's Source Control panel before committing. Use this when you stop **before** the orchestrator's Stage 6 (auto-PR) and merge by hand. One worktree at a time, sequentially.
+How to merge a completed orchestration worktree back into the base branch as **staged (uncommitted)** changes, so you review them in your editor's Source Control panel before committing. Use this when you stop **before** the orchestrator's Stage 6 (which by default — `STAGE6_MODE=commit` — lands a single rich, template-compliant commit on the worktree branch, or opens a draft PR in `STAGE6_MODE=pr`) and merge by hand. When Stage 6 *did* run in commit mode, this is also how you fast-forward that rich commit onto `<base>` — review it, then merge. One worktree at a time, sequentially.
 
 Placeholders: `<repo>` = your repo working dir · `<repo>-wt-<feature>` = the orchestrator's worktree · `<feature>` = the worktree branch · `<base>` = the target branch (usually `main`).
 

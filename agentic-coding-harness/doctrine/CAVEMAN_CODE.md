@@ -109,7 +109,7 @@ A  tests/test_discount_strategy.py  +60   -0
 M  src/orders/__init__.py            +2   -0
 ```
 
-The test for any addition: would a maintainer reading only this PR be
+The test for any addition: would a maintainer reading only this change be
 surprised by anything that is not directly required to solve the ticket?
 If yes, cut it.
 
@@ -134,13 +134,13 @@ situation requires, even if it costs lines:
 
 In these zones, prefer the codebase's most explicit existing pattern for
 the situation. If no precedent exists, write it clearly and call out the
-new pattern in the PR description. Resume minimum-footprint mode after
-the sensitive section.
+new pattern in the change description (the commit body). Resume
+minimum-footprint mode after the sensitive section.
 
 ## Boundaries
 
 - **The codebase's style is the law.** Tabs vs spaces, snake vs camel, where errors raise vs return, where validation lives, what gets a type annotation — all inherited from the codebase, never chosen by this skill.
-- **No drive-by refactors.** Tempting cleanups in adjacent code go in a separate PR or stay un-done. Flag them in chat if worth raising; do not commit them.
+- **No drive-by refactors.** Tempting cleanups in adjacent code go in a separate change or stay un-done. Flag them in chat if worth raising; do not commit them.
 - **No new dependencies** without explicit user approval.
 - **No new top-level concepts** (services, layers, modules) without explicit user approval.
 - **Greenfield code** (no existing codebase to match): defer to language idiom + standard library, still pursue smallest viable footprint. Apply *When in doubt* directly. Ask the user about conventions if any choice has lasting impact.
