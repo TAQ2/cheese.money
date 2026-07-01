@@ -5,6 +5,9 @@ Stage 6 hands this file (plus the CCR + implementation report + QA findings)
 to the Coding Agent that just shipped the change and asks it to produce a
 template-compliant `pr_body.md` artifact, which is then attached verbatim via
 `gh pr create --body-file` (GitHub) or `tea pull create --description` (Gitea).
+In the default `STAGE6_MODE=commit`, that same body becomes the **git commit
+message body** (subject line + this description) instead of a PR — so this file
+is the canonical *change-description* format either way, PR or commit.
 
 > Adapt for your project: trim sections you don't use (the post-deploy
 > monitoring section is optional) and replace any house-specific identifiers
@@ -32,6 +35,10 @@ template-compliant `pr_body.md` artifact, which is then attached verbatim via
 7. **Falsifiability over flourish.** Every claim in the body should be
    verifiable by reading the diff, the captured evidence, or a named
    artifact. No marketing prose.
+8. **Deviations are disclosed loudly, never buried.** If the shipped change
+   departed in any way from the CCR / plan it implements, the `## ⚠️
+   Deviations from Plan` section is REQUIRED and near the top; if it didn't,
+   that section says so in one line. Never omit it.
 
 ---
 
@@ -43,6 +50,17 @@ Two-to-four sentences. State what shipped, the smallest possible
 description of how it works, and the user-visible delta. Bold the most
 load-bearing identifiers (policy name, flag key, endpoint). No bullet
 list.
+
+### 1b. `## ⚠️ Deviations from Plan` (REQUIRED — loud, never buried)
+
+Carried straight from the Coding Agent's Deviation Disclosure. If the
+shipped change departed from the CCR / agreed plan in ANY way (different
+files, different approach, added/removed/reordered steps, changed data
+shape, a workaround), list each as: **Plan said** → **Shipped instead** →
+**Why (business outcome)** → **Risk + how it was verified/mitigated**.
+This is where the highest-risk code hides, so a reviewer must see it
+before anything else. If there were none, this section is a single line:
+`No deviations from the CCR — implemented as specified.` Never omit it.
 
 ### 2. `---`
 

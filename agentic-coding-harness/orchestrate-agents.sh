@@ -66,7 +66,8 @@ IFS=$'\n\t'
 #   Stage 3: Original Thinker QA — Mode 2 review + fix loop until convergence
 #   Stage 4: Independent Reviewer(s) — Fresh sessions + fix loop (N rounds)
 #   Stage 5: Coding Agent — Documentation finalization via runbook
-#   Stage 6: Merge worktree → commit → push → open PR
+#   Stage 6: Rich commit (full template body) → push branch  [STAGE6_MODE=commit, default]
+#            — or — subject-only commit → push → open draft PR  [STAGE6_MODE=pr]
 #
 # Prerequisites:
 #   - Claude Code CLI installed and authenticated (`claude` command)
@@ -248,9 +249,9 @@ readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_START=$(date +%s)
 
 # Model configuration (set by select_model_config, overridable via --brain-model / --coder-model)
-BRAIN_MODEL="claude-opus-4-8"
+BRAIN_MODEL="claude-fable-5"
 CODER_MODEL="claude-opus-4-8"
-MODEL_CONFIG_LABEL="Opus + Opus (default)"
+MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Opus 4.8 (1M) — default"
 
 # Default editor — nano is more intuitive than vi for interactive use
 : "${EDITOR:=nano}"
@@ -385,6 +386,19 @@ TEA_LOGIN=""
 # xhigh and cannot change it. xhigh = very deep reasoning — burns more
 # 5h-cap tokens per turn than standard tiers but yields near-max quality.
 EFFORT_LEVEL="xhigh"
+
+# ─── Stage 6 landing mode ────────────────────────────────────────────────────
+# How a completed run lands its change:
+#   "commit" (default) — end with a single RICH, template-compliant commit on
+#                        the worktree branch (subject + the full change
+#                        description as the commit body) and push the branch.
+#                        NO pull request. Fits low-collaboration repos (1–2 devs)
+#                        with no PR-gated CI or branch protection.
+#   "pr"               — legacy: subject-only commit → push → open a DRAFT PR
+#                        (gh on GitHub, tea 'WIP:' on Gitea). Use for repos with
+#                        PR-triggered CI, branch protection, or >2 collaborators.
+# Override per run with:  STAGE6_MODE=pr ./orchestrate-agents.sh ...
+STAGE6_MODE="${STAGE6_MODE:-commit}"
 
 # Cumulative metrics
 TOTAL_COST="0"
@@ -4333,7 +4347,7 @@ run_stage_5() {
 run_stage_6() {
     local phase_start
     phase_start=$(date +%s)
-    stage_header "6" "6" "MERGE WORKTREE → PR CREATION" "Git Operations" "$C_BG_BLUE"
+    stage_header "6" "6" "$([[ "$STAGE6_MODE" == "commit" ]] && echo "COMMIT → PUSH BRANCH (no PR)" || echo "MERGE WORKTREE → PR CREATION")" "Git Operations" "$C_BG_BLUE"
 
     # Resolve the canonical PR description template that lives alongside this
     # script. Used by the Coding Agent body-generation step further down to
@@ -4677,13 +4691,36 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" 2>&1 \
         } > "$pr_body_file"
     fi
 
-    # PRs are ALWAYS opened in draft mode (gh --draft on GitHub, Gitea 'WIP:'
-    # title prefix on self-hosted Gitea) — the orchestrator's output is reviewed
-    # by a human before it's marked ready. open_pull_request picks gh or tea by
-    # the origin remote.
-    # Open the PR from inside the worktree so tea/gh detect the right repo.
-    cd "$WORKTREE_DIR" 2>/dev/null || true
-    open_pull_request "$pr_title" "$pr_body_file" "$BASE_BRANCH" "${RUN_DIR}/artifacts/pr_url.txt"
+    if [[ "$STAGE6_MODE" == "commit" ]]; then
+        # Commit mode: fold the full template-compliant change description into
+        # the commit body. The subject-only commit + push above already created
+        # the branch; we amend to attach the rich body now that it's assembled,
+        # then force-push the just-created throwaway branch (safe — no one else
+        # has it). No PR is opened; the run ends with a rich commit on the branch
+        # for you to fast-forward into ${BASE_BRANCH}.
+        local commit_msg_file="${RUN_DIR}/artifacts/commit_message.txt"
+        {
+            printf '%s\n\n' "$commit_msg"
+            cat "$pr_body_file"
+            printf '\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n'
+        } > "$commit_msg_file"
+        git -C "$WORKTREE_DIR" commit --amend -F "$commit_msg_file" 2>&1 \
+            | while IFS= read -r line; do verbose "$line"; done
+        git -C "$WORKTREE_DIR" push --force-with-lease -u origin "$WORKTREE_BRANCH" 2>&1 \
+            | while IFS= read -r line; do verbose "$line"; done
+        local _landed_sha
+        _landed_sha=$(git -C "$WORKTREE_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        printf 'commit %s pushed to origin/%s (STAGE6_MODE=commit — no PR)\n' \
+            "$_landed_sha" "$WORKTREE_BRANCH" > "${RUN_DIR}/artifacts/pr_url.txt"
+        success "Landed as rich commit ${_landed_sha} on origin/${WORKTREE_BRANCH} — fast-forward ${BASE_BRANCH} to merge (no PR)"
+    else
+        # PR mode: open a DRAFT PR (gh --draft on GitHub, Gitea 'WIP:' prefix) —
+        # reviewed by a human before it's marked ready. open_pull_request picks
+        # gh or tea by the origin remote. Open from inside the worktree so tea/gh
+        # detect the right repo.
+        cd "$WORKTREE_DIR" 2>/dev/null || true
+        open_pull_request "$pr_title" "$pr_body_file" "$BASE_BRANCH" "${RUN_DIR}/artifacts/pr_url.txt"
+    fi
 
     stage_complete "6" "$phase_start"
 }
@@ -5485,42 +5522,44 @@ select_model_config() {
 
     printf "  ${C_BOLD}Select agent model configuration:${C_RESET}\n"
     printf "\n"
-    printf "  ${C_BOLD}${C_CYAN}  1${C_RESET}  Brain ${C_BOLD}Opus${C_RESET} (1M ctx)   +  Coder ${C_BOLD}Opus${C_RESET} (1M ctx)    ${C_DIM}— max quality, max cost${C_RESET}\n"
-    printf "  ${C_BOLD}${C_CYAN}  2${C_RESET}  Brain ${C_BOLD}Opus${C_RESET} (1M ctx)   +  Coder ${C_BOLD}Sonnet${C_RESET} (200k ctx)  ${C_DIM}— smart planning, fast coding${C_RESET}\n"
-    printf "  ${C_BOLD}${C_CYAN}  3${C_RESET}  Brain ${C_BOLD}Sonnet${C_RESET} (200k ctx) +  Coder ${C_BOLD}Opus${C_RESET} (1M ctx)    ${C_DIM}— fast planning, thorough coding${C_RESET}\n"
-    printf "  ${C_BOLD}${C_CYAN}  4${C_RESET}  Brain ${C_BOLD}Sonnet${C_RESET} (200k ctx) +  Coder ${C_BOLD}Sonnet${C_RESET} (200k ctx)  ${C_DIM}— fastest, lowest cost${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  1${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} (1M ctx)  +  Coder ${C_BOLD}Opus 4.8${C_RESET} (1M ctx)  ${C_DIM}— heaviest reasoning to plan, flagship coder (default)${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  2${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} (1M ctx)  +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— max capability everywhere, max cost${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  3${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) +  Coder ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) ${C_DIM}— flagship both, lower cost${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  4${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— flagship planning, heaviest coder${C_RESET}\n"
     printf "\n"
     printf "  ${C_BOLD}Select [1-4] (Enter = 1): ${C_RESET}"
 
     local model_choice
     read -r model_choice
 
+    # Fable 5 = claude-fable-5 (most capable, $10/$50 per MTok, 1M ctx, supports xhigh effort).
+    # Opus 4.8 = claude-opus-4-8 (flagship coder, $5/$25 per MTok, 1M ctx). Both take --effort xhigh.
     case "${model_choice:-1}" in
         1)
-            BRAIN_MODEL="claude-opus-4-8"
+            BRAIN_MODEL="claude-fable-5"
             CODER_MODEL="claude-opus-4-8"
-            MODEL_CONFIG_LABEL="Brain Opus (1M) + Coder Opus (1M)"
+            MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Opus 4.8 (1M)"
             ;;
         2)
-            BRAIN_MODEL="claude-opus-4-8"
-            CODER_MODEL="claude-sonnet-4-6"
-            MODEL_CONFIG_LABEL="Brain Opus (1M) + Coder Sonnet (200k)"
+            BRAIN_MODEL="claude-fable-5"
+            CODER_MODEL="claude-fable-5"
+            MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Fable 5 (1M)"
             ;;
         3)
-            BRAIN_MODEL="claude-sonnet-4-6"
-            CODER_MODEL="claude-opus-4-8"
-            MODEL_CONFIG_LABEL="Brain Sonnet (200k) + Coder Opus (1M)"
-            ;;
-        4)
-            BRAIN_MODEL="claude-sonnet-4-6"
-            CODER_MODEL="claude-sonnet-4-6"
-            MODEL_CONFIG_LABEL="Brain Sonnet (200k) + Coder Sonnet (200k)"
-            ;;
-        *)
-            warn "Invalid selection '${model_choice}' — using default (Opus + Opus)"
             BRAIN_MODEL="claude-opus-4-8"
             CODER_MODEL="claude-opus-4-8"
-            MODEL_CONFIG_LABEL="Brain Opus (1M) + Coder Opus (1M)"
+            MODEL_CONFIG_LABEL="Brain Opus 4.8 (1M) + Coder Opus 4.8 (1M)"
+            ;;
+        4)
+            BRAIN_MODEL="claude-opus-4-8"
+            CODER_MODEL="claude-fable-5"
+            MODEL_CONFIG_LABEL="Brain Opus 4.8 (1M) + Coder Fable 5 (1M)"
+            ;;
+        *)
+            warn "Invalid selection '${model_choice}' — using default (Fable 5 Brain + Opus 4.8 Coder)"
+            BRAIN_MODEL="claude-fable-5"
+            CODER_MODEL="claude-opus-4-8"
+            MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Opus 4.8 (1M)"
             ;;
     esac
 
@@ -7774,7 +7813,28 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" 2>&1 \
         fi
 
         cd "$wt" 2>/dev/null || true
-        open_pull_request "$pr_title" "$pr_body_file" "$base" "${RUN_DIR}/artifacts/pr_url_repo_${i}.txt" "${repo_name}: "
+        if [[ "$STAGE6_MODE" == "commit" ]]; then
+            # Commit mode: fold the full template-compliant change description
+            # into ${repo_name}'s commit body, then force-push the just-created
+            # throwaway branch (safe — no one else has it). No PR is opened.
+            local commit_msg_file="${RUN_DIR}/artifacts/commit_message_repo_${i}.txt"
+            {
+                printf '%s\n\n' "$commit_msg"
+                cat "$pr_body_file"
+                printf '\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n'
+            } > "$commit_msg_file"
+            git -C "$wt" commit --amend -F "$commit_msg_file" 2>&1 \
+                | while IFS= read -r line; do verbose "$line"; done
+            git -C "$wt" push --force-with-lease -u origin "$WORKTREE_BRANCH" 2>&1 \
+                | while IFS= read -r line; do verbose "$line"; done
+            local _landed_sha
+            _landed_sha=$(git -C "$wt" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+            printf 'commit %s pushed to origin/%s (STAGE6_MODE=commit — no PR)\n' \
+                "$_landed_sha" "$WORKTREE_BRANCH" > "${RUN_DIR}/artifacts/pr_url_repo_${i}.txt"
+            success "${repo_name}: landed as rich commit ${_landed_sha} on origin/${WORKTREE_BRANCH} (no PR)"
+        else
+            open_pull_request "$pr_title" "$pr_body_file" "$base" "${RUN_DIR}/artifacts/pr_url_repo_${i}.txt" "${repo_name}: "
+        fi
         PR_URLS_ARRAY+=("$(cat "${RUN_DIR}/artifacts/pr_url_repo_${i}.txt" 2>/dev/null || echo '(failed)')")
 
         # Return to repo[0] original root so subsequent loop iterations work

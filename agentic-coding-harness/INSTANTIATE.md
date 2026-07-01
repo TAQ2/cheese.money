@@ -58,9 +58,14 @@ Edit `playbooks/FULL_DOCUMENTATION_UPDATE.md` to list your real documentation se
 
 ---
 
-## 5. Set up the PR path
+## 5. Set up the landing path (commit — default — or PR)
 
-- **GitHub**: `gh auth login` once. Stage 6 uses `gh pr create --draft`.
+Stage 6's ending is controlled by `STAGE6_MODE` in the CONFIG block:
+
+- **`commit` (default)** — the run ends with a single rich, template-compliant commit (subject + the full change description as the body) pushed to the worktree branch. No PR, no `gh`/`tea` needed. Best for 1–2-dev repos with no PR-gated CI or branch protection; fast-forward it into `main` when ready (see `playbooks/WORKTREE_TO_MAIN_PLAYBOOK.md`).
+- **`pr`** — opens a draft PR against the base branch; configure the host below.
+
+- **GitHub**: `gh auth login` once. Stage 6 (`pr` mode) uses `gh pr create --draft`.
 - **Gitea**: `brew install tea` then `tea login add` (use `-i` if your instance has a self-signed/weak cert). On Gitea 1.20+, grant the token the **full scope set up front** to avoid incremental "missing scope" errors — `read:user,write:user,read:repository,write:repository,write:organization,read:issue,write:issue` (repo-create needs `write:user`; PR create/merge needs `read:issue`+`write:issue`, since PRs are issues in Gitea; the legacy `repo` scope is rejected). Set `TEA_LOGIN` in the orchestrator. Stage 6 uses `tea pull create` with a `WIP:` title prefix for draft.
 
 Trim `templates/PR_DESCRIPTION_TEMPLATE.md` to the sections you actually use (the monitoring/observability section is optional).
