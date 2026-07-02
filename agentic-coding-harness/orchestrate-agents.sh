@@ -8625,13 +8625,22 @@ main() {
         fi
     fi
 
-    # Skip interactive selectors on resume — run_state.json (+ recovery fallbacks)
-    # supplies the repo, branch, model, and config. The selectors would overwrite
-    # $(pwd) and discard the resume context.
+    # Model picker ALWAYS runs — decoupled from repo selection so it is never
+    # skipped when the run starts from a repo that already has its docs (the
+    # run-from-root case, where the repo-selection block below is a no-op).
+    # Skipped only on resume, where run_state.json restores the model.
+    if [[ -z "$RESUME_RUN" ]]; then
+        select_model_config
+    fi
+
+    # Skip interactive REPO selection on resume — run_state.json (+ recovery
+    # fallbacks) supplies the repo, branch, and config. Also skipped when we
+    # already sit in a valid single repo (its docs are present); forced when no
+    # root is resolvable or we are in a multi-repo workspace host (must target a
+    # service repo, not the docs host).
     if [[ -z "$RESUME_RUN" ]] && { [[ -z "$current_root" ]] \
         || [[ "$_workspace_host" == "true" ]] \
         || { [[ ! -d "${current_root}/LLM coding agent documents" ]] && [[ ! -f "${current_root}/SERVICE_DOCUMENTATION.md" ]]; }; }; then
-        select_model_config
         prompt_repo_count
         if [[ "$MULTI_REPO_MODE" == "true" ]]; then
             select_repos_and_branches_multi
