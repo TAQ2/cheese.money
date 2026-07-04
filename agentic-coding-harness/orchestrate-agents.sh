@@ -1486,7 +1486,8 @@ invoke_agent() {
 
     # Select model — same heuristic as canonical
     local active_model="$BRAIN_MODEL"
-    if [[ "$session_file" == *"coding"* ]] || [[ "$session_file" == *"coder"* ]]; then
+    local _sf_base; _sf_base="$(basename "$session_file")"
+    if [[ "$_sf_base" == *"coding"* ]] || [[ "$_sf_base" == *"coder"* ]]; then
         active_model="$CODER_MODEL"
     fi
 
@@ -5533,8 +5534,9 @@ model_label() {
 # The model a given agent session runs on — mirrors the active_model heuristic in
 # invoke_agent: coding/coder sessions → CODER_MODEL, everything else → BRAIN_MODEL.
 agent_model_label() {
-    local m="$BRAIN_MODEL"
-    [[ "$1" == *"coding"* || "$1" == *"coder"* ]] && m="$CODER_MODEL"
+    local b m="$BRAIN_MODEL"
+    b="$(basename "$1")"
+    [[ "$b" == *"coding"* || "$b" == *"coder"* ]] && m="$CODER_MODEL"
     model_label "$m"
 }
 
