@@ -1482,7 +1482,7 @@ invoke_agent() {
         verbose "Caveman mode (${CAVEMAN_MODE}) applied to call #${call_num}"
     fi
 
-    info "Claude call #${call_num}: ${label}"
+    info "Claude call #${call_num}: ${label}  [model: $(agent_model_label "$session_file")]"
 
     # Select model — same heuristic as canonical
     local active_model="$BRAIN_MODEL"
@@ -5512,6 +5512,31 @@ copy_sessions_to_worktree() {
 }
 
 # ─── SECTION 19d-pre: MODEL CONFIGURATION SELECTOR ───────────────────────
+
+# ─── Model display helpers ──────────────────────────────────────
+# Pretty, human label for a model id — surfaced in every agent's launch line so
+# the operator can see which model (Fable / Opus / …) each agent (Brain, Coder,
+# QA, Reviewer) is being invoked on.
+model_label() {
+    case "$1" in
+        claude-fable-5)     echo "Fable 5" ;;
+        claude-opus-4-8)    echo "Opus 4.8" ;;
+        claude-opus-4-7)    echo "Opus 4.7" ;;
+        claude-opus-4-6)    echo "Opus 4.6" ;;
+        claude-sonnet-5)    echo "Sonnet 5" ;;
+        claude-haiku-4-5*)  echo "Haiku 4.5" ;;
+        claude-haiku*)      echo "Haiku" ;;
+        *)                  echo "$1" ;;
+    esac
+}
+
+# The model a given agent session runs on — mirrors the active_model heuristic in
+# invoke_agent: coding/coder sessions → CODER_MODEL, everything else → BRAIN_MODEL.
+agent_model_label() {
+    local m="$BRAIN_MODEL"
+    [[ "$1" == *"coding"* || "$1" == *"coder"* ]] && m="$CODER_MODEL"
+    model_label "$m"
+}
 
 select_model_config() {
     printf "\n"
