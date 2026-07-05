@@ -5403,18 +5403,18 @@ create_worktree() {
     # MULTI-REPO WORKSPACE ADAPTATION: when DOC_DIR is the shared workspace-level folder (outside
     # the worktree), do NOT rewrite it — it is canonical and serves all repos.
     if [[ "$DOC_DIR" == "${wt_path}"* ]]; then
-        for md_file in "$DOC_DIR"/*.md; do
-            if [[ -f "$md_file" ]]; then
+        # WHITELIST, not a glob: rewrite ONLY the instruction files the orchestrator
+        # itself feeds to agents (Brain, Coding, doc runbook). A "$DOC_DIR"/*.md glob
+        # also mangled passive records (archived CCR_*.md, TPM docs) that merely
+        # mention the canonical path — Stage 6 then committed that corruption toward
+        # main. Data files (*.jsonl maps/schema) are navigation, not instructions,
+        # and are deliberately NOT rewritten for the same reason.
+        for md_file in "$BRAIN_AGENT_FILE" "$CODING_AGENT_FILE" "$FULL_DOC_UPDATE_FILE"; do
+            if [[ -n "$md_file" && -f "$md_file" ]]; then
                 sed -i '' "s|${main_path}/|${wt_path}/|g" "$md_file"
             fi
         done
-        # Also rewrite paths in JSONL files that agents may read
-        for jsonl_file in "$DOC_DIR"/*.jsonl; do
-            if [[ -f "$jsonl_file" ]]; then
-                sed -i '' "s|${main_path}/|${wt_path}/|g" "$jsonl_file"
-            fi
-        done
-        success "Agent instruction paths rewritten to worktree"
+        success "Agent instruction paths rewritten to worktree (whitelist: Brain/Coding/doc-runbook)"
     else
         info "Shared workspace-level agent documents — skipping worktree path rewrite"
     fi
@@ -6135,26 +6135,29 @@ create_worktrees_multi() {
             fatal "${name}: doc dir not found in worktree ${wt_dir} or parent workspace"
         fi
 
-        if [[ "$wt_doc_dir" == "${wt_dir}"* ]]; then
-            local md_file
-            for md_file in "$wt_doc_dir"/*.md; do
-                [[ -f "$md_file" ]] && sed -i '' "s|${repo}/|${wt_dir}/|g" "$md_file"
-            done
-            local jsonl_file
-            for jsonl_file in "$wt_doc_dir"/*.jsonl; do
-                [[ -f "$jsonl_file" ]] && sed -i '' "s|${repo}/|${wt_dir}/|g" "$jsonl_file"
-            done
-        else
-            info "${name}: shared workspace-level agent documents — skipping worktree path rewrite"
-        fi
-
-        # Re-derive agent files in worktree (post-rewrite)
+        # Derive agent instruction files in the worktree FIRST — they are the
+        # rewrite whitelist (see the single-repo flow for the full rationale).
         local wt_brain
         wt_brain=$(find "$wt_doc_dir" -maxdepth 1 -name "*Brain*Agent*" -name "*.md" -print0 | tr '\0' '\n' | head -1)
         local wt_coding
         wt_coding=$(find "$wt_doc_dir" -maxdepth 1 -name "*Coding*Agent*" -name "*.md" -print0 | tr '\0' '\n' | head -1)
         local wt_docup
         wt_docup=$(find "$wt_doc_dir" -maxdepth 1 -name "*FULL*DOCUMENTATION*UPDATE*" -name "*.md" -print0 | tr '\0' '\n' | head -1 || true)
+
+        if [[ "$wt_doc_dir" == "${wt_dir}"* ]]; then
+            # WHITELIST, not a glob: only orchestrator-fed instruction files get
+            # their paths rewritten; archived CCR_*.md / TPM docs / *.jsonl data
+            # files stay untouched (a glob rewrite mangled them and Stage 6
+            # committed the corruption toward main).
+            local md_file
+            for md_file in "$wt_brain" "$wt_coding" "$wt_docup"; do
+                if [[ -n "$md_file" && -f "$md_file" ]]; then
+                    sed -i '' "s|${repo}/|${wt_dir}/|g" "$md_file"
+                fi
+            done
+        else
+            info "${name}: shared workspace-level agent documents — skipping worktree path rewrite"
+        fi
 
         # Replace the array slot with the worktree-relative version so later
         # stages pass the right (rewritten) file as --append-system-prompt-file.
