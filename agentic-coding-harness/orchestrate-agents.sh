@@ -245,6 +245,12 @@ IFS=$'\n\t'
 readonly VERSION="2.0.0"
 # shellcheck disable=SC2155  # basename/date cannot fail on "$0"/date — single-assignment is clearer
 readonly SCRIPT_NAME="$(basename "$0")"
+# Absolute directory of this script, captured BEFORE any cd. Under the
+# documented `./orchestrate-agents.sh` invocation ${BASH_SOURCE[0]} is
+# relative, so a lazy `$(cd "$(dirname ...)" && pwd)` re-done after the run
+# has cd'd into the worktree resolves to the WORKTREE, not the docs folder
+# (silent Stage-6 template miss → thin Haiku PR body). Resolve once, here.
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2155
 readonly SCRIPT_START=$(date +%s)
 
@@ -1484,7 +1490,7 @@ invoke_agent() {
             # Coder is detected by session_file, same heuristic as model select.
             if [[ "$CAVEMAN_MODE" == "full" ]] && { [[ "$session_file" == *"coding"* ]] || [[ "$session_file" == *"coder"* ]]; }; then
                 local cc_file
-                cc_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/CAVEMAN_CODE.md"
+                cc_file="${SCRIPT_DIR}/CAVEMAN_CODE.md"
                 if [[ -f "$cc_file" ]]; then
                     cat "$cc_file"
                     echo ""
@@ -2926,7 +2932,7 @@ init_run() {
         # Store runs in the orchestrator-canonical directory, organized by repo name.
         # This keeps all runs across all repos in one browsable, git-tracked location.
         local script_dir
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        script_dir="$SCRIPT_DIR"
         local repo_basename
         repo_basename=$(basename "$REPO_ROOT")
         RUN_DIR="${script_dir}/runs/${repo_basename}/${run_timestamp}"
@@ -4380,7 +4386,7 @@ run_stage_6() {
     # script. Used by the Coding Agent body-generation step further down to
     # produce a template-compliant pr_body_agent.md artifact.
     local _stage6_script_dir
-    _stage6_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _stage6_script_dir="$SCRIPT_DIR"
     # Fallback chain: on resume (or in a worktree branched before the template
     # was committed) the script-dir copy can be absent — and a missing template
     # silently skipped the Coding-Agent body step, shipping the thin Haiku
@@ -4619,7 +4625,7 @@ PROMPT_BOUNDARY
 
     git commit -m "${commit_msg}
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" 2>&1 \
+Co-Authored-By: Claude $(model_label "$CODER_MODEL") (1M context) <noreply@anthropic.com>" 2>&1 \
         | while IFS= read -r line; do verbose "$line"; done
 
     success "Committed ${changed_files} files in worktree"
@@ -4746,7 +4752,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" 2>&1 \
         {
             printf '%s\n\n' "$commit_msg"
             cat "$pr_body_file"
-            printf '\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n'
+            printf '\n\nCo-Authored-By: Claude %s (1M context) <noreply@anthropic.com>\n' "$(model_label "$CODER_MODEL")"
         } > "$commit_msg_file"
         git -C "$WORKTREE_DIR" commit --amend -F "$commit_msg_file" 2>&1 \
             | while IFS= read -r line; do verbose "$line"; done
@@ -5679,7 +5685,7 @@ select_repo_and_branch() {
     # accidentally target the docs repo and produce a docs-only PR. Only fires when
     # there is more than one repo, so a monorepo layout is unaffected.
     local _host_repo
-    _host_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+    _host_repo="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd)"
     if [[ ${#repos[@]} -gt 1 && -n "$_host_repo" ]]; then
         local _frepos=() _fnames=() _ri
         for _ri in "${!repos[@]}"; do
@@ -5874,7 +5880,7 @@ select_repos_and_branches_multi() {
     # accidentally target the docs repo and produce a docs-only PR. Only fires when
     # there is more than one repo, so a monorepo layout is unaffected.
     local _host_repo
-    _host_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+    _host_repo="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd)"
     if [[ ${#repos[@]} -gt 1 && -n "$_host_repo" ]]; then
         local _frepos=() _fnames=() _ri
         for _ri in "${!repos[@]}"; do
@@ -7574,7 +7580,7 @@ run_multi_stage_6() {
     # Resolve the canonical PR description template alongside this script —
     # used by the per-repo Coding Agent body-generation step further down.
     local _stage6_script_dir
-    _stage6_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _stage6_script_dir="$SCRIPT_DIR"
     # Fallback chain: on resume (or in a worktree branched before the template
     # was committed) the script-dir copy can be absent — and a missing template
     # silently skipped the Coding-Agent body step, shipping the thin Haiku
@@ -7815,7 +7821,7 @@ PROMPT_BOUNDARY
 
         git commit -m "${commit_msg}
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" 2>&1 \
+Co-Authored-By: Claude $(model_label "$CODER_MODEL") (1M context) <noreply@anthropic.com>" 2>&1 \
             | while IFS= read -r line; do verbose "$line"; done
 
         success "Committed ${changed_files} files in ${repo_name} worktree"
@@ -7911,7 +7917,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>" 2>&1 \
             {
                 printf '%s\n\n' "$commit_msg"
                 cat "$pr_body_file"
-                printf '\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n'
+                printf '\n\nCo-Authored-By: Claude %s (1M context) <noreply@anthropic.com>\n' "$(model_label "$CODER_MODEL")"
             } > "$commit_msg_file"
             git -C "$wt" commit --amend -F "$commit_msg_file" 2>&1 \
                 | while IFS= read -r line; do verbose "$line"; done
@@ -8706,7 +8712,7 @@ main() {
     local _workspace_host=false
     if [[ -n "$current_root" ]]; then
         local _host_candidate
-        _host_candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+        _host_candidate="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd)"
         if [[ "$current_root" == "$_host_candidate" ]] \
             && find "$current_root" -mindepth 2 -maxdepth 2 -name .git -print -quit 2>/dev/null | grep -q .; then
             _workspace_host=true
@@ -8779,7 +8785,7 @@ main() {
         # subdirectory (<repo0>-multi) from single-repo runs of the same repo.
         if [[ -z "$RUN_DIR" ]]; then
             local _script_dir
-            _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            _script_dir="$SCRIPT_DIR"
             local _ts
             _ts=$(date +%Y%m%d_%H%M%S)
             RUN_DIR="${_script_dir}/runs/${REPO_NAMES_ARRAY[0]}-multi/${_ts}"
