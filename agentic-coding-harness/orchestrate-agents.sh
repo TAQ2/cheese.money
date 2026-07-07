@@ -1020,6 +1020,23 @@ tmux_session_init() {
     # $TMPDIR is ~50 chars — use /tmp directly (~10 chars) and namespace by
     # user + run timestamp to avoid cross-user / cross-run clashes.
     TMUX_SOCK="/tmp/orch-${USER:-$(id -u)}-$(basename "$RUN_DIR").sock"
+    # Janitor: prune stale orchestrator sockets from previous runs — dead
+    # socket files, and tmux servers whose panes are all idle shells (no agent
+    # process still running). Never touches this run's socket or any server
+    # that still hosts a live agent pane.
+    local _old_sock _pane_cmds
+    for _old_sock in /tmp/orch-*.sock; do
+        [[ -e "$_old_sock" && "$_old_sock" != "$TMUX_SOCK" ]] || continue
+        if ! tmux -S "$_old_sock" list-sessions >/dev/null 2>&1; then
+            rm -f "$_old_sock" 2>/dev/null || true
+            continue
+        fi
+        _pane_cmds=$(tmux -S "$_old_sock" list-panes -a -F '#{pane_current_command}' 2>/dev/null || true)
+        if [[ -n "$_pane_cmds" ]] && ! grep -qvE '^(zsh|bash|sh|-zsh|-bash)$' <<< "$_pane_cmds"; then
+            tmux -S "$_old_sock" kill-server 2>/dev/null || true
+            rm -f "$_old_sock" 2>/dev/null || true
+        fi
+    done
     TMUX_SESSION="orch-$(basename "$RUN_DIR")"
     tmux -S "$TMUX_SOCK" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     tmux -S "$TMUX_SOCK" new-session -d -s "$TMUX_SESSION" -n control -x 220 -y 60 \
@@ -1809,6 +1826,8 @@ save_run_state() {
     "base_branch": "${BASE_BRANCH}",
     "original_repo_root": "${ORIGINAL_REPO_ROOT}",
     "original_brain_agent_file": "${ORIGINAL_BRAIN_AGENT_FILE}",
+    "brain_model": "${BRAIN_MODEL}",
+    "coder_model": "${CODER_MODEL}",
     "config": {
         "qa_rounds": ${QA_ROUNDS},
         "max_turns": ${MAX_TURNS},
@@ -1902,6 +1921,13 @@ restore_run_state() {
     BASE_BRANCH=$(jq -r '.base_branch // empty' "$state_file")
     ORIGINAL_REPO_ROOT=$(jq -r '.original_repo_root // empty' "$state_file")
     ORIGINAL_BRAIN_AGENT_FILE=$(jq -r '.original_brain_agent_file // empty' "$state_file")
+
+    # Restore model configuration — a resume must never silently fall back to
+    # the default pair (a Fable+Fable run once resumed onto Coder Opus 4.8).
+    # Absent fields (pre-fix state files) keep the current defaults.
+    BRAIN_MODEL=$(jq -r --arg d "$BRAIN_MODEL" '.brain_model // $d' "$state_file")
+    CODER_MODEL=$(jq -r --arg d "$CODER_MODEL" '.coder_model // $d' "$state_file")
+    MODEL_CONFIG_LABEL="$(model_label "$BRAIN_MODEL") + $(model_label "$CODER_MODEL") — restored from run state"
 
     # Restore task description
     if [[ -f "${RUN_DIR}/artifacts/business_problem.md" ]]; then
@@ -3985,7 +4011,7 @@ PROMPT_BOUNDARY
 
         findings=$(extract_findings_count "$review_file")
         findings_display "$findings" "Iteration ${loop_count} New Findings"
-        TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + findings))
+        TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + findings)); save_run_state
     done
 
     if [[ $loop_count -ge $MAX_FIX_LOOPS ]] && [[ "$findings" -gt 0 ]]; then
@@ -4284,7 +4310,7 @@ PROMPT_BOUNDARY
 
             findings=$(extract_findings_count "$review_file")
             findings_display "$findings" "R${round}.${loop_count} New Findings"
-            TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + findings))
+            TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + findings)); save_run_state
         done
 
         if [[ $loop_count -ge $MAX_FIX_LOOPS ]] && [[ "$findings" -gt 0 ]]; then
@@ -4355,7 +4381,24 @@ run_stage_6() {
     # produce a template-compliant pr_body_agent.md artifact.
     local _stage6_script_dir
     _stage6_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local pr_template_file="${_stage6_script_dir}/PR_DESCRIPTION_TEMPLATE.md"
+    # Fallback chain: on resume (or in a worktree branched before the template
+    # was committed) the script-dir copy can be absent — and a missing template
+    # silently skipped the Coding-Agent body step, shipping the thin Haiku
+    # fallback body. The canonical repo's docs folder is the backstop.
+    local pr_template_file="" _tpl_candidate
+    for _tpl_candidate in \
+        "${_stage6_script_dir}/PR_DESCRIPTION_TEMPLATE.md" \
+        "${_stage6_script_dir}/templates/PR_DESCRIPTION_TEMPLATE.md" \
+        "${DOC_DIR:-}/PR_DESCRIPTION_TEMPLATE.md" \
+        "${ORIGINAL_REPO_ROOT:-}/LLM coding agent documents/PR_DESCRIPTION_TEMPLATE.md"; do
+        if [[ -n "$_tpl_candidate" && -f "$_tpl_candidate" ]]; then
+            pr_template_file="$_tpl_candidate"
+            break
+        fi
+    done
+    if [[ -z "$pr_template_file" ]]; then
+        warn "PR_DESCRIPTION_TEMPLATE.md not found (script dir, templates/, DOC_DIR, canonical docs) — PR body will use the fallback"
+    fi
 
     # ── 6a: Generate PR metadata (commit message + fallback What/Why/How) via the Coding Agent ──
     #
@@ -7082,7 +7125,7 @@ run_multi_stage_3() {
             total_findings=$((total_findings + n2))
             findings_display "$n2" "Iter ${loop_count} — ${REPO_NAMES_ARRAY[$i]}"
         done
-        TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + total_findings))
+        TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + total_findings)); save_run_state
         info "Total remaining findings: ${total_findings}"
     done
 
@@ -7416,7 +7459,7 @@ run_multi_stage_4() {
                 total_findings=$((total_findings + nn))
                 findings_display "$nn" "R${round}.${loop_count} — ${REPO_NAMES_ARRAY[$i]}"
             done
-            TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + total_findings))
+            TOTAL_FINDINGS_FIXED=$((TOTAL_FINDINGS_FIXED + total_findings)); save_run_state
         done
 
         if [[ $loop_count -ge $MAX_FIX_LOOPS ]] && [[ $total_findings -gt 0 ]]; then
@@ -7532,7 +7575,24 @@ run_multi_stage_6() {
     # used by the per-repo Coding Agent body-generation step further down.
     local _stage6_script_dir
     _stage6_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local pr_template_file="${_stage6_script_dir}/PR_DESCRIPTION_TEMPLATE.md"
+    # Fallback chain: on resume (or in a worktree branched before the template
+    # was committed) the script-dir copy can be absent — and a missing template
+    # silently skipped the Coding-Agent body step, shipping the thin Haiku
+    # fallback body. The canonical repo's docs folder is the backstop.
+    local pr_template_file="" _tpl_candidate
+    for _tpl_candidate in \
+        "${_stage6_script_dir}/PR_DESCRIPTION_TEMPLATE.md" \
+        "${_stage6_script_dir}/templates/PR_DESCRIPTION_TEMPLATE.md" \
+        "${DOC_DIR:-}/PR_DESCRIPTION_TEMPLATE.md" \
+        "${ORIGINAL_REPO_ROOT:-}/LLM coding agent documents/PR_DESCRIPTION_TEMPLATE.md"; do
+        if [[ -n "$_tpl_candidate" && -f "$_tpl_candidate" ]]; then
+            pr_template_file="$_tpl_candidate"
+            break
+        fi
+    done
+    if [[ -z "$pr_template_file" ]]; then
+        warn "PR_DESCRIPTION_TEMPLATE.md not found (script dir, templates/, DOC_DIR, canonical docs) — PR body will use the fallback"
+    fi
 
     PR_URLS_ARRAY=()
 
