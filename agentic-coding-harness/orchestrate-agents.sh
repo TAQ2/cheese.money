@@ -4414,7 +4414,7 @@ run_stage_6() {
     # downstream Coding Agent body generation fails or produces an invalid
     # artifact. On the success path, the full PR body comes from a Coding
     # Agent call with the staged diff in view (see 6b2 below).
-    subtask "Generating PR metadata (commit + fallback What/Why/How) via the Coding Agent"
+    subtask "Generating commit metadata (subject + fallback What/Why/How) via the Coding Agent"
 
     local ccr_file="${RUN_DIR}/artifacts/ccr.md"
     local task_file="${RUN_DIR}/artifacts/business_problem.md"
@@ -4457,7 +4457,7 @@ PROMPT_BOUNDARY
     local _meta_prompt_file="${RUN_DIR}/prompts/phase6_pr_metadata.md"
     printf '%s\n' "$meta_prompt" > "$_meta_prompt_file"
     local _meta_output="${RUN_DIR}/artifacts/pr_metadata.md"
-    invoke_agent "$CODING_SESSION_FILE" "$CODING_AGENT_FILE" "$_meta_output" "Coding Agent (PR metadata)" "$_meta_prompt_file"
+    invoke_agent "$CODING_SESSION_FILE" "$CODING_AGENT_FILE" "$_meta_output" "Coding Agent (commit metadata)" "$_meta_prompt_file"
     inner=$(cat "$_meta_output" 2>/dev/null || true)
     # Strip markdown fences if Haiku added them anyway.
     if [[ -n "$inner" ]]; then
@@ -4542,7 +4542,12 @@ PROMPT_BOUNDARY
     # never blocks on a bad agent run.
     local pr_body_agent_file="${RUN_DIR}/artifacts/pr_body_agent.md"
     if [[ -f "$pr_template_file" ]]; then
-        subtask "Coding Agent writing PR body to template"
+        # In commit mode this text becomes the rich commit body (amended in
+        # below), not a PR — label it honestly so operators don't think a PR
+        # is being opened.
+        local _body_label
+        _body_label="$([[ "$STAGE6_MODE" == "commit" ]] && echo "rich commit body" || echo "PR body")"
+        subtask "Coding Agent writing ${_body_label} to template"
 
         local pr_body_prompt_file="${RUN_DIR}/prompts/phase6_pr_body.md"
         local _impl_report="${RUN_DIR}/artifacts/implementation_report.md"
@@ -4609,7 +4614,7 @@ PROMPT_BOUNDARY
             "$CODING_SESSION_FILE" \
             "$CODING_AGENT_FILE" \
             "$pr_body_agent_file" \
-            "Coding Agent (PR body)" \
+            "Coding Agent (${_body_label:-PR body})" \
             "$pr_body_prompt_file"
 
         if [[ -s "$pr_body_agent_file" ]]; then
