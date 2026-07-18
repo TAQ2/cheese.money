@@ -257,6 +257,13 @@ readonly SCRIPT_START=$(date +%s)
 # Model configuration (set by select_model_config, overridable via --brain-model / --coder-model)
 BRAIN_MODEL="claude-fable-5"
 CODER_MODEL="claude-opus-4-8"
+# Per-round independent-QA reviewer model overrides, indexed by round number
+# (QA_ROUND_MODELS[1], [2], …). Empty ⇒ that round's reviewer runs on BRAIN_MODEL
+# (its historical default). Populated only by model-config option 5 — the
+# Fable-brain / Opus-coder cascade that runs QA round 1 on Opus, round 2 on Fable.
+# Persisted to / restored from run_state.json so a resume never silently drops
+# the cascade back to a uniform BRAIN_MODEL QA.
+declare -a QA_ROUND_MODELS=()
 MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Opus 4.8 (1M) — default"
 
 # Default editor — nano is more intuitive than vi for interactive use
@@ -1507,12 +1514,9 @@ invoke_agent() {
 
     info "Claude call #${call_num}: ${label}  [model: $(agent_model_label "$session_file")]"
 
-    # Select model — same heuristic as canonical
-    local active_model="$BRAIN_MODEL"
-    local _sf_base; _sf_base="$(basename "$session_file")"
-    if [[ "$_sf_base" == *"coding"* ]] || [[ "$_sf_base" == *"coder"* ]]; then
-        active_model="$CODER_MODEL"
-    fi
+    # Select model via the shared resolver (coder → CODER_MODEL; per-round QA
+    # override → QA_ROUND_MODELS[round]; everything else → BRAIN_MODEL).
+    local active_model; active_model="$(resolve_agent_model "$session_file")"
 
     verbose "Prompt: $(wc -c < "$prompt_file" | tr -d ' ') bytes"
 
@@ -1822,6 +1826,18 @@ save_run_state() {
         completed_json=$(echo "$completed_json" | jq --argjson s "$just_completed" '. + [$s] | unique | sort')
     fi
 
+    # Serialize the sparse per-round QA model map (option 5) so a resume restores
+    # the exact Opus→Fable cascade instead of falling back to uniform BRAIN_MODEL.
+    local qa_models_json="{}"
+    if [[ ${#QA_ROUND_MODELS[@]} -gt 0 ]]; then
+        local _qk
+        qa_models_json=$(
+            for _qk in "${!QA_ROUND_MODELS[@]}"; do
+                printf '%s\t%s\n' "$_qk" "${QA_ROUND_MODELS[$_qk]}"
+            done | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}'
+        )
+    fi
+
     local tmp_state="${RUN_DIR}/run_state.json.tmp"
     cat > "$tmp_state" << STATE_EOF
 {
@@ -1834,6 +1850,7 @@ save_run_state() {
     "original_brain_agent_file": "${ORIGINAL_BRAIN_AGENT_FILE}",
     "brain_model": "${BRAIN_MODEL}",
     "coder_model": "${CODER_MODEL}",
+    "qa_round_models": ${qa_models_json},
     "config": {
         "qa_rounds": ${QA_ROUNDS},
         "max_turns": ${MAX_TURNS},
@@ -1933,6 +1950,14 @@ restore_run_state() {
     # Absent fields (pre-fix state files) keep the current defaults.
     BRAIN_MODEL=$(jq -r --arg d "$BRAIN_MODEL" '.brain_model // $d' "$state_file")
     CODER_MODEL=$(jq -r --arg d "$CODER_MODEL" '.coder_model // $d' "$state_file")
+    # Restore the per-round QA model cascade (option 5). Absent field (pre-fix
+    # state files, or any non-option-5 run) → empty map → QA falls back to
+    # BRAIN_MODEL exactly as before.
+    QA_ROUND_MODELS=()
+    local _qk _qv
+    while IFS=$'\t' read -r _qk _qv; do
+        [[ -n "$_qk" ]] && QA_ROUND_MODELS[$_qk]="$_qv"
+    done < <(jq -r '(.qa_round_models // {}) | to_entries[] | "\(.key)\t\(.value)"' "$state_file" 2>/dev/null)
     MODEL_CONFIG_LABEL="$(model_label "$BRAIN_MODEL") + $(model_label "$CODER_MODEL") — restored from run state"
 
     # Restore task description
@@ -5585,14 +5610,29 @@ model_label() {
     esac
 }
 
-# The model a given agent session runs on — mirrors the active_model heuristic in
-# invoke_agent: coding/coder sessions → CODER_MODEL, everything else → BRAIN_MODEL.
-agent_model_label() {
-    local b m="$BRAIN_MODEL"
-    b="$(basename "$1")"
-    [[ "$b" == *"coding"* || "$b" == *"coder"* ]] && m="$CODER_MODEL"
-    model_label "$m"
+# Resolve the model id a given agent session runs on — the SINGLE source of truth
+# for model selection, shared by invoke_agent (the actual launch) and
+# agent_model_label (the display). Coder sessions → CODER_MODEL; independent QA
+# reviewers (independent-N.session) → their per-round override in QA_ROUND_MODELS
+# when model-config option 5 assigned one, else BRAIN_MODEL; everything else →
+# BRAIN_MODEL.
+resolve_agent_model() {
+    local b; b="$(basename "$1")"
+    if [[ "$b" == *"coding"* || "$b" == *"coder"* ]]; then
+        echo "$CODER_MODEL"; return
+    fi
+    if [[ "$b" == independent-* ]]; then
+        local n="${b#independent-}"; n="${n%%.*}"   # independent-2.session → 2
+        if [[ -n "${QA_ROUND_MODELS[$n]:-}" ]]; then
+            echo "${QA_ROUND_MODELS[$n]}"; return
+        fi
+    fi
+    echo "$BRAIN_MODEL"
 }
+
+# Pretty model label for a session's resolved model — surfaced in each agent's
+# launch line so the operator sees which model (Fable / Opus / …) each agent runs.
+agent_model_label() { model_label "$(resolve_agent_model "$1")"; }
 
 select_model_config() {
     printf "\n"
@@ -5607,8 +5647,9 @@ select_model_config() {
     printf "  ${C_BOLD}${C_CYAN}  2${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} (1M ctx)  +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— max capability everywhere, max cost${C_RESET}\n"
     printf "  ${C_BOLD}${C_CYAN}  3${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) +  Coder ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) ${C_DIM}— flagship both, lower cost${C_RESET}\n"
     printf "  ${C_BOLD}${C_CYAN}  4${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— flagship planning, heaviest coder${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  5${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} + Coder ${C_BOLD}Opus 4.8${C_RESET} + QA ${C_BOLD}Opus→Fable${C_RESET}  ${C_DIM}— cascade: 1st QA Opus, 2nd QA Fable; QA rounds forced to 2${C_RESET}\n"
     printf "\n"
-    printf "  ${C_BOLD}Select [1-4] (Enter = 1): ${C_RESET}"
+    printf "  ${C_BOLD}Select [1-5] (Enter = 1): ${C_RESET}"
 
     local model_choice
     read -r model_choice
@@ -5635,6 +5676,18 @@ select_model_config() {
             BRAIN_MODEL="claude-opus-4-8"
             CODER_MODEL="claude-fable-5"
             MODEL_CONFIG_LABEL="Brain Opus 4.8 (1M) + Coder Fable 5 (1M)"
+            ;;
+        5)
+            # Fable-brain / Opus-coder cascade with a two-model QA ladder:
+            # round-1 QA on Opus (flagship coder-grade audit), round-2 QA on Fable
+            # (heaviest-reasoning final gate). QA rounds are FORCED to 2 and the
+            # interactive QA-rounds prompt is suppressed (QA_ROUNDS_SET=true).
+            BRAIN_MODEL="claude-fable-5"
+            CODER_MODEL="claude-opus-4-8"
+            QA_ROUND_MODELS=([1]="claude-opus-4-8" [2]="claude-fable-5")
+            QA_ROUNDS=2
+            QA_ROUNDS_SET=true
+            MODEL_CONFIG_LABEL="Brain Fable 5 + Coder Opus 4.8 + QA Opus→Fable (2 rounds)"
             ;;
         *)
             warn "Invalid selection '${model_choice}' — using default (Fable 5 Brain + Opus 4.8 Coder)"
