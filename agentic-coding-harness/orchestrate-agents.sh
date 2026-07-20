@@ -1096,7 +1096,20 @@ tmux_launch() {
     if [[ -n "$EFFORT_LEVEL" ]] && [[ "$model" != *haiku* ]]; then
         cmd+=$(printf ' --effort %q' "$EFFORT_LEVEL")
     fi
-    [[ -f "$sp" ]] && cmd+=$(printf ' --append-system-prompt-file %q' "$sp")
+    # Launch system prompt = optional role-instruction seed ($sp, used on a
+    # crash-relaunch to reseed a fresh pane) + the standing preamble (non-
+    # interactive core + caveman style + coder code guide). Assembling it here —
+    # ONCE per pane launch — places the standing preamble in the cached
+    # system-prompt prefix for the whole session instead of re-pasting it into
+    # every turn's prompt (the token-efficiency win). standing_preamble always
+    # emits the non-interactive core, so launch_sp is always non-empty.
+    local launch_sp
+    launch_sp="$(dirname "$sf")/launch-sysprompt-$(echo "$target" | tr -c 'A-Za-z0-9._-' '-').md"
+    {
+        [[ -f "$sp" ]] && { cat "$sp"; echo ""; }
+        standing_preamble "$sf"
+    } > "$launch_sp"
+    [[ -s "$launch_sp" ]] && cmd+=$(printf ' --append-system-prompt-file %q' "$launch_sp")
     # Clear any stuck/old pane state before launching: a prior failed paste can
     # leave zsh at a continuation prompt or a half-typed line, and sending the
     # launch command into that would corrupt it (the claude command gets injected
@@ -1412,21 +1425,33 @@ CAVEMAN_LITE
 # between-round feedback loop; phase2_*..phase5_* (past clarification) → resolve
 # autonomously and document the decision + rationale. Nobody answers a live
 # prompt in this harness, so the native ask tool must never be used.
-no_interactive_directive() {
-    local pf_base
-    pf_base="$(basename "${1:-}")"
+# Phase-INVARIANT non-interactive core. Injected ONCE into the launch system
+# prompt (see standing_preamble → tmux_launch --append-system-prompt-file) so it
+# sits in the cached system-prompt prefix for the whole session instead of being
+# re-pasted — and re-billed as fresh input — into every turn's prompt.
+no_interactive_core() {
     cat <<'DIRECTIVE_HEAD'
 ═══════════════════════════════════════════════════════════════════════════
-ORCHESTRATION DIRECTIVE — NON-INTERACTIVE (read first; overrides default behavior)
+ORCHESTRATION DIRECTIVE — NON-INTERACTIVE (standing rule; overrides default behavior)
 ═══════════════════════════════════════════════════════════════════════════
 This orchestrator runs UNATTENDED. No human will answer an interactive prompt.
 
 - Do NOT use the AskUserQuestion tool, or any native "ask the user" / interactive
   question functionality. It hangs the run — nobody is there to answer it.
+═══════════════════════════════════════════════════════════════════════════
 DIRECTIVE_HEAD
+}
 
+# Phase-SPECIFIC non-interactive delta, still prepended to each turn's prompt.
+# This is the only part that changes across the run (clarification rounds vs
+# autonomous), so it stays per-turn; the invariant core above lives in the
+# launch system prompt and is not re-sent.
+no_interactive_directive() {
+    local pf_base
+    pf_base="$(basename "${1:-}")"
     if [[ "$pf_base" == phase1_* ]]; then
         cat <<'DIRECTIVE_CLARIFY'
+NON-INTERACTIVE — CLARIFICATION ROUND (standing directive is in the system prompt):
 - You ARE in a clarification round. Put every question, uncertainty, and
   assumption IN WRITING in your response, under a clear "Open Questions /
   Clarifications" heading. The human reviews these between rounds and feeds
@@ -1434,11 +1459,10 @@ DIRECTIVE_HEAD
   not an interactive prompt.
 - For each open item: state the question, the options you see, and the default
   you would choose if it goes unanswered.
-═══════════════════════════════════════════════════════════════════════════
-
 DIRECTIVE_CLARIFY
     else
         cat <<'DIRECTIVE_AUTO'
+NON-INTERACTIVE — AUTONOMOUS (standing directive is in the system prompt):
 - Clarification rounds are OVER. Do NOT ask anything and do NOT wait for input.
 - Resolve every ambiguity yourself: pick the safest, best-reasoned default and
   proceed. Your first concrete action must be a file read or write, not a
@@ -1446,9 +1470,33 @@ DIRECTIVE_CLARIFY
 - DOCUMENT every such decision in your output: what was ambiguous, the options
   you weighed, the default you chose, and WHY. The human audits these after the
   run — a well-documented decision is the deliverable; a hang is a failure.
-═══════════════════════════════════════════════════════════════════════════
-
 DIRECTIVE_AUTO
+    fi
+}
+
+# Standing preamble injected ONCE at pane launch via --append-system-prompt-file
+# (assembled in tmux_launch). Phase-invariant and role-aware: the non-interactive
+# core always; the caveman style block when caveman is active; the vendored
+# Caveman Code guide additionally for coder panes under caveman full. Landing in
+# the session's system prompt means it is cached for the whole session and is NOT
+# re-billed on every turn — the old behavior re-pasted all of this into every
+# prompt. $1 = session_file (coder heuristic). stdout is captured to a file, so
+# any warning must go to stderr to avoid leaking into the system prompt.
+standing_preamble() {
+    local session_file="${1:-}"
+    no_interactive_core
+    if [[ "$CAVEMAN_MODE" != "none" ]] && [[ -n "$CAVEMAN_MODE" ]]; then
+        echo ""
+        caveman_injection
+        if [[ "$CAVEMAN_MODE" == "full" ]] && { [[ "$session_file" == *"coding"* ]] || [[ "$session_file" == *"coder"* ]]; }; then
+            local cc_file="${SCRIPT_DIR}/CAVEMAN_CODE.md"
+            if [[ -f "$cc_file" ]]; then
+                echo ""
+                cat "$cc_file"
+            else
+                warn "Caveman Code guide not found at ${cc_file}" >&2
+            fi
+        fi
     fi
 }
 
@@ -1482,30 +1530,21 @@ invoke_agent() {
     # Copy prompt to named prompts directory for easy browsing
     cp "$prompt_file" "${RUN_DIR}/prompts/call-${call_num}-$(basename "$prompt_file")" 2>/dev/null || true
 
-    # Wrap the prompt before sending. ALWAYS prepend the non-interactive
-    # directive (phase-aware) so no agent stalls the unattended orchestrator on
-    # a question; then layer caveman style on top when active.
+    # Wrap the prompt before sending. Prepend ONLY the phase-specific
+    # non-interactive delta (clarify vs autonomous) so no agent stalls the
+    # unattended orchestrator on a question. The invariant non-interactive core,
+    # caveman style, and coder code guide now live in the launch system prompt
+    # (tmux_launch → standing_preamble), cached once instead of re-sent per turn.
     local effective_prompt_file="${RUN_DIR}/prompts/call-${call_num}-wrapped.md"
+    # The standing preamble (non-interactive core + caveman style + coder code
+    # guide) is injected ONCE at pane launch via --append-system-prompt-file (see
+    # tmux_launch → standing_preamble), so it lives in the cached system-prompt
+    # prefix instead of being re-pasted — and re-billed as fresh input — into every
+    # turn. Only the phase-specific non-interactive delta (clarify vs autonomous)
+    # is prepended per turn, since that is the only part that changes across the run.
     {
         no_interactive_directive "$prompt_file"
         echo ""
-        if [[ "$CAVEMAN_MODE" != "none" ]] && [[ -n "$CAVEMAN_MODE" ]]; then
-            caveman_injection
-            echo ""
-            # Coding agents additionally always read the Caveman Code guide when
-            # caveman full is active (vendored CAVEMAN_CODE.md beside this script).
-            # Coder is detected by session_file, same heuristic as model select.
-            if [[ "$CAVEMAN_MODE" == "full" ]] && { [[ "$session_file" == *"coding"* ]] || [[ "$session_file" == *"coder"* ]]; }; then
-                local cc_file
-                cc_file="${SCRIPT_DIR}/CAVEMAN_CODE.md"
-                if [[ -f "$cc_file" ]]; then
-                    cat "$cc_file"
-                    echo ""
-                else
-                    warn "Caveman Code guide not found at ${cc_file}"
-                fi
-            fi
-        fi
         cat "$prompt_file"
     } > "$effective_prompt_file"
     if [[ "$CAVEMAN_MODE" != "none" ]] && [[ -n "$CAVEMAN_MODE" ]]; then
