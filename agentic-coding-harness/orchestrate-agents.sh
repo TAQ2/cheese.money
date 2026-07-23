@@ -4771,6 +4771,8 @@ Co-Authored-By: Claude $(model_label "$CODER_MODEL") (1M context) <noreply@anthr
         } > "$pr_body_file"
     fi
 
+    append_agent_sessions_block "$pr_body_file"
+
     if [[ "$STAGE6_MODE" == "commit" ]]; then
         # Commit mode: fold the full template-compliant change description into
         # the commit body. The subject-only commit + push above already created
@@ -5608,6 +5610,31 @@ model_label() {
         claude-haiku*)      echo "Haiku" ;;
         *)                  echo "$1" ;;
     esac
+}
+
+# Stamp the orchestrator-assigned agent session UUIDs at the bottom of a commit/PR
+# body file, for traceability — so any run's Brain / Coder / reviewer conversations
+# can be resumed with `claude --resume <id>` from the repo root. IDs are authoritative
+# (the orchestrator assigns them via --session-id). Reads the same reviewer .session
+# files the end-of-run terminal summary prints; the :-N/A guard covers an unset id.
+append_agent_sessions_block() {
+    local _body_file="$1"
+    [[ -n "$_body_file" ]] || return 0
+    {
+        echo ""
+        echo "## Agent Sessions"
+        echo ""
+        echo "| Agent | Session ID |"
+        echo "|-------|-----------|"
+        echo "| Brain | ${BRAIN_SESSION_ID:-N/A} |"
+        echo "| Coder | ${CODER_SESSION_ID:-N/A} |"
+        local _rs _sid
+        for _rs in "${RUN_DIR}/sessions"/independent-*.session; do
+            [[ -f "$_rs" && -s "$_rs" ]] || continue
+            _sid=$(tr -d '[:space:]' < "$_rs")
+            echo "| Reviewer $(basename "$_rs" .session | sed 's/^independent-//') | ${_sid} |"
+        done
+    } >> "$_body_file"
 }
 
 # Resolve the model id a given agent session runs on — the SINGLE source of truth
@@ -7965,6 +7992,8 @@ Co-Authored-By: Claude $(model_label "$CODER_MODEL") (1M context) <noreply@anthr
                     "$TOTAL_CLAUDE_CALLS" "$TOTAL_TURNS" "$QA_ROUNDS" "$REPO_COUNT"
             } > "$pr_body_file"
         fi
+
+        append_agent_sessions_block "$pr_body_file"
 
         cd "$wt" 2>/dev/null || true
         if [[ "$STAGE6_MODE" == "commit" ]]; then
