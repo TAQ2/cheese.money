@@ -259,8 +259,8 @@ BRAIN_MODEL="claude-fable-5"
 CODER_MODEL="claude-opus-4-8"
 # Per-round independent-QA reviewer model overrides, indexed by round number
 # (QA_ROUND_MODELS[1], [2], …). Empty ⇒ that round's reviewer runs on BRAIN_MODEL
-# (its historical default). Populated only by model-config option 5 — the
-# Fable-brain / Opus-coder cascade that runs QA round 1 on Opus, round 2 on Fable.
+# (its historical default). Populated by model-config options 5 and 6 — the
+# Opus-brain and Fable-brain cascades that both run QA round 1 on Opus, round 2 on Fable.
 # Persisted to / restored from run_state.json so a resume never silently drops
 # the cascade back to a uniform BRAIN_MODEL QA.
 declare -a QA_ROUND_MODELS=()
@@ -1826,7 +1826,7 @@ save_run_state() {
         completed_json=$(echo "$completed_json" | jq --argjson s "$just_completed" '. + [$s] | unique | sort')
     fi
 
-    # Serialize the sparse per-round QA model map (option 5) so a resume restores
+    # Serialize the sparse per-round QA model map (options 5–6) so a resume restores
     # the exact Opus→Fable cascade instead of falling back to uniform BRAIN_MODEL.
     local qa_models_json="{}"
     if [[ ${#QA_ROUND_MODELS[@]} -gt 0 ]]; then
@@ -1950,8 +1950,8 @@ restore_run_state() {
     # Absent fields (pre-fix state files) keep the current defaults.
     BRAIN_MODEL=$(jq -r --arg d "$BRAIN_MODEL" '.brain_model // $d' "$state_file")
     CODER_MODEL=$(jq -r --arg d "$CODER_MODEL" '.coder_model // $d' "$state_file")
-    # Restore the per-round QA model cascade (option 5). Absent field (pre-fix
-    # state files, or any non-option-5 run) → empty map → QA falls back to
+    # Restore the per-round QA model cascade (options 5–6). Absent field (pre-fix
+    # state files, or any non-cascade run) → empty map → QA falls back to
     # BRAIN_MODEL exactly as before.
     QA_ROUND_MODELS=()
     local _qk _qv
@@ -5641,7 +5641,7 @@ append_agent_sessions_block() {
 # for model selection, shared by invoke_agent (the actual launch) and
 # agent_model_label (the display). Coder sessions → CODER_MODEL; independent QA
 # reviewers (independent-N.session) → their per-round override in QA_ROUND_MODELS
-# when model-config option 5 assigned one, else BRAIN_MODEL; everything else →
+# when model-config option 5 or 6 assigned one, else BRAIN_MODEL; everything else →
 # BRAIN_MODEL.
 resolve_agent_model() {
     local b; b="$(basename "$1")"
@@ -5674,9 +5674,10 @@ select_model_config() {
     printf "  ${C_BOLD}${C_CYAN}  2${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} (1M ctx)  +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— max capability everywhere, max cost${C_RESET}\n"
     printf "  ${C_BOLD}${C_CYAN}  3${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) +  Coder ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) ${C_DIM}— flagship both, lower cost${C_RESET}\n"
     printf "  ${C_BOLD}${C_CYAN}  4${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— flagship planning, heaviest coder${C_RESET}\n"
-    printf "  ${C_BOLD}${C_CYAN}  5${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} + Coder ${C_BOLD}Opus 4.8${C_RESET} + QA ${C_BOLD}Opus→Fable${C_RESET}  ${C_DIM}— cascade: 1st QA Opus, 2nd QA Fable; QA rounds forced to 2${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  5${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} + Coder ${C_BOLD}Opus 4.8${C_RESET} + QA ${C_BOLD}Opus→Fable${C_RESET}  ${C_DIM}— cascade: 1st QA Opus, 2nd QA Fable; QA rounds forced to 2${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  6${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} + Coder ${C_BOLD}Opus 4.8${C_RESET} + QA ${C_BOLD}Opus→Fable${C_RESET}  ${C_DIM}— cascade: 1st QA Opus, 2nd QA Fable; QA rounds forced to 2${C_RESET}\n"
     printf "\n"
-    printf "  ${C_BOLD}Select [1-5] (Enter = 1): ${C_RESET}"
+    printf "  ${C_BOLD}Select [1-6] (Enter = 1): ${C_RESET}"
 
     local model_choice
     read -r model_choice
@@ -5705,6 +5706,18 @@ select_model_config() {
             MODEL_CONFIG_LABEL="Brain Opus 4.8 (1M) + Coder Fable 5 (1M)"
             ;;
         5)
+            # Opus-brain / Opus-coder cascade with a two-model QA ladder:
+            # round-1 QA on Opus (flagship coder-grade audit), round-2 QA on Fable
+            # (heaviest-reasoning final gate). QA rounds are FORCED to 2 and the
+            # interactive QA-rounds prompt is suppressed (QA_ROUNDS_SET=true).
+            BRAIN_MODEL="claude-opus-4-8"
+            CODER_MODEL="claude-opus-4-8"
+            QA_ROUND_MODELS=([1]="claude-opus-4-8" [2]="claude-fable-5")
+            QA_ROUNDS=2
+            QA_ROUNDS_SET=true
+            MODEL_CONFIG_LABEL="Brain Opus 4.8 + Coder Opus 4.8 + QA Opus→Fable (2 rounds)"
+            ;;
+        6)
             # Fable-brain / Opus-coder cascade with a two-model QA ladder:
             # round-1 QA on Opus (flagship coder-grade audit), round-2 QA on Fable
             # (heaviest-reasoning final gate). QA rounds are FORCED to 2 and the
