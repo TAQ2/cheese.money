@@ -1168,10 +1168,17 @@ tmux_send() {
 # Poll JSONL until last assistant entry has stop_reason end_turn|stop_sequence.
 # Returns 1 if mtime stops advancing for $INACTIVITY_TIMEOUT_SECS.
 tmux_wait() {
-    local jsonl="$1" baseline="$2" label="$3" target="$4"
+    local jsonl="$1" baseline="$2" label="$3" target="$4" sid="${5:-}"
     local t0 last_act last_mt=0 i=0 len=${#spinner_chars} cur sr mt
     t0=$(date +%s); last_act=$t0
     while :; do
+        # A cold Opus-tier pane can take minutes to write its first JSONL
+        # line, so the caller may hand us a path that does not exist yet (or
+        # an empty one). Re-resolve by sid every poll: without this the -f
+        # test below stays false forever, last_act never advances, and we
+        # C-c a healthy agent at INACTIVITY_TIMEOUT_SECS while it is
+        # mid-turn — then report it as hung.
+        [[ -n "$sid" && ! -f "$jsonl" ]] && jsonl=$(tmux_jsonl_for "$sid")
         if [[ -f "$jsonl" ]]; then
             cur=$(wc -l < "$jsonl" 2>/dev/null | tr -d ' ')
             if (( ${cur:-0} > baseline )); then
@@ -1287,7 +1294,7 @@ tmux_oneshot() {
         fi
         sleep 1
     done
-    if ! tmux_wait "$jsonl" 0 "oneshot/${model}" "$target" >/dev/null 2>&1; then
+    if ! tmux_wait "$jsonl" 0 "oneshot/${model}" "$target" "$sid" >/dev/null 2>&1; then
         tmux -S "$TMUX_SOCK" kill-window -t "$target" 2>/dev/null
         rm -f "$pf"; return 1
     fi
@@ -1588,15 +1595,15 @@ invoke_agent() {
         while [[ -z "$jsonl" ]] || [[ ! -f "$jsonl" ]]; do
             jsonl=$(tmux_jsonl_for "$sid")
             [[ -n "$jsonl" ]] && [[ -f "$jsonl" ]] && break
-            if (( $(date +%s) - t0 > 60 )); then
-                warn "JSONL not created for sid=$sid within 60s — paste may have failed"
+            if (( $(date +%s) - t0 > 180 )); then
+                warn "JSONL not created for sid=$sid within 180s — tmux_wait keeps watching for it"
                 break
             fi
             sleep 1
         done
 
         wait_result=0
-        tmux_wait "$jsonl" "$baseline_lines" "$attempt_label" "$window" || wait_result=$?
+        tmux_wait "$jsonl" "$baseline_lines" "$attempt_label" "$window" "$sid" || wait_result=$?
 
         if (( wait_result != 0 )); then
             warn "Call #${call_num} hung (attempt ${attempt}/${max_retries})"
@@ -1607,6 +1614,10 @@ invoke_agent() {
         fi
 
         info "Call #${call_num} completed in $(elapsed_since "$call_start")"
+        # tmux_wait may have resolved a JSONL that did not exist at paste
+        # time; that resolution is local to it, so re-resolve here or
+        # tmux_translate reads an empty path and emits an empty transcript.
+        [[ -z "$jsonl" || ! -f "$jsonl" ]] && jsonl=$(tmux_jsonl_for "$sid")
         tmux_translate "$jsonl" "$baseline_lines" "$raw_file" "$sid"
 
         # Best-effort 5-hour cap detection in assistant text (interactive
