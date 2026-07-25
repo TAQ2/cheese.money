@@ -255,8 +255,8 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_START=$(date +%s)
 
 # Model configuration (set by select_model_config, overridable via --brain-model / --coder-model)
-BRAIN_MODEL="claude-fable-5"
-CODER_MODEL="claude-opus-4-8"
+BRAIN_MODEL="claude-opus-5"
+CODER_MODEL="claude-opus-5"
 # Per-round independent-QA reviewer model overrides, indexed by round number
 # (QA_ROUND_MODELS[1], [2], …). Empty ⇒ that round's reviewer runs on BRAIN_MODEL
 # (its historical default). Populated only by model-config option 5 — the
@@ -264,7 +264,7 @@ CODER_MODEL="claude-opus-4-8"
 # Persisted to / restored from run_state.json so a resume never silently drops
 # the cascade back to a uniform BRAIN_MODEL QA.
 declare -a QA_ROUND_MODELS=()
-MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Opus 4.8 (1M) — default"
+MODEL_CONFIG_LABEL="Brain Opus 5 (1M) + Coder Opus 5 (1M) — default"
 
 # Default editor — nano is more intuitive than vi for interactive use
 : "${EDITOR:=nano}"
@@ -5638,6 +5638,7 @@ copy_sessions_to_worktree() {
 # QA, Reviewer) is being invoked on.
 model_label() {
     case "$1" in
+        claude-opus-5)      echo "Opus 5" ;;
         claude-fable-5)     echo "Fable 5" ;;
         claude-opus-4-8)    echo "Opus 4.8" ;;
         claude-opus-4-7)    echo "Opus 4.7" ;;
@@ -5682,24 +5683,27 @@ select_model_config() {
 
     printf "  ${C_BOLD}Select agent model configuration:${C_RESET}\n"
     printf "\n"
-    printf "  ${C_BOLD}${C_CYAN}  1${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} (1M ctx)  +  Coder ${C_BOLD}Opus 4.8${C_RESET} (1M ctx)  ${C_DIM}— heaviest reasoning to plan, flagship coder (default)${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  1${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} (1M ctx)  +  Coder ${C_BOLD}Opus 5${C_RESET} (1M ctx)  ${C_DIM}— heaviest reasoning to plan, flagship coder${C_RESET}\n"
     printf "  ${C_BOLD}${C_CYAN}  2${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} (1M ctx)  +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— max capability everywhere, max cost${C_RESET}\n"
-    printf "  ${C_BOLD}${C_CYAN}  3${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) +  Coder ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) ${C_DIM}— flagship both, lower cost${C_RESET}\n"
-    printf "  ${C_BOLD}${C_CYAN}  4${C_RESET}  Brain ${C_BOLD}Opus 4.8${C_RESET} (1M ctx) +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— flagship planning, heaviest coder${C_RESET}\n"
-    printf "  ${C_BOLD}${C_CYAN}  5${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} + Coder ${C_BOLD}Opus 4.8${C_RESET} + QA ${C_BOLD}Opus→Fable${C_RESET}  ${C_DIM}— cascade: 1st QA Opus, 2nd QA Fable; QA rounds forced to 2${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  3${C_RESET}  Brain ${C_BOLD}Opus 5${C_RESET} (1M ctx) +  Coder ${C_BOLD}Opus 5${C_RESET} (1M ctx) ${C_DIM}— Opus 5 everywhere: the default basis${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  4${C_RESET}  Brain ${C_BOLD}Opus 5${C_RESET} (1M ctx) +  Coder ${C_BOLD}Fable 5${C_RESET} (1M ctx)  ${C_DIM}— flagship planning, heaviest coder${C_RESET}\n"
+    printf "  ${C_BOLD}${C_CYAN}  5${C_RESET}  Brain ${C_BOLD}Fable 5${C_RESET} + Coder ${C_BOLD}Opus 5${C_RESET} + QA ${C_BOLD}Opus→Fable${C_RESET}  ${C_DIM}— cascade: 1st QA Opus, 2nd QA Fable; QA rounds forced to 2${C_RESET}\n"
     printf "\n"
-    printf "  ${C_BOLD}Select [1-5] (Enter = 1): ${C_RESET}"
+    printf "  ${C_BOLD}Select [1-5] (Enter = 3): ${C_RESET}"
 
     local model_choice
     read -r model_choice
 
-    # Fable 5 = claude-fable-5 (most capable, $10/$50 per MTok, 1M ctx, supports xhigh effort).
-    # Opus 4.8 = claude-opus-4-8 (flagship coder, $5/$25 per MTok, 1M ctx). Both take --effort xhigh.
-    case "${model_choice:-1}" in
+    # Opus 5 = claude-opus-5 — the basis. $5/$25 per MTok, 1M ctx (default),
+    # thinking on by default, full low→max effort ladder. Same price as the
+    # 4.8 it replaces and strictly more capable, so 4.8 is retired here.
+    # Fable 5 = claude-fable-5 — opt-in heaviest tier, $10/$50 per MTok, 1M ctx.
+    # Both take --effort xhigh.
+    case "${model_choice:-3}" in
         1)
             BRAIN_MODEL="claude-fable-5"
-            CODER_MODEL="claude-opus-4-8"
-            MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Opus 4.8 (1M)"
+            CODER_MODEL="claude-opus-5"
+            MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Opus 5 (1M)"
             ;;
         2)
             BRAIN_MODEL="claude-fable-5"
@@ -5707,14 +5711,14 @@ select_model_config() {
             MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Fable 5 (1M)"
             ;;
         3)
-            BRAIN_MODEL="claude-opus-4-8"
-            CODER_MODEL="claude-opus-4-8"
-            MODEL_CONFIG_LABEL="Brain Opus 4.8 (1M) + Coder Opus 4.8 (1M)"
+            BRAIN_MODEL="claude-opus-5"
+            CODER_MODEL="claude-opus-5"
+            MODEL_CONFIG_LABEL="Brain Opus 5 (1M) + Coder Opus 5 (1M)"
             ;;
         4)
-            BRAIN_MODEL="claude-opus-4-8"
+            BRAIN_MODEL="claude-opus-5"
             CODER_MODEL="claude-fable-5"
-            MODEL_CONFIG_LABEL="Brain Opus 4.8 (1M) + Coder Fable 5 (1M)"
+            MODEL_CONFIG_LABEL="Brain Opus 5 (1M) + Coder Fable 5 (1M)"
             ;;
         5)
             # Fable-brain / Opus-coder cascade with a two-model QA ladder:
@@ -5722,17 +5726,17 @@ select_model_config() {
             # (heaviest-reasoning final gate). QA rounds are FORCED to 2 and the
             # interactive QA-rounds prompt is suppressed (QA_ROUNDS_SET=true).
             BRAIN_MODEL="claude-fable-5"
-            CODER_MODEL="claude-opus-4-8"
-            QA_ROUND_MODELS=([1]="claude-opus-4-8" [2]="claude-fable-5")
+            CODER_MODEL="claude-opus-5"
+            QA_ROUND_MODELS=([1]="claude-opus-5" [2]="claude-fable-5")
             QA_ROUNDS=2
             QA_ROUNDS_SET=true
-            MODEL_CONFIG_LABEL="Brain Fable 5 + Coder Opus 4.8 + QA Opus→Fable (2 rounds)"
+            MODEL_CONFIG_LABEL="Brain Fable 5 + Coder Opus 5 + QA Opus→Fable (2 rounds)"
             ;;
         *)
-            warn "Invalid selection '${model_choice}' — using default (Fable 5 Brain + Opus 4.8 Coder)"
-            BRAIN_MODEL="claude-fable-5"
-            CODER_MODEL="claude-opus-4-8"
-            MODEL_CONFIG_LABEL="Brain Fable 5 (1M) + Coder Opus 4.8 (1M)"
+            warn "Invalid selection '${model_choice}' — using default (Opus 5 Brain + Opus 5 Coder)"
+            BRAIN_MODEL="claude-opus-5"
+            CODER_MODEL="claude-opus-5"
+            MODEL_CONFIG_LABEL="Brain Opus 5 (1M) + Coder Opus 5 (1M)"
             ;;
     esac
 
