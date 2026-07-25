@@ -17,7 +17,7 @@ set -euo pipefail
 # =============================================================================
 
 INTERVAL_SECS="${INTERVAL_SECS:-9600}"        # 2h40m
-MODEL="${MODEL:-claude-opus-4-8}"
+MODEL="${MODEL:-claude-opus-5}"
 SOCK="/tmp/riddle-${USER:-$(id -u)}.sock"
 SESSION="riddle"
 SESSDIR="${TMPDIR:-/tmp}/riddle-loop-$$"
