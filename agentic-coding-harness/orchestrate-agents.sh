@@ -351,6 +351,18 @@ ORIGINAL_REPO_ROOT=""
 ORIGINAL_BRAIN_AGENT_FILE=""   # pre-worktree path, used for resuming Stage 1 brain session
 BASE_BRANCH=""                 # branch the worktree was created from (stacked PR or main)
 
+# ─── Stage 7: optional TPM handoff ──────────────────────────────────────────
+# When a TPM conversation ID is provided at setup (typed by hand — the trigger
+# is always a deliberate human act), Stage 7 resumes that conversation
+# headlessly after Stage 6 and hands it the full orchestration output for the
+# phase-5 business-outcome spot check. Blank = stage 7 never runs; nothing
+# about the 6-stage flow changes. Env override supported for resumed runs:
+#   TPM_CONVERSATION_ID=<uuid> ./orchestrate-agents.sh --resume-run <dir>
+# The env route is also the ONLY route when every interactive run-config flag
+# is already set on the command line (--clarify-rounds/--qa-rounds/
+# --skip-ccr-review/--caveman), because prompt_run_config short-circuits.
+TPM_CONVERSATION_ID="${TPM_CONVERSATION_ID:-}"
+
 # Session files (individual files on disk for crash resilience)
 BRAIN_SESSION_FILE=""
 CODING_SESSION_FILE=""
@@ -3137,6 +3149,33 @@ prompt_run_config() {
         SKIP_CCR_REVIEW_SET=true
         printf "\n"
     fi
+
+    # TPM conversation ID (optional Stage 7 handoff)
+    if [[ -z "$TPM_CONVERSATION_ID" ]]; then
+        printf "${C_DIM} ┃${C_RESET} ${C_BOLD}TPM conversation ID${C_RESET} — optional Stage 7 handoff.\n"
+        printf "${C_DIM} ┃${C_RESET}   Paste the session UUID of your open TPM conversation and, after\n"
+        printf "${C_DIM} ┃${C_RESET}   Stage 6, a detached tmux window resumes it headlessly with the\n"
+        printf "${C_DIM} ┃${C_RESET}   full orchestration output for the phase-5 spot check\n"
+        printf "${C_DIM} ┃${C_RESET}   (verdict: commit+push to main, or stop and ask).\n"
+        printf "${C_DIM} ┃${C_RESET}   Blank = skip — nothing changes about the run.\n"
+        printf "${C_DIM} ┃${C_RESET}\n"
+        printf "${C_DIM} ┃${C_RESET}   TPM conversation ID [blank = off]: "
+        local tpm_input
+        read -r tpm_input
+        tpm_input=$(echo "$tpm_input" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        if [[ -z "$tpm_input" ]]; then
+            info "Stage 7 TPM handoff: off"
+        elif [[ "$tpm_input" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            TPM_CONVERSATION_ID="$tpm_input"
+            if ! compgen -G "${HOME}/.claude/projects/*/${TPM_CONVERSATION_ID}.jsonl" >/dev/null 2>&1; then
+                warn "No local session file found for ${TPM_CONVERSATION_ID} — Stage 7 will still attempt the resume, but verify the ID."
+            fi
+            info "Stage 7 TPM handoff: armed (${TPM_CONVERSATION_ID})"
+        else
+            warn "Invalid conversation ID '${tpm_input}' (expected a UUID) — Stage 7 handoff off"
+        fi
+        printf "\n"
+    fi
 }
 
 # ─── SECTION 11: BUSINESS PROBLEM COLLECTION ────────────────────────────────
@@ -4878,6 +4917,121 @@ open_pull_request() {
             echo "(failed)" > "$url_out_file"
         fi
     fi
+}
+
+# ─── SECTION 16c: STAGE 7 — TPM HANDOFF (optional) ──────────────────────────
+#
+# Fires only when TPM_CONVERSATION_ID was armed at setup. Assembles the run's
+# full artifact output into one handoff file, then launches a DETACHED tmux
+# window that resumes the TPM's own conversation headlessly (claude --resume)
+# and injects the output with the phase-5 spot-check instruction. The tmux
+# window dies when the TPM's reply completes; the exchange lives on in the TPM
+# conversation (resume it in any window to see the verdict) and in the run's
+# outputs/stage7-tpm.log. Tool surface is confined to git + read-only tools.
+# A bad ID fails loudly into the log — stages 1-6 are already complete and are
+# never blocked or corrupted by Stage 7.
+#
+# Runs on the DEFAULT tmux server, not the orchestrator's per-run `-S
+# $TMUX_SOCK` socket, so cleanup()/tmux_cleanup() cannot tear the handoff down
+# when the orchestration exits.
+#
+# Multi-repo runs: ${RUN_DIR}/artifacts/ is shared across all N repos, so the
+# handoff carries every repo's phase files. ORIGINAL_REPO_ROOT is repo[0] in
+# multi-repo mode, so the repo-root fallback lands there; every repo root is
+# listed in the run context below so the TPM can Read/Bash across all of them.
+run_stage_7() {
+    if [[ -z "$TPM_CONVERSATION_ID" ]]; then
+        return 0
+    fi
+
+    stage_header "7" "7" "TPM HANDOFF — PHASE-5 SPOT CHECK" "Detached Resume" "$C_BG_BLUE"
+
+    local tpm_repo_root="${ORIGINAL_REPO_ROOT:-$REPO_ROOT}"
+    if [[ -z "$tpm_repo_root" ]] || [[ ! -d "$tpm_repo_root" ]]; then
+        warn "Stage 7: no usable repo root — skipping TPM handoff."
+        return 0
+    fi
+
+    local handoff="${RUN_DIR}/artifacts/stage7_tpm_handoff.md"
+    local s7_log="${RUN_DIR}/outputs/stage7-tpm.log"
+    mkdir -p "${RUN_DIR}/outputs" 2>/dev/null || true
+
+    {
+        echo "PHASE 5 SPOT CHECK — BUSINESS OUTCOME REVIEW ALIGNMENT."
+        echo ""
+        echo "Below is the full output of the orchestration run you briefed. Spot-check it"
+        echo "against the intended business outcome."
+        echo ""
+        echo "- If all good: commit and push to main."
+        echo "- If anything is NOT as intended business-outcome-wise: STOP. Do not touch git."
+        echo "  Explain what is off, or ask Conrad your questions, in your reply."
+        echo ""
+        echo "Run context:"
+        echo "- Branch: ${WORKTREE_BRANCH:-unknown} (base: ${BASE_BRANCH:-main})"
+        if [[ "$MULTI_REPO_MODE" == "true" ]]; then
+            echo "- Multi-repo run across ${REPO_COUNT} repos:"
+            local _i
+            for ((_i=0; _i<REPO_COUNT; _i++)); do
+                echo "    - ${REPO_NAMES_ARRAY[$_i]:-repo${_i}}: ${ORIGINAL_REPO_ROOTS_ARRAY[$_i]:-unknown}"
+            done
+        else
+            echo "- Repo: ${tpm_repo_root}"
+        fi
+        echo "- Stage 6 landing mode: ${STAGE6_MODE}"
+        echo "- Full run artifacts on disk: ${RUN_DIR}"
+        echo ""
+        echo "──────────────── ORCHESTRATION OUTPUT ────────────────"
+        local f
+        for f in "${RUN_DIR}/artifacts/"*.md; do
+            [[ -f "$f" ]] || continue
+            [[ "$f" == "$handoff" ]] && continue
+            echo ""
+            echo "═══════════ $(basename "$f") ═══════════"
+            cat "$f"
+        done
+    } > "$handoff"
+
+    # Cap the payload so a pathological run cannot blow the context window;
+    # the TPM can Read the full artifacts from RUN_DIR regardless.
+    local handoff_bytes
+    handoff_bytes=$(wc -c < "$handoff" | tr -d ' ')
+    if [[ "$handoff_bytes" -gt 180000 ]]; then
+        local capped="${RUN_DIR}/artifacts/stage7_tpm_handoff.capped.md"
+        head -c 180000 "$handoff" > "$capped"
+        printf "\n\n[TRUNCATED at 180KB — read the rest from %s]\n" "${RUN_DIR}/artifacts" >> "$capped"
+        handoff="$capped"
+        warn "Stage 7: handoff payload ${handoff_bytes} bytes — truncated copy sent, full artifacts referenced by path."
+    fi
+
+    # claude --resume is PROJECT-SCOPED: it only finds sessions whose project
+    # dir matches the cwd it is launched from. Resolve the session file and
+    # resume from the cwd recorded inside it; fall back to the repo root.
+    local resume_cwd="$tpm_repo_root"
+    local session_file
+    session_file=$(ls "${HOME}"/.claude/projects/*/"${TPM_CONVERSATION_ID}.jsonl" 2>/dev/null | head -1 || true)
+    if [[ -n "$session_file" ]]; then
+        local sess_cwd
+        sess_cwd=$(head -5 "$session_file" | jq -r 'select(.cwd != null) | .cwd' 2>/dev/null | head -1 || true)
+        if [[ -n "$sess_cwd" ]] && [[ -d "$sess_cwd" ]]; then
+            resume_cwd="$sess_cwd"
+        fi
+    else
+        warn "Stage 7: no local session file for ${TPM_CONVERSATION_ID} — attempting resume from ${resume_cwd} anyway (claude will fail loudly into ${s7_log})."
+    fi
+
+    local s7_cmd="cd '${resume_cwd}' && claude --resume '${TPM_CONVERSATION_ID}' -p --allowedTools 'Bash(git:*),Read,Grep,Glob' < '${handoff}' > '${s7_log}' 2>&1; echo \"exit=\$?\" >> '${s7_log}'"
+
+    if command -v tmux >/dev/null 2>&1; then
+        local s7_session="tpm7-$(date +%H%M%S)"
+        tmux new-session -d -s "$s7_session" "$s7_cmd" \
+            && info "Stage 7: TPM handoff launched in detached tmux session '${s7_session}' — the window dies when the verdict completes." \
+            || warn "Stage 7: tmux launch failed — see ${s7_log} if partially started."
+    else
+        warn "Stage 7: tmux not found — running the handoff with nohup instead."
+        nohup bash -c "$s7_cmd" >/dev/null 2>&1 &
+    fi
+    info "Stage 7: verdict will appear in the TPM conversation (resume ${TPM_CONVERSATION_ID}) and in ${s7_log}."
+    return 0
 }
 
 # ─── SECTION 17: FINAL SUMMARY DASHBOARD ────────────────────────────────────
@@ -8627,6 +8781,10 @@ multi_main_flow() {
     run_multi_stage_6
     save_run_state 6
 
+    # Stage 7 (optional, armed by TPM_CONVERSATION_ID) hands the output to the
+    # TPM's own conversation for the phase-5 spot check — detached, non-blocking.
+    run_stage_7
+
     print_summary
     return 0
 }
@@ -8795,6 +8953,10 @@ multi_main_resume_flow() {
         save_run_state 6
         STAGE_6_COMPLETE=true
     fi
+
+    # Stage 7 (optional, armed by TPM_CONVERSATION_ID) hands the output to the
+    # TPM's own conversation for the phase-5 spot check — detached, non-blocking.
+    run_stage_7
 
     print_summary
     return 0
@@ -9106,6 +9268,11 @@ main() {
             STAGE_6_COMPLETE=true
         fi
 
+        # Stage 7 (optional, armed by TPM_CONVERSATION_ID) hands the output to
+        # the TPM's own conversation for the phase-5 spot check — detached,
+        # non-blocking. On resume, arm it via TPM_CONVERSATION_ID=<uuid>.
+        run_stage_7
+
         print_summary
         return 0
     fi
@@ -9161,6 +9328,10 @@ main() {
 
     run_stage_6
     save_run_state 6
+
+    # Stage 7 (optional, armed by TPM_CONVERSATION_ID) hands the output to the
+    # TPM's own conversation for the phase-5 spot check — detached, non-blocking.
+    run_stage_7
 
     print_summary
     return 0
