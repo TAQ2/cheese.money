@@ -362,6 +362,8 @@ BASE_BRANCH=""                 # branch the worktree was created from (stacked P
 # is already set on the command line (--clarify-rounds/--qa-rounds/
 # --skip-ccr-review/--caveman), because prompt_run_config short-circuits.
 TPM_CONVERSATION_ID="${TPM_CONVERSATION_ID:-}"
+STAGE7_FIRED=false
+S7_EXIT_CODE=""
 
 # Session files (individual files on disk for crash resilience)
 BRAIN_SESSION_FILE=""
@@ -4943,8 +4945,21 @@ run_stage_7() {
     if [[ -z "$TPM_CONVERSATION_ID" ]]; then
         return 0
     fi
+    # Mode: "success" (default, after Stage 6) or "failed" (fired from the EXIT
+    # trap when the run dies). A failed run is exactly when the TPM's judgment is
+    # most useful, so the handoff still goes out — with an instruction to
+    # DIAGNOSE and explicitly NOT to commit.
+    local s7_mode="${1:-success}"
+    if [[ "$s7_mode" == "failed" ]] && [[ "${STAGE7_FIRED:-false}" == "true" ]]; then
+        return 0   # already handed off on the success path
+    fi
+    STAGE7_FIRED=true
 
-    stage_header "7" "7" "TPM HANDOFF — PHASE-5 SPOT CHECK" "Detached Resume" "$C_BG_BLUE"
+    if [[ "$s7_mode" == "failed" ]]; then
+        stage_header "7" "7" "TPM HANDOFF — RUN FAILED, DIAGNOSE" "Detached Resume" "$C_BG_RED"
+    else
+        stage_header "7" "7" "TPM HANDOFF — PHASE-5 SPOT CHECK" "Detached Resume" "$C_BG_BLUE"
+    fi
 
     local tpm_repo_root="${ORIGINAL_REPO_ROOT:-$REPO_ROOT}"
     if [[ -z "$tpm_repo_root" ]] || [[ ! -d "$tpm_repo_root" ]]; then
@@ -4957,15 +4972,40 @@ run_stage_7() {
     mkdir -p "${RUN_DIR}/outputs" 2>/dev/null || true
 
     {
-        echo "PHASE 5 SPOT CHECK — BUSINESS OUTCOME REVIEW ALIGNMENT."
-        echo ""
-        echo "Below is the full output of the orchestration run you briefed. Spot-check it"
-        echo "against the intended business outcome."
-        echo ""
-        echo "- If all good: commit and push to main."
-        echo "- If anything is NOT as intended business-outcome-wise: STOP. Do not touch git."
-        echo "  Explain what is off, or ask Conrad your questions, in your reply."
-        echo ""
+        if [[ "$s7_mode" == "failed" ]]; then
+            echo "ORCHESTRATION RUN FAILED — DIAGNOSE. DO NOT COMMIT."
+            echo ""
+            echo "The run you briefed died before completing. Your job here is diagnosis,"
+            echo "not delivery."
+            echo ""
+            echo "- DO NOT commit, push, merge, or touch git in any way."
+            echo "- Read the failure evidence below plus the artifacts on disk, and say"
+            echo "  plainly: what failed, whether it is caused by this run's changes or is"
+            echo "  pre-existing/environmental, and what the smallest correct fix is."
+            echo "- If the failure indicates a real product bug rather than a run problem,"
+            echo "  say so first — that outranks the run."
+            echo "- The worktree and its staged changes are intact; nothing is lost."
+            echo ""
+            echo "Failure evidence:"
+            echo "- Exit code: ${S7_EXIT_CODE:-unknown}"
+            echo "- Worktree (still present): ${WORKTREE_DIR:-unknown}"
+            echo "- Resume with: ./${SCRIPT_NAME:-orchestrate-agents.sh} --resume-run \"${RUN_DIR}\""
+            echo ""
+            echo "──────── LAST 120 LOG LINES ────────"
+            tail -120 "${LOG_FILE:-/dev/null}" 2>/dev/null || echo "(log unavailable)"
+            echo "──────── END LOG ────────"
+            echo ""
+        else
+            echo "PHASE 5 SPOT CHECK — BUSINESS OUTCOME REVIEW ALIGNMENT."
+            echo ""
+            echo "Below is the full output of the orchestration run you briefed. Spot-check it"
+            echo "against the intended business outcome."
+            echo ""
+            echo "- If all good: commit and push to main."
+            echo "- If anything is NOT as intended business-outcome-wise: STOP. Do not touch git."
+            echo "  Explain what is off, or ask Conrad your questions, in your reply."
+            echo ""
+        fi
         echo "Run context:"
         echo "- Branch: ${WORKTREE_BRANCH:-unknown} (base: ${BASE_BRANCH:-main})"
         if [[ "$MULTI_REPO_MODE" == "true" ]]; then
@@ -5019,10 +5059,14 @@ run_stage_7() {
         warn "Stage 7: no local session file for ${TPM_CONVERSATION_ID} — attempting resume from ${resume_cwd} anyway (claude will fail loudly into ${s7_log})."
     fi
 
-    local s7_cmd="cd '${resume_cwd}' && claude --resume '${TPM_CONVERSATION_ID}' -p --allowedTools 'Bash(git:*),Read,Grep,Glob' < '${handoff}' > '${s7_log}' 2>&1; echo \"exit=\$?\" >> '${s7_log}'"
+    # Failed runs get a READ-ONLY tool surface — no git writes at all, so a
+    # diagnosing TPM cannot commit a broken run even by mistake.
+    local s7_tools="Bash(git:*),Read,Grep,Glob"
+    [[ "$s7_mode" == "failed" ]] && s7_tools="Read,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
+    local s7_cmd="cd '${resume_cwd}' && claude --resume '${TPM_CONVERSATION_ID}' -p --allowedTools '${s7_tools}' < '${handoff}' > '${s7_log}' 2>&1; echo \"exit=\$?\" >> '${s7_log}'"
 
     if command -v tmux >/dev/null 2>&1; then
-        local s7_session="tpm7-$(date +%H%M%S)"
+        local s7_session="tpm7-${s7_mode}-$(date +%H%M%S)"
         tmux new-session -d -s "$s7_session" "$s7_cmd" \
             && info "Stage 7: TPM handoff launched in detached tmux session '${s7_session}' — the window dies when the verdict completes." \
             || warn "Stage 7: tmux launch failed — see ${s7_log} if partially started."
@@ -5413,6 +5457,14 @@ cleanup() {
             printf "  ${C_BOLD}${C_YELLOW}To resume from last checkpoint:${C_RESET}\n"
             printf "  ${C_CYAN}  ./${SCRIPT_NAME} --resume-run \"%s\"${C_RESET}\n" "$RUN_DIR"
             printf "\n"
+        fi
+        # Stage 7 on failure: hand the wreck to the TPM's own conversation for
+        # diagnosis (read-only tools, explicit do-not-commit instruction). One
+        # EXIT trap covers all four run-completing paths — single- and multi-repo,
+        # fresh and resumed. Never allowed to break cleanup.
+        if [[ -n "${TPM_CONVERSATION_ID:-}" ]] && [[ -n "${RUN_DIR:-}" ]] && [[ -d "${RUN_DIR:-}" ]]; then
+            S7_EXIT_CODE="$exit_code"
+            run_stage_7 failed 2>/dev/null || true
         fi
         if [[ -n "${WORKTREE_DIR:-}" ]] && [[ -d "${WORKTREE_DIR:-}" ]]; then
             warn "Worktree still exists: ${WORKTREE_DIR}"
