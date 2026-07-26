@@ -1,0 +1,62 @@
+"""Visual UX assertions for {{SURFACE}}.
+
+TEMPLATE — copy to `test_<feature>_visual.py`, replace the placeholders, delete what does not
+apply. One case file per stakeholder-approved surface.
+
+Turns approved geometry into executable assertions (bounding-box math on a real rendered page) so
+any future template/CSS change that breaks it fails loudly BEFORE deploy.
+
+  RUN_VISUAL=1 python3 -m pytest tests/visual/ -q
+  VISUAL_BASE_URL=http://localhost:{{DEV_PORT}} RUN_VISUAL=1 python3 -m pytest tests/visual/ -q
+
+Config (viewports, base URL, timeouts) lives in conftest.py.
+"""
+from visual_asserts import (
+    assert_inside_viewport,
+    assert_no_horizontal_overflow,
+    assert_no_overlap,
+    assert_vertically_centered_on,
+    box,
+)
+
+# A stable, content-rich page that exercises this surface fully.
+VISUAL_PATH = "{{STABLE_PATH}}"
+WIDE_BREAKPOINT = {{WIDE_BREAKPOINT}}  # must match the CSS breakpoint exactly
+
+
+def test_no_horizontal_overflow(page):
+    """Universal invariant — belongs in every case file."""
+    assert_no_horizontal_overflow(page)
+
+
+def test_element_visible_and_contained(page):
+    assert_inside_viewport(page, page.locator("#{{ELEMENT_ID}}"), "{{ELEMENT_ID}}")
+
+
+def test_element_never_overlaps_neighbor(page):
+    assert_no_overlap(
+        box(page.locator("#{{ELEMENT_ID}}"), "{{ELEMENT_ID}}"),
+        box(page.locator(".{{NEIGHBOR_CLASS}}").first, "{{NEIGHBOR_CLASS}}"),
+        "{{ELEMENT_ID}} vs {{NEIGHBOR_CLASS}}",
+    )
+
+
+def test_tier_placement(page):
+    """Approved geometry differs per responsive tier — assert each on its own side of the flip."""
+    element = box(page.locator("#{{ELEMENT_ID}}"), "{{ELEMENT_ID}}")
+    if page.viewport_size["width"] >= WIDE_BREAKPOINT:
+        anchor = box(page.locator(".{{WIDE_ANCHOR}}").first, "{{WIDE_ANCHOR}}")
+        assert_vertically_centered_on(element, anchor, "wide tier", tolerance=20)
+        assert element["x"] >= anchor["x"] + anchor["width"] - 1, "wide tier: element not outside the content column"
+    else:
+        assert_vertically_centered_on(element, box(page.locator(".{{NARROW_ANCHOR}}"), "{{NARROW_ANCHOR}}"), "default tier")
+
+
+def test_interaction_state(page):
+    """Drive the interaction, then assert the resulting geometry/DOM — order, visibility, containment."""
+    page.locator("#{{TOGGLE_ID}}").click()
+    panel = page.locator("#{{PANEL_ID}}")
+    assert panel.is_visible()
+    assert_inside_viewport(page, panel, "{{PANEL_ID}}")
+    ids = panel.evaluate("el => Array.from(el.querySelectorAll('a[id], button[id]')).map(n => n.id)")
+    assert ids == ["{{EXPECTED}}", "{{ORDER}}"], f"child order wrong: {ids}"

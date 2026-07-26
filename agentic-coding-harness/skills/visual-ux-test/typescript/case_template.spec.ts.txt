@@ -1,0 +1,66 @@
+// Visual UX assertions for {{SURFACE}}.
+//
+// TEMPLATE — copy to `<feature>.visual.spec.ts`, replace the placeholders, delete what does not
+// apply. One case file per stakeholder-approved surface.
+//
+// Turns approved geometry into executable assertions (bounding-box math on a real rendered page)
+// so any future component/CSS change that breaks it fails loudly BEFORE deploy.
+//   npm run test:visual
+//
+// Viewports and base URL live in playwright.visual.config.ts.
+import { test } from "@playwright/test";
+
+import {
+  assertInsideViewport,
+  assertNoHorizontalOverflow,
+  assertNoOverlap,
+  assertVerticallyCenteredOn,
+  box,
+  gotoSettled,
+  viewportWidth,
+} from "./visual-asserts";
+
+// A stable, content-rich page that exercises this surface fully.
+const VISUAL_PATH = "{{STABLE_PATH}}";
+const WIDE_BREAKPOINT = {{WIDE_BREAKPOINT}}; // must match the CSS breakpoint exactly
+
+test.beforeEach(async ({ page }) => {
+  await gotoSettled(page, VISUAL_PATH);
+});
+
+test("no horizontal overflow", async ({ page }) => {
+  // Universal invariant — belongs in every case file.
+  await assertNoHorizontalOverflow(page);
+});
+
+test("element visible and contained", async ({ page }) => {
+  await assertInsideViewport(page, page.locator("#{{ELEMENT_ID}}"), "{{ELEMENT_ID}}");
+});
+
+test("element never overlaps neighbor", async ({ page }) => {
+  assertNoOverlap(
+    await box(page.locator("#{{ELEMENT_ID}}"), "{{ELEMENT_ID}}"),
+    await box(page.locator(".{{NEIGHBOR_CLASS}}").first(), "{{NEIGHBOR_CLASS}}"),
+    "{{ELEMENT_ID}} vs {{NEIGHBOR_CLASS}}",
+  );
+});
+
+test("tier placement", async ({ page }) => {
+  // Approved geometry differs per responsive tier — assert each on its own side of the flip.
+  const vw = viewportWidth(page);
+  const element = await box(page.locator("#{{ELEMENT_ID}}"), "{{ELEMENT_ID}}");
+  if (vw >= WIDE_BREAKPOINT) {
+    const anchor = await box(page.locator(".{{WIDE_ANCHOR}}").first(), "{{WIDE_ANCHOR}}");
+    assertVerticallyCenteredOn(element, anchor, "wide tier", 20);
+  } else {
+    const anchor = await box(page.locator(".{{NARROW_ANCHOR}}"), "{{NARROW_ANCHOR}}");
+    assertVerticallyCenteredOn(element, anchor, "default tier");
+  }
+});
+
+test("interaction state", async ({ page }) => {
+  // Drive the interaction, then assert the resulting geometry/DOM — order, visibility, containment.
+  await page.locator("#{{TOGGLE_ID}}").click();
+  const panel = page.locator("#{{PANEL_ID}}");
+  await assertInsideViewport(page, panel, "{{PANEL_ID}}");
+});

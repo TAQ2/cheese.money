@@ -72,7 +72,25 @@ Trim `templates/PR_DESCRIPTION_TEMPLATE.md` to the sections you actually use (th
 
 ---
 
-## 6. First run
+## 6. Install the visual UX test suite (any repo with a UI)
+
+```bash
+skills/visual-ux-test/install.sh /path/to/repo --origin https://your-domain.com   # add --ts if the repo already has @playwright/test
+```
+
+It installs `tests/visual/` (capture harness + assertion fixtures + geometry helpers), gitignores
+the screenshot output, writes `.claude/skills/visual-ux-test/SKILL.md`, and test-fires two live
+captures so you know headless Chromium gets past your CDN before you trust it. Then do what it
+prints: LOOK at the PNGs, fill the placeholders, set the viewport matrices to your real CSS
+breakpoints, write the first case file, and wire the three pipeline gates (they are already in the
+agent templates — keep them when you fill the placeholders).
+
+Zero-npm by design: the harness runs on locally pinned `playwright==1.52.0`; nothing is fetched at
+run time. Rationale and the full workflow live in the installed `SKILL.md`.
+
+---
+
+## 7. First run
 
 ```bash
 # from inside your repo, with an inline task
@@ -86,7 +104,7 @@ Stay attached (`tmux attach`) and supervise. Stage 1 pauses for you to approve t
 
 ---
 
-## 7. Verify before you trust it
+## 8. Verify before you trust it
 
 - `bash -n orchestrate-agents.sh` clean.
 - A `--dry-run` shows your repo, base branch, and the model picker.

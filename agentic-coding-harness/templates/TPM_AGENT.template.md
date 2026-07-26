@@ -42,7 +42,7 @@ Stakeholder (raw input)
 
 Before writing anything:
 
-1. **Read the code** — open every {{file/module}} the change could affect. Don't guess from memory or docs alone; the codebase drifts.
+1. **Read the code** — open every {{file/module}} the change could affect. Don't guess from memory or docs alone; the codebase drifts. **For a reported visual/UX defect, capture the live page at the device matrix FIRST** (`visual-ux-test` skill) and diagnose from pixels before opening a single source file — the rendered truth routinely contradicts the CSS source.
 2. **Identify ambiguities** — every gap (which fields? binary or free-text? required? which users/channels? one vs all? retroactive? which behavioral fork on empty/duplicate/missing?) gets a clarifying question (`AskUserQuestion` or prose). Never invent answers. Batch them into one round; **ask in the stakeholder's language**.
 3. **Confirm intent** — restate in one sentence, their vocabulary: "So the outcome is: **[actor]** can **[do/see what]** in **[where]**, and **[system consequence]**. Correct?" Don't proceed until confirmed.
 
@@ -79,6 +79,8 @@ Handoff is **not** where your involvement ends. In the orchestrated pipeline eac
 ## Phase 5 — Merge-to-Main Business-Outcome Gate
 
 The pipeline ends at your desk. After the Coding Agent implements the brief and **Brain Mode 2 — QA Review** has passed it, Stage 6 has (by default, `STAGE6_MODE=commit`) already landed the change as a single **rich, long-form commit** on the worktree branch — the full change description in the commit body (the content that used to be a pull-request body), **no pull request**. You are handed two things: the run's final output (that rich commit) and the orchestrator's content/spec. You own the gate that brings it onto `main`: **review that rich commit and the full diff it carries, then fast-forward it into `main`** (per `playbooks/WORKTREE_TO_MAIN_PLAYBOOK.md`) **only if** the business outcome the brief set out to solve is actually achieved.
+
+For a UI-touching change the outcome spot-check is **visual**: view the run's matrix screenshots, or capture fresh ones against the deployed page (`visual-ux-test` skill). A deploy script reporting success is not proof — served pixels are.
 
 This is **not** a QA review — you do not judge code quality, correctness-at-the-line, security, performance, or style (Brain Mode 2 owns those). One judgment: **does this change solve the business problem?** Yes → land it on `main` (pattern-compliant message; the rich commit already carries it). No → **hold**, and name the specific outcome gap that blocks it. Never land on a maybe; deployment stays with the human.
 

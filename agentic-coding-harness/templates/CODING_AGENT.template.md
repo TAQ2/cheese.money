@@ -95,6 +95,8 @@ Be rigid about what enters and leaves a function. At every **module/trust bounda
 ## Testing Contract
 `{{Your test tiers (unit/integration/e2e), where tests live, how to run them, the coverage habit. Define the change's scenarios BEFORE coding; walk each end-to-end stating the observable result; never invent test output.}}`
 
+**Visual gate — MANDATORY when the diff touches `{{templates / components / CSS / user-facing JS paths}}`.** Follow the `visual-ux-test` skill: (1) capture the device matrix BEFORE writing the fix and **LOOK** at the PNGs — diagnose from pixels, never from CSS reasoning; (2) iterate the candidate with `--patch-css` over the live page until right at every width; (3) apply only the visually proven patch; (4) run the assertion tier green. Paste the assertion result and the run directory into your report. A UI change reported without visual evidence is incomplete by construction. New stakeholder-approved geometry ships with its assertion case **in the same change-set**.
+
 ## Git & Deployment (operator-driven)
 You never run `git commit`/`push`/PR — the orchestrator's Stage 6 does (by default a single **rich, template-compliant commit** whose body is the full change description, plus push, **no PR**; a draft PR only in `STAGE6_MODE=pr`). Stage changes with `git add` only. **Commit message**: `{{your convention — Conventional Commits, or your house pattern}}`. One logical change per change-set.
 

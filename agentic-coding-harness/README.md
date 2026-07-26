@@ -36,6 +36,7 @@ Everything runs inside a disposable **git worktree** branched from the tip of th
 | `templates/CODING_AGENT.template.md` | Coding Agent (implementer) instructions. | Fill `{{PLACEHOLDERS}}`. |
 | `templates/TPM_AGENT.template.md` | TPM Agent — the human-driven bookends around the orchestrator: frames the smallest Product Brief upstream of Brain (Phases 1–3), acts as the stakeholder's proxy when downstream agents return questions (Phase 4), and gates the merge-to-`main` on business outcome (Phase 5). | Fill `{{PLACEHOLDERS}}`. |
 | `templates/PR_DESCRIPTION_TEMPLATE.md` | Canonical PR body Stage 6 makes the agent fill. | Generic; trim sections you don't use. |
+| `skills/visual-ux-test/` | The visual UX test suite (installer + capture harness + assertion tier + skill). Makes UI changes ship on **seen pixels**, not on CSS reasoning. | Run `install.sh <repo> --origin https://your-domain`, then fill the printed placeholders. |
 | `playbooks/LLM_CODING_AGENT_CREATION.md` | How to generate the three agent docs for a brand-new repo. | Follow it. |
 | `playbooks/FULL_DOCUMENTATION_UPDATE.md` | The doc-update runbook Stage 5 executes. | Light edits for your doc set. |
 | `playbooks/WORKTREE_TO_MAIN_PLAYBOOK.md` | Manual merge-back fallback (if you stop before Stage 6). | Light edits. |
