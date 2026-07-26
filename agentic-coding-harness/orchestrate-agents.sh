@@ -5031,17 +5031,12 @@ run_stage_7() {
         done
     } > "$handoff"
 
-    # Cap the payload so a pathological run cannot blow the context window;
-    # the TPM can Read the full artifacts from RUN_DIR regardless.
+    # No truncation any more: the TPM is handed the handoff's PATH and reads it
+    # itself, so nothing rides stdin and nothing needs capping. Size is reported
+    # only so a pathological run is visible in the log.
     local handoff_bytes
     handoff_bytes=$(wc -c < "$handoff" | tr -d ' ')
-    if [[ "$handoff_bytes" -gt 180000 ]]; then
-        local capped="${RUN_DIR}/artifacts/stage7_tpm_handoff.capped.md"
-        head -c 180000 "$handoff" > "$capped"
-        printf "\n\n[TRUNCATED at 180KB — read the rest from %s]\n" "${RUN_DIR}/artifacts" >> "$capped"
-        handoff="$capped"
-        warn "Stage 7: handoff payload ${handoff_bytes} bytes — truncated copy sent, full artifacts referenced by path."
-    fi
+    info "Stage 7: handoff assembled (${handoff_bytes} bytes) → ${handoff}"
 
     # claude --resume is PROJECT-SCOPED: it only finds sessions whose project
     # dir matches the cwd it is launched from. Resolve the session file and
@@ -5061,20 +5056,28 @@ run_stage_7() {
 
     # Failed runs get a READ-ONLY tool surface — no git writes at all, so a
     # diagnosing TPM cannot commit a broken run even by mistake.
-    local s7_tools="Bash(git:*),Read,Grep,Glob"
-    [[ "$s7_mode" == "failed" ]] && s7_tools="Read,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
-    local s7_cmd="cd '${resume_cwd}' && claude --resume '${TPM_CONVERSATION_ID}' -p --allowedTools '${s7_tools}' < '${handoff}' > '${s7_log}' 2>&1; echo \"exit=\$?\" >> '${s7_log}'"
+    # WINDOWLESS TMUX, INTERACTIVE — never `claude -p`. Conrad's standing rule,
+    # and vindicated in production 2026-07-26: a `-p` handoff died silently,
+    # leaving an empty pane, a 0-byte log and no verdict. The interactive TUI is
+    # driven by send-keys and pointed at the handoff FILE, so no payload rides
+    # stdin, nothing is truncated, and the window stays attachable for watching.
+    local s7_prompt="Read the file ${handoff} in full and follow its instructions exactly."
 
     if command -v tmux >/dev/null 2>&1; then
         local s7_session="tpm7-${s7_mode}-$(date +%H%M%S)"
-        tmux new-session -d -s "$s7_session" "$s7_cmd" \
-            && info "Stage 7: TPM handoff launched in detached tmux session '${s7_session}' — the window dies when the verdict completes." \
-            || warn "Stage 7: tmux launch failed — see ${s7_log} if partially started."
+        if tmux new-session -d -s "$s7_session" -c "$resume_cwd" \
+                "claude --resume '${TPM_CONVERSATION_ID}' 2>&1 | tee '${s7_log}'"; then
+            sleep 12   # TUI boot before keystrokes land
+            tmux send-keys -t "$s7_session" "$s7_prompt" Enter
+            info "Stage 7: handoff sent to interactive session '${s7_session}'."
+            info "Stage 7: WATCH IT LIVE — tmux attach -t ${s7_session}"
+        else
+            warn "Stage 7: tmux launch failed — handoff written to ${handoff}, not delivered."
+        fi
     else
-        warn "Stage 7: tmux not found — running the handoff with nohup instead."
-        nohup bash -c "$s7_cmd" >/dev/null 2>&1 &
+        warn "Stage 7: tmux not found — handoff written to ${handoff}, not delivered."
     fi
-    info "Stage 7: verdict will appear in the TPM conversation (resume ${TPM_CONVERSATION_ID}) and in ${s7_log}."
+    info "Stage 7: transcript also mirrors to ${s7_log}; the conversation is ${TPM_CONVERSATION_ID}."
     return 0
 }
 
