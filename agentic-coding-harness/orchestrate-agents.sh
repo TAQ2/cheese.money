@@ -5024,7 +5024,7 @@ run_stage_7() {
         local f
         for f in "${RUN_DIR}/artifacts/"*.md; do
             [[ -f "$f" ]] || continue
-            [[ "$f" == "$handoff" ]] && continue
+            case "$(basename "$f")" in stage7_tpm_handoff*) continue ;; esac
             echo ""
             echo "═══════════ $(basename "$f") ═══════════"
             cat "$f"
