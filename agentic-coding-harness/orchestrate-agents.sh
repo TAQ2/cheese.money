@@ -5054,8 +5054,9 @@ run_stage_7() {
         warn "Stage 7: no local session file for ${TPM_CONVERSATION_ID} — attempting resume from ${resume_cwd} anyway (claude will fail loudly into ${s7_log})."
     fi
 
-    # Failed runs get a READ-ONLY tool surface — no git writes at all, so a
-    # diagnosing TPM cannot commit a broken run even by mistake.
+    # NOTE: failed runs no longer get a read-only tool surface — that guard died
+    # with `-p` (an interactive session uses the project's own permissions). The
+    # DO-NOT-COMMIT instruction inside the handoff text is now the only guard.
     # WINDOWLESS TMUX, INTERACTIVE — never `claude -p`. Conrad's standing rule,
     # and vindicated in production 2026-07-26: a `-p` handoff died silently,
     # leaving an empty pane, a 0-byte log and no verdict. The interactive TUI is
