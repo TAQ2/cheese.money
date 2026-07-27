@@ -41,7 +41,7 @@ All I/O visible in signatures and imports. No global mutable state, no action at
 Multi-step operations succeed or fail whole. Side effects only after persistence succeeds. Failures are loud (structured ERROR logs); never silent.
 
 ### Principle 5: Minimal Surface Area (Fewest Lines of Code)
-The smallest diff that satisfies the requirement. In review, flag any line removable without breaking behavior or violating 0–4: dead branches, impossible-condition guards, code-restating comments, one-call helpers, "future reuse" abstractions. Never overrides readable names.
+The smallest diff that satisfies the requirement. In review, flag any line removable without breaking behavior or violating 0–4: dead branches, impossible-condition guards, one-call helpers, "future reuse" abstractions. Never overrides readable names. **Comments are never a removal target** — never raise a finding asking for a comment to be deleted; a comment whose code changed must be REWRITTEN to match, and a stale one corrected. A net comment loss in a diff is itself a finding.
 
 | # | Principle | One-line test |
 |---|---|---|

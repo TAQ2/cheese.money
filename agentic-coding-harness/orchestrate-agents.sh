@@ -3688,12 +3688,12 @@ run_stage_2() {
         echo "   d) If doing multiple iterations (QA fixes, refinements), just re-stage — overwriting the staging area is fine."
         echo "   e) Do NOT create branches, PRs, or push to remote. The user handles all of this."
         echo ""
-        echo "4. IMPLEMENT using TDD flow: Read existing tests → Define new tests → Make tests fail → Implement → Verify."
+        echo "4. IMPLEMENT using TDD flow: Read existing tests → Define new tests → Make tests fail → Implement."
         echo "5. RUN PRE-COMMIT HOOKS after implementation. Fix any failures. This is a hard gate."
         echo "6. UPDATE SERVICE_DOCUMENTATION.md for every file you touched."
         echo "7. UPDATE TEST_DOCUMENTATION.md if you added or modified test files."
         echo "8. COMPLETE the Code Change Request Form (all 8 sections) with your actual implementation details — not the plan, but what you actually did."
-        echo "9. VERIFY: CHANGELOG.md was NOT modified."
+        echo "9. Do NOT modify CHANGELOG.md."
         echo "10. STAGE all changes (git add) but DO NOT run git commit. The user commits manually via VS Code Git."
         echo ""
         echo "Take your time and be thorough. Quality over speed."
@@ -3810,6 +3810,65 @@ emit_doc_runbook_steps() {
     echo ""
 }
 
+# ─── SECTION 13b-2: MECHANICAL PRECHECKS ───────────────────────────────────
+
+# Emits the git-derived facts a reviewer would otherwise burn tool calls and
+# model tokens re-deriving. A shell answer cannot be rationalised, abbreviated,
+# or asserted from a report the way a model's can, so moving these off the model
+# makes the check stricter AND cheaper.
+#
+# Deliberately git-only. This orchestrator is project-agnostic and does not know
+# the repo's test command, so "do the tests pass" and "is coverage adequate"
+# stay reviewer judgement calls. Every check here is instant, which is what lets
+# it be re-emitted before EVERY review turn — mandatory, because the fix loop
+# mutates the diff underneath it and a block captured once is stale by the next
+# iteration.
+#
+# Args: $1 worktree dir (default WORKTREE_DIR), $2 base branch (default BASE_BRANCH)
+emit_mechanical_prechecks() {
+    local wt="${1:-$WORKTREE_DIR}"
+    local base="${2:-$BASE_BRANCH}"
+
+    echo "MECHANICAL PRECHECKS — computed by the orchestrator from git. These are"
+    echo "GIVEN FACTS: do not re-derive them and do not spend review budget"
+    echo "re-confirming them. Spend it on logic, risk, and correctness instead."
+    echo ""
+
+    if [[ -z "$wt" ]] || [[ ! -d "$wt" ]]; then
+        echo "  (unavailable — worktree not resolved; verify manually)"
+        echo ""
+        return 0
+    fi
+
+    local tracked untracked all count shortstat
+    tracked=$(git -C "$wt" diff --name-only "origin/${base}" 2>/dev/null || true)
+    untracked=$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null || true)
+    all=$(printf '%s\n%s\n' "$tracked" "$untracked" | grep -v '^[[:space:]]*$' | sort -u || true)
+    count=$(printf '%s' "$all" | grep -c . || true)
+    shortstat=$(git -C "$wt" diff --shortstat "origin/${base}" 2>/dev/null || true)
+
+    printf '  files changed ................ %s\n' "${count:-0}"
+    printf '  diffstat ..................... %s\n' "${shortstat:-none}"
+
+    if printf '%s\n' "$all" | grep -qi 'CHANGELOG'; then
+        printf '  CHANGELOG ....................  MODIFIED — this is a violation, flag it\n'
+    else
+        printf '  CHANGELOG .................... not modified (correct)\n'
+    fi
+
+    local doc_count
+    doc_count=$(printf '%s\n' "$all" | grep -ci 'DOCUMENTATION.*\.md' || true)
+    printf '  documentation files .......... %s changed\n' "${doc_count:-0}"
+
+    echo ""
+    echo "  changed files:"
+    printf '%s\n' "$all" | grep -v '^[[:space:]]*$' | head -40 | sed 's/^/    - /' || true
+    if [[ "${count:-0}" -gt 40 ]]; then
+        printf '    … and %s more\n' "$(( count - 40 ))"
+    fi
+    echo ""
+}
+
 run_doc_update_pass() {
     local phase_label="${1:-doc-update}"
 
@@ -3871,12 +3930,12 @@ run_reduction_pass() {
         echo "2. Readable, usable variable and function names STAY. This is NOT code golf. Do not shorten names, collapse clear logic into dense one-liners, merge functions that should stay separate, or trade clarity for line count. Clarity outranks brevity — and in security, concurrency, migration, financial, or parsing code, clarity wins outright."
         echo "3. TEST-GATED. Before reducing: run the full validation/test suite (pre-commit hooks + tests) and confirm GREEN — that is your baseline. After each reduction: re-run the SAME suite. If anything regresses or behavior shifts, REVERT that specific reduction and keep the working version. Never leave a reduction you did not re-verify green."
         echo ""
-        echo "4. COMMENTS, DOCSTRINGS, BLANK LINES, AND LOGGING ARE NOT LINES OF CODE. They do not count toward any reduction and are PRESERVED — never remove a comment, docstring, or log line to lower a count. A comment is a useful pointer for the next reader or agent; the default is KEEP. The ONLY removable comment is one that is extremely redundant (it restates the immediately adjacent code token-for-token and adds zero context, such as a comment saying increment i sitting directly above i += 1) or is stale and wrong. When in doubt, keep it."
+        echo "4. COMMENTS, DOCSTRINGS, BLANK LINES, AND LOGGING ARE NOT LINES OF CODE, AND ARE NEVER A REDUCTION TARGET. They never count toward any reduction. You do NOT delete a comment, docstring, or log line to lower a count — doing that is a regression, and if you catch yourself having done it, revert it. THE RULE YOU ARE MISSING IS 'ADJUST': when a cut changes the code a comment describes, you REWRITE that comment so it describes the new code. Never orphan it, never drop it. A stale or wrong comment is CORRECTED, not deleted. A comment is a pointer for the next reader or agent — when in doubt, keep it and improve it."
         echo ""
         echo "LEGITIMATE TARGETS (these are RUNTIME CODE, never comments; subtract — do NOT compress). Remove only:"
         echo "(a) dead branches and unreachable code"
         echo "(b) defensive checks for conditions that cannot occur"
-        echo "(c) a comment ONLY if it is extremely redundant — it restates the adjacent code token-for-token with zero added context, or is stale/wrong (default: KEEP every comment as a pointer)"
+        echo "(c) NOT A TARGET — this slot is deliberately empty. Comments and docstrings are never deleted to reduce code. If a cut changes code that carries a comment, REWRITE the comment to match the new code (see constraint 4)."
         echo "(d) helper functions called from exactly one place that can be inlined"
         echo "(e) abstractions added 'for future reuse' with no current second caller"
         echo "(f) an empty or auto-generated placeholder docstring that states nothing (keep every docstring that gives intent, a contract, or a non-obvious why)"
@@ -3891,7 +3950,7 @@ run_reduction_pass() {
         echo "4. Re-stage with 'git add'. Do NOT run 'git commit'."
         echo "5. ARBITRARY EXIT: when no further reduction is viable WITHOUT golfing or risking behavior, STOP. Do not invent reductions to hit a number. An already-minimal diff is a valid, expected outcome — say so and move on."
         echo ""
-        echo "End your response with a REDUCTION REPORT: net RUNTIME-CODE change before -> after (comments and blank lines excluded from the count) or 'no viable reduction'; what was removed by category (a-h / other), or why nothing more could go without sacrificing clarity, comments, or behavior; and confirmation that the full suite is GREEN after reduction."
+        echo "End your response with a REDUCTION REPORT: net RUNTIME-CODE change before -> after (comments and blank lines excluded from the count) or 'no viable reduction'; what was removed by category (a-h / other), or why nothing more could go without sacrificing clarity, comments, or behavior; COMMENT COUNT before -> after, which MUST be equal or higher (if it is lower, name every comment that disappeared and justify each one as unavoidable — a net comment loss is a defect to explain, not a result to report); and confirmation that the full suite is GREEN after reduction."
     } > "$reduce_prompt"
 
     invoke_agent \
@@ -3954,16 +4013,17 @@ The Coding Agent has completed the implementation. Their full report is here:
 $(cat "$coding_output")
 </implementation_report>
 
-CRITICAL REVIEW INSTRUCTIONS:
-1. Read the Coding Agent's report first to understand what they did.
-2. Then READ THE ACTUAL SOURCE CODE — verify the implementation directly from the files, not just the report.
-3. Check git changes: run 'git diff' or 'git diff --stat' to see exactly what changed.
-4. Verify the Code Change Request Form matches the actual code.
-5. Check business logic correctness, DB impact, edge cases, integration risks.
-6. Verify test coverage and that tests actually pass.
-7. Verify SERVICE_DOCUMENTATION.md was updated for every file touched.
-8. Verify CHANGELOG.md was NOT modified.
-9. Run the full Deployment Conditions checklist.
+$(emit_mechanical_prechecks)
+REVIEW INSTRUCTIONS:
+1. Read the Coding Agent's report to understand what they did.
+2. Then read the ACTUAL SOURCE CODE — the code is the authority, not the report.
+3. Judge: business-logic correctness, entropy delta (Principle 0), contracts and assertions at boundaries, the DB/security policy, atomicity, edge cases, integration risk, and whether the Code Change Request Form matches the actual code (extra files = scope creep; missing = incomplete).
+4. Judge the tests: are they the RIGHT tests, is the new logic actually covered, do they pass? The precheck block above tells you which files moved — it does NOT tell you whether the tests are adequate. That judgement is yours.
+5. Run the Deployment Conditions checklist.
+
+Report everything you find, with severity. Do not pre-filter to what seems important — filtering is a separate pass, not yours.
+
+DOCUMENTATION SCOPE: documentation completeness is Stage 5's dedicated job and runs after this review. Do NOT raise documentation findings unless a new public/exported symbol or an entire new file has zero doc entry. Stale wording, missing detail, or a drifted signature belongs to Stage 5 — pass over it silently.
 
 Produce your complete Risk Assessment Report with severity levels.
 
@@ -4041,7 +4101,8 @@ For each finding:
 3. If viable: implement the fix
 4. If not viable: explain exactly why with a concrete technical reason
 5. Run pre-commit hooks after fixes
-6. Stage changes with git add — do NOT run git commit
+6. Update SERVICE_DOCUMENTATION.md / TEST_DOCUMENTATION.md for any file this fix touched — IN THIS SAME TURN. There is no separate documentation pass between QA iterations any more; Stage 5 handles completeness at the end, but the files you just touched are yours to keep in sync now.
+7. Stage changes with git add — do NOT run git commit
 
 At the end, output:
 - Summary of fixes applied
@@ -4058,8 +4119,9 @@ PROMPT_BOUNDARY
 
         fi  # end skip_first_fix else
 
-        # Run documentation update after fixes, before re-review
-        run_doc_update_pass "phase3-fix${loop_count}"
+        # No doc-update pass here by design: the fix turn syncs the docs for the
+        # files it touched, and Stage 5 owns documentation completeness. Re-adding
+        # a pass per iteration re-runs the full validation sweep every loop.
 
         # 3c: Brain Agent re-reviews
         subtask "Brain Agent re-reviewing from scratch (iteration ${loop_count})"
@@ -4074,9 +4136,12 @@ The Coding Agent has applied fixes. Their response:
 $(cat "$fixes_file")
 </fix_report>
 
-Review from scratch to make sure ALL previous findings are correctly implemented. Check the source code directly — do not rely on the report alone.
+$(emit_mechanical_prechecks)
+Report the status of each finding YOU raised: resolved / partially resolved / unresolved, each with the file:line evidence you checked. The code is the authority — do not rely on the fix report alone.
 
-Then hunt for MORE findings objectively. Do NOT make findings up. Do NOT feel pressure to create findings that don't exist. If there aren't any, that's fine — but genuinely look. In practice, it's about 50-50 whether a second pass reveals new issues. Let reality talk.
+Scope stops there. Do NOT re-read the whole diff hunting for new issues: you have already reviewed this code, and the independent reviewers in Stage 4 audit the final post-fix diff with zero prior context. If a fix visibly introduced a regression while you were confirming it, report that — but do not open a fresh sweep.
+
+DOCUMENTATION SCOPE: unchanged from your previous review — Stage 5 owns documentation. Do not raise doc findings short of a new public symbol or new file with zero doc entry.
 
 Produce your updated Risk Assessment Report.
 
@@ -4239,17 +4304,18 @@ THE INDEPENDENT AUDIT BRIEF:
 ${independent_prompt}
 ---
 
+$(emit_mechanical_prechecks)
 REVIEW INSTRUCTIONS:
-1. You already have the Brain Agent instructions internalized. Now also read the Coding Agent instruction file to understand the rules you must verify compliance against.
+1. You already have the Brain Agent instructions internalized. Now also read the Coding Agent instruction file to understand the rules you are auditing against.
 2. Read the actual source code — check git changes with 'git diff' or 'git log --oneline -5'.
-3. Verify compliance with ALL Coding Principles, Golden Rules, and the Agentic IDE Contract.
+3. Audit compliance with ALL Coding Principles, Golden Rules, and the Agentic IDE Contract.
 4. Look for UNEXPECTED SIDE EFFECTS that fall outside the intended scope of changes.
 5. Check for architectural drift, security concerns, performance issues, data integrity risks.
-6. Verify test coverage is adequate.
-7. Verify documentation was updated.
-8. Verify CHANGELOG.md was NOT touched.
+6. Judge the tests: are they the RIGHT tests, is the new logic actually covered, do they pass? The precheck block above tells you which files moved — it does not tell you whether coverage is adequate. That judgement is yours.
 
-You are an independent auditor. Be thorough but honest. Do NOT invent findings that don't exist. Real findings only.
+You are an independent auditor. Report everything you find, with severity — do not pre-filter to what seems important. Do NOT invent findings that don't exist. Real findings only.
+
+DOCUMENTATION SCOPE: documentation completeness is Stage 5's dedicated job and runs after this review. Do NOT raise documentation findings unless a new public/exported symbol or an entire new file has zero doc entry. Stale wording, missing detail, or a drifted signature belongs to Stage 5 — pass over it silently.
 
 Produce your complete Risk Assessment Report with severity levels.
 
@@ -4327,7 +4393,8 @@ This is Round ${round} of independent review, iteration ${loop_count}. Apply fix
 2. If viable: implement the fix with best effort. No laziness.
 3. If not viable: explain the concrete technical reason.
 4. Run pre-commit hooks after all fixes.
-5. Stage changes with git add — do NOT run git commit.
+5. Update SERVICE_DOCUMENTATION.md / TEST_DOCUMENTATION.md for any file this fix touched — IN THIS SAME TURN. There is no separate documentation pass between QA iterations any more; Stage 5 handles completeness at the end, but the files you just touched are yours to keep in sync now.
+6. Stage changes with git add — do NOT run git commit.
 
 Output: summary of fixes applied, deferred items with reasons, and updated CCR Form.
 PROMPT_BOUNDARY
@@ -4341,8 +4408,8 @@ PROMPT_BOUNDARY
 
             fi  # end skip_first_fix_r else
 
-            # Run documentation update after fixes, before re-review
-            run_doc_update_pass "phase4-r${round}-fix${loop_count}"
+            # No doc-update pass here by design — see the note in Stage 3's fix
+            # loop. The fix turn syncs its own files; Stage 5 owns completeness.
 
             # 4d: The SAME independent reviewer follows up on their own findings.
             # Resuming ind_session_file keeps the reviewer's original audit context
@@ -4364,6 +4431,7 @@ Their fix report:
 $(cat "$fixes_file")
 </fix_report>
 
+$(emit_mechanical_prechecks)
 Verify each of YOUR previous findings directly against the ACTUAL SOURCE CODE (use git diff, read the files). For each finding you raised:
 - Confirm the fix genuinely addresses it, or
 - Explain why it does not and what's still missing.
@@ -4371,6 +4439,8 @@ Verify each of YOUR previous findings directly against the ACTUAL SOURCE CODE (u
 Do NOT rely on the fix report alone — the code is the source of truth.
 
 After verifying your own findings, do a second sweep for any NEW findings that may have surfaced as a result of the fixes (regressions, side effects, scope creep). Do not invent findings. Do not feel pressured to produce new ones. If there are none, say so — a clean follow-up is a valid outcome. In practice it's roughly 50-50 whether a second pass reveals anything new; let reality talk.
+
+DOCUMENTATION SCOPE: documentation completeness is Stage 5's dedicated job and runs after this review. Do NOT raise documentation findings unless a new public/exported symbol or an entire new file has zero doc entry.
 
 Produce your updated Risk Assessment Report covering:
 1. Status of each prior finding (resolved / partially resolved / unresolved — with reasoning)
@@ -7163,12 +7233,12 @@ run_reduction_pass_multi() {
         echo "2. Readable, usable variable and function names STAY. This is NOT code golf. Do not shorten names, collapse clear logic into dense one-liners, merge functions that should stay separate, or trade clarity for line count. Clarity outranks brevity — and in security, concurrency, migration, financial, or parsing code, clarity wins outright."
         echo "3. TEST-GATED. Before reducing: run the full validation/test suite (pre-commit hooks + tests) and confirm GREEN — that is your baseline. After each reduction: re-run the SAME suite. If anything regresses or behavior shifts, REVERT that specific reduction and keep the working version. Never leave a reduction you did not re-verify green."
         echo ""
-        echo "4. COMMENTS, DOCSTRINGS, BLANK LINES, AND LOGGING ARE NOT LINES OF CODE. They do not count toward any reduction and are PRESERVED — never remove a comment, docstring, or log line to lower a count. A comment is a useful pointer for the next reader or agent; the default is KEEP. The ONLY removable comment is one that is extremely redundant (it restates the immediately adjacent code token-for-token and adds zero context, such as a comment saying increment i sitting directly above i += 1) or is stale and wrong. When in doubt, keep it."
+        echo "4. COMMENTS, DOCSTRINGS, BLANK LINES, AND LOGGING ARE NOT LINES OF CODE, AND ARE NEVER A REDUCTION TARGET. They never count toward any reduction. You do NOT delete a comment, docstring, or log line to lower a count — doing that is a regression, and if you catch yourself having done it, revert it. THE RULE YOU ARE MISSING IS 'ADJUST': when a cut changes the code a comment describes, you REWRITE that comment so it describes the new code. Never orphan it, never drop it. A stale or wrong comment is CORRECTED, not deleted. A comment is a pointer for the next reader or agent — when in doubt, keep it and improve it."
         echo ""
         echo "LEGITIMATE TARGETS (these are RUNTIME CODE, never comments; subtract — do NOT compress). Remove only:"
         echo "(a) dead branches and unreachable code"
         echo "(b) defensive checks for conditions that cannot occur"
-        echo "(c) a comment ONLY if it is extremely redundant — it restates the adjacent code token-for-token with zero added context, or is stale/wrong (default: KEEP every comment as a pointer)"
+        echo "(c) NOT A TARGET — this slot is deliberately empty. Comments and docstrings are never deleted to reduce code. If a cut changes code that carries a comment, REWRITE the comment to match the new code (see constraint 4)."
         echo "(d) helper functions called from exactly one place that can be inlined"
         echo "(e) abstractions added 'for future reuse' with no current second caller"
         echo "(f) an empty or auto-generated placeholder docstring that states nothing (keep every docstring that gives intent, a contract, or a non-obvious why)"
@@ -7183,7 +7253,7 @@ run_reduction_pass_multi() {
         echo "4. Re-stage with 'git add'. Do NOT run 'git commit'."
         echo "5. ARBITRARY EXIT: when no further reduction is viable WITHOUT golfing or risking behavior, STOP. Do not invent reductions to hit a number. An already-minimal diff is a valid, expected outcome — say so and move on."
         echo ""
-        echo "End your response with a REDUCTION REPORT: net RUNTIME-CODE change before -> after (comments and blank lines excluded from the count) or 'no viable reduction'; what was removed by category (a-h / other), or why nothing more could go without sacrificing clarity, comments, or behavior; and confirmation that the full suite is GREEN after reduction."
+        echo "End your response with a REDUCTION REPORT: net RUNTIME-CODE change before -> after (comments and blank lines excluded from the count) or 'no viable reduction'; what was removed by category (a-h / other), or why nothing more could go without sacrificing clarity, comments, or behavior; COMMENT COUNT before -> after, which MUST be equal or higher (if it is lower, name every comment that disappeared and justify each one as unavoidable — a net comment loss is a defect to explain, not a result to report); and confirmation that the full suite is GREEN after reduction."
     } > "$reduce_prompt"
 
     cd "$wt"
@@ -7260,13 +7330,20 @@ run_multi_stage_3() {
             if [[ -f "$ir" ]]; then cat "$ir"; else echo "(missing)"; fi
             echo "</implementation_report_repo_${i}>"
             echo ""
+            echo "PRECHECKS — repo ${i} (${REPO_NAMES_ARRAY[$i]}):"
+            emit_mechanical_prechecks "${WORKTREE_DIRS_ARRAY[$i]}" "${BASE_BRANCHES_ARRAY[$i]}"
         done
         echo "REVIEW INSTRUCTIONS:"
         echo "1. Read each implementation report to understand what each agent did."
         echo "2. READ THE ACTUAL SOURCE CODE in each worktree — run 'git -C <worktree> diff' for each repo."
-        echo "3. Verify the integration contract: does the field name / endpoint / event name emitted by one repo match what the others consume?"
-        echo "4. Check per-repo correctness (business logic, DB, edge cases, tests, docs, CHANGELOG untouched)."
-        echo "5. Run Deployment Conditions checklist per repo."
+        echo "3. Judge the integration contract: does the field name / endpoint / event name emitted by one repo match what the others consume?"
+        echo "4. Judge per-repo correctness: business logic, entropy delta, contracts and assertions at boundaries, DB/security, atomicity, edge cases."
+        echo "5. Judge the tests per repo: are they the RIGHT tests, is the new logic covered, do they pass? The precheck blocks tell you which files moved — not whether coverage is adequate. That judgement is yours."
+        echo "6. Run Deployment Conditions checklist per repo."
+        echo ""
+        echo "Report everything you find, with severity — do not pre-filter to what seems important."
+        echo ""
+        echo "DOCUMENTATION SCOPE: documentation completeness is Stage 5's dedicated job and runs after this review. Do NOT raise documentation findings unless a new public/exported symbol or an entire new file has zero doc entry. Stale wording, missing detail, or a drifted signature belongs to Stage 5 — pass over it silently."
         echo ""
         echo "OUTPUT FORMAT (exact marker lines — orchestrator splits on them):"
         echo ""
@@ -7380,7 +7457,7 @@ run_multi_stage_3() {
                 echo "</qa_report_for_${repo_name}>"
                 echo ""
                 echo "For each finding: evaluate viability, implement if viable, explain if not."
-                echo "Run pre-commit hooks after fixes. Stage with 'git add' only — do NOT commit."
+                echo "Run pre-commit hooks after fixes. Update SERVICE_DOCUMENTATION.md / TEST_DOCUMENTATION.md for any file this fix touched, IN THIS SAME TURN — there is no separate documentation pass between QA iterations any more. Stage with 'git add' only — do NOT commit."
                 echo ""
                 echo "Do NOT modify other repos' worktrees. Only ${wt}."
             } > "$fix_prompt_file"
@@ -7393,8 +7470,8 @@ run_multi_stage_3() {
                 "Coding Agent Fix ${repo_name} (iter ${loop_count})" \
                 "$fix_prompt_file"
 
-            # Per-repo doc update after fixes
-            run_doc_update_pass_multi "phase3-fix${loop_count}-repo-${i}" "$i"
+            # No per-repo doc pass here by design: the fix turn syncs the docs for
+            # the files it touched, and Stage 5 owns documentation completeness.
 
             cd "$WORKTREE_DIR"
         done
@@ -7417,9 +7494,17 @@ run_multi_stage_3() {
                 echo "</fix_report_repo_${i}>"
                 echo ""
             done
-            echo "Verify ALL previous findings are correctly implemented by reading the actual source code"
-            echo "in each worktree (git diff). Then hunt for MORE findings objectively (roughly 50-50 odds a"
-            echo "second pass finds something — do not invent issues, but do not undersell real ones)."
+            echo "Report the status of each finding YOU raised, per repo: resolved / partially resolved /"
+            echo "unresolved, each with the file:line evidence you checked in that worktree. The code is the"
+            echo "authority — do not rely on the fix reports alone."
+            echo ""
+            echo "Scope stops there. Do NOT re-read the whole diff hunting for new issues: you have already"
+            echo "reviewed this code, and the Stage 4 independent reviewers audit the final post-fix diff with"
+            echo "zero prior context. If a fix visibly introduced a regression while you were confirming it,"
+            echo "report that — but do not open a fresh sweep."
+            echo ""
+            echo "DOCUMENTATION SCOPE: unchanged — Stage 5 owns documentation. Do not raise doc findings short"
+            echo "of a new public symbol or new file with zero doc entry."
             echo ""
             echo "Output format (exact markers, one section per repo, each ending with NEW_FINDINGS_COUNT):"
             echo ""
@@ -7595,17 +7680,27 @@ run_multi_stage_4() {
             echo "${independent_prompt}"
             echo "---"
             echo ""
+            local i
+            for ((i=0; i<REPO_COUNT; i++)); do
+                echo "PRECHECKS — repo ${i} (${REPO_NAMES_ARRAY[$i]}):"
+                emit_mechanical_prechecks "${WORKTREE_DIRS_ARRAY[$i]}" "${BASE_BRANCHES_ARRAY[$i]}"
+            done
             echo "REVIEW INSTRUCTIONS:"
             echo "1. You have Brain Agent instructions internalized. Also read each repo's Coding Agent"
-            echo "   instruction file to understand the rules you must verify compliance against."
+            echo "   instruction file to understand the rules you are auditing against."
             echo "2. Read actual source code in each worktree — check git diff in each."
-            echo "3. Verify per-repo compliance AND the cross-repo integration contract."
+            echo "3. Audit per-repo compliance AND the cross-repo integration contract."
             echo "4. Look for unexpected side effects outside the intended scope."
-            echo "5. Do NOT invent findings. Real findings only."
+            echo "5. Judge the tests per repo: are they the RIGHT tests, is the new logic covered, do they"
+            echo "   pass? The precheck blocks tell you which files moved — not whether coverage is adequate."
+            echo "6. Report everything you find, with severity — do not pre-filter. Do NOT invent findings."
+            echo ""
+            echo "DOCUMENTATION SCOPE: documentation completeness is Stage 5's dedicated job and runs after"
+            echo "this review. Do NOT raise documentation findings unless a new public/exported symbol or an"
+            echo "entire new file has zero doc entry. Stale wording or a drifted signature belongs to Stage 5."
             echo ""
             echo "OUTPUT FORMAT (exact markers — each section ends with NEW_FINDINGS_COUNT):"
             echo ""
-            local i
             for ((i=0; i<REPO_COUNT; i++)); do
                 echo "===== SECTION FOR REPO ${i}: ${REPO_NAMES_ARRAY[$i]} ====="
                 echo "[Complete Risk Assessment for ${REPO_NAMES_ARRAY[$i]}]"
@@ -7720,7 +7815,7 @@ run_multi_stage_4() {
                     echo "</independent_qa_report_for_${repo_name}>"
                     echo ""
                     echo "Evaluate each finding with critical thinking. Implement viable fixes, explain deferrals."
-                    echo "Run pre-commit hooks. Stage with 'git add' only. Do NOT touch other repos' worktrees."
+                    echo "Run pre-commit hooks. Update SERVICE_DOCUMENTATION.md / TEST_DOCUMENTATION.md for any file this fix touched, IN THIS SAME TURN — there is no separate documentation pass between QA iterations any more. Stage with 'git add' only. Do NOT touch other repos' worktrees."
                 } > "$fix_prompt_file"
 
                 cd "$wt"
@@ -7731,7 +7826,7 @@ run_multi_stage_4() {
                     "Coding Fix ${repo_name} (R${round}.${loop_count})" \
                     "$fix_prompt_file"
 
-                run_doc_update_pass_multi "phase4-r${round}-fix${loop_count}-repo-${i}" "$i"
+                # No per-repo doc pass here by design — see Stage 3's fix loop.
                 cd "$WORKTREE_DIR"
             done
             fi  # end skip_first_fix_r
@@ -7756,6 +7851,10 @@ run_multi_stage_4() {
                 done
                 echo "For each repo: confirm prior findings are resolved, then sweep for any genuinely NEW findings."
                 echo "A clean follow-up is a valid outcome. Do not invent findings."
+                echo ""
+                echo "DOCUMENTATION SCOPE: documentation completeness is Stage 5's dedicated job. Do NOT raise"
+                echo "documentation findings unless a new public/exported symbol or an entire new file has zero"
+                echo "doc entry."
                 echo ""
                 echo "OUTPUT FORMAT:"
                 for ((i=0; i<REPO_COUNT; i++)); do
