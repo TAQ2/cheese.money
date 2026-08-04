@@ -1177,6 +1177,20 @@ tmux_send() {
     }')
     sleep "$sleep_secs"
     tmux -S "$TMUX_SOCK" send-keys -t "$target" Enter
+    # Submit-verify: the CLI's bracketed-paste guard can swallow an Enter that
+    # lands in the paste-finalization window. A paste still sitting in the
+    # composer renders as "[Pasted text #N +M lines]" on the input line; poll for
+    # it and resend Enter until it clears (bounded).
+    local verify_attempt
+    for verify_attempt in 1 2 3; do
+        sleep 2
+        if ! tmux -S "$TMUX_SOCK" capture-pane -p -t "$target" 2>/dev/null \
+                | tail -12 | grep -q '\[Pasted text #'; then
+            break
+        fi
+        warn "tmux_send: paste still unsubmitted in $target (attempt $verify_attempt) — resending Enter"
+        tmux -S "$TMUX_SOCK" send-keys -t "$target" Enter
+    done
 }
 
 # Poll JSONL until last assistant entry has stop_reason end_turn|stop_sequence.
@@ -2951,7 +2965,8 @@ check_prerequisites() {
     # then surface the choice so the user knows what each agent call will do.
     detect_auto_permission_mode
     if [[ "$AUTO_APPROVE" == "true" ]]; then
-        info "Permission mode: ${AUTO_PERMISSION_MODE_LABEL}"
+        info "Permission mode: headless (claude -p): ${AUTO_PERMISSION_MODE_LABEL}"
+        info "Permission mode: interactive agents (tmux): bypassPermissions (--dangerously-skip-permissions; deny rules in .claude/settings.json still apply)"
     else
         warn "Permission mode: interactive — script may hang waiting for approval"
     fi
