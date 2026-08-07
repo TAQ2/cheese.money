@@ -1,0 +1,10 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["CH3TerminalModule"],
+    "podspecPath": "CH3TerminalNative.podspec"
+  },
+  "android": {
+    "modules": ["expo.modules.ch3terminal.CH3TerminalModule"]
+  }
+}

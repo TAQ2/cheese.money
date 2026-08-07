@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--ch3-font-sans);
+  --font-mono: var(--ch3-font-mono);
+  --color-background: var(--ch3-background);
+  --color-foreground: var(--ch3-foreground);
+  --color-popover: var(--ch3-popover);
+  --color-popover-foreground: var(--ch3-popover-foreground);
+  --color-primary: var(--ch3-primary);
+  --color-primary-foreground: var(--ch3-primary-foreground);
+  --color-muted: var(--ch3-muted);
+  --color-muted-foreground: var(--ch3-muted-foreground);
+  --color-accent: var(--ch3-accent);
+  --color-accent-foreground: var(--ch3-accent-foreground);
+  --color-border: var(--ch3-border);
+  --color-input: var(--ch3-input);
+  --color-ring: var(--ch3-ring);
+  --radius-sm: calc(var(--ch3-radius) - 4px);
+  --radius-md: calc(var(--ch3-radius) - 2px);
+  --radius-lg: var(--ch3-radius);
+  --radius-xl: calc(var(--ch3-radius) + 4px);
+  --radius-2xl: calc(var(--ch3-radius) + 8px);
+}
+
+:host {
+  --ch3-font-sans:
+    "DM Sans Variable", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    sans-serif;
+  --ch3-font-mono:
+    "SF Mono", "SFMono-Regular", "JetBrains Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  --ch3-radius: 0.625rem;
+  --ch3-background: white;
+  --ch3-foreground: oklch(0.269 0 0);
+  --ch3-popover: white;
+  --ch3-popover-foreground: oklch(0.269 0 0);
+  --ch3-primary: oklch(0.488 0.217 264);
+  --ch3-primary-foreground: white;
+  --ch3-muted: rgb(0 0 0 / 4%);
+  --ch3-muted-foreground: oklch(0.556 0 0);
+  --ch3-accent: rgb(0 0 0 / 4%);
+  --ch3-accent-foreground: oklch(0.269 0 0);
+  --ch3-border: rgb(0 0 0 / 8%);
+  --ch3-input: rgb(0 0 0 / 10%);
+  --ch3-ring: oklch(0.488 0.217 264);
+  color: var(--ch3-foreground);
+  font-family: var(--ch3-font-sans);
+}
+
+* {
+  box-sizing: border-box;
+  border-color: var(--ch3-border);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ch3-ring) 72%, transparent);
+  outline-offset: 1px;
+}

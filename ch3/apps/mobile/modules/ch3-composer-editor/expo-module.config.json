@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["CH3ComposerEditorModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.ch3composereditor.CH3ComposerEditorModule"]
+  }
+}

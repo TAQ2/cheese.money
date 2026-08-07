@@ -2,3 +2,22 @@
 # Python bytecode
 __pycache__/
 *.pyc
+
+# ch3/ (forked coding-agent app) build artifacts
+ch3/node_modules/
+ch3/**/node_modules/
+ch3/**/target/
+ch3/**/dist/
+ch3/**/dist-electron/
+ch3/apps/*/dist
+ch3/infra/*/dist
+ch3/packages/*/dist
+ch3/release/
+ch3/release-mock/
+ch3/.turbo/
+ch3/.bun/
+ch3/.astro/
+ch3/**/*.tsbuildinfo
+ch3/.env
+ch3/.env.local
+ch3/.env.*.local

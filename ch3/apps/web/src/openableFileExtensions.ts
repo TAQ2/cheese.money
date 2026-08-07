@@ -1,0 +1,92 @@
+/**
+ * Extensions that name a file rather than a property. The allowlist is the
+ * whole point: `policy_definitions.py` is a file, `array.map` and
+ * `React.Fragment` are not, and only the extension tells them apart.
+ *
+ * Kept to what actually turns up in these conversations — source, config,
+ * docs and data. Anything missing simply gets no open affordance, which is
+ * the safe direction to be wrong in.
+ *
+ * `env` and `log` are deliberately absent: `process.env` and `console.log`
+ * appear in chat constantly, and a bare `.env`/`.log` file reference is rare
+ * enough that admitting them would cost far more than it buys.
+ */
+export const OPENABLE_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
+  // Source
+  "c",
+  "cc",
+  "cjs",
+  "clj",
+  "cpp",
+  "cs",
+  "css",
+  "cxx",
+  "dart",
+  "elm",
+  "erl",
+  "ex",
+  "exs",
+  "fs",
+  "go",
+  "h",
+  "hpp",
+  "hs",
+  "java",
+  "jl",
+  "js",
+  "jsx",
+  "kt",
+  "kts",
+  "lua",
+  "mjs",
+  "mm",
+  "php",
+  "pl",
+  "py",
+  "pyi",
+  "rb",
+  "rs",
+  "sbt",
+  "scala",
+  "scss",
+  "sh",
+  "sql",
+  "svelte",
+  "swift",
+  "ts",
+  "tsx",
+  "vue",
+  "zig",
+  // Config and infrastructure
+  "bat",
+  "cfg",
+  "conf",
+  "gradle",
+  "ini",
+  "json",
+  "jsonc",
+  "lock",
+  "nix",
+  "plist",
+  "properties",
+  "ps1",
+  "tf",
+  "tfvars",
+  "toml",
+  "xml",
+  "yaml",
+  "yml",
+  // Docs and data
+  "csv",
+  "html",
+  "ipynb",
+  "md",
+  "mdx",
+  "ndjson",
+  "patch",
+  "pdf",
+  "rst",
+  "svg",
+  "tsv",
+  "txt",
+]);

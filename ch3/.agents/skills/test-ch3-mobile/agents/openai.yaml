@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test CH3 Mobile"
+  short_description: "Test CH3 on iOS or Android"
+  default_prompt: "Use $test-ch3-mobile to launch CH3 against an isolated backend and verify the affected flow on an available simulator or emulator."

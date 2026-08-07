@@ -1,0 +1,4 @@
+interface:
+  display_name: "CH3 App Testing"
+  short_description: "Launch and retain isolated CH3 test environments"
+  default_prompt: "Use $test-ch3-app to launch an isolated CH3 environment and iteratively test it in the browser while preserving state."

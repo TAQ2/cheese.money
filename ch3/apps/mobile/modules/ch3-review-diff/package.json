@@ -1,0 +1,17 @@
+{
+  "name": "@ch3tools/mobile-review-diff-native",
+  "version": "0.0.0",
+  "private": true,
+  "expo-module": {
+    "ios": {
+      "modules": [
+        "CH3ReviewDiffModule"
+      ]
+    },
+    "android": {
+      "modules": [
+        "expo.modules.ch3reviewdiff.CH3ReviewDiffModule"
+      ]
+    }
+  }
+}

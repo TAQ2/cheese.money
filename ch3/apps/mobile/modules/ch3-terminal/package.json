@@ -1,0 +1,17 @@
+{
+  "name": "@ch3tools/mobile-terminal-native",
+  "version": "0.0.0",
+  "private": true,
+  "expo-module": {
+    "ios": {
+      "modules": [
+        "CH3TerminalModule"
+      ]
+    },
+    "android": {
+      "modules": [
+        "expo.modules.ch3terminal.CH3TerminalModule"
+      ]
+    }
+  }
+}
