@@ -39,13 +39,24 @@ gone; none of that carried the same weight.
 
 ## Required follow-ups this fold-in could not finish
 
-- **`pnpm-lock.yaml` and `native/resource-monitor/Cargo.lock` are stale.**
-  Renaming `package.json` names/scopes without regenerating the lockfiles
-  would have meant hand-patching an 840 KB generated YAML file by regex —
-  worse than leaving it and running `pnpm install` once, which the project
-  needs anyway before it will build.
-- **Derived icon exports (PNG/ICO/ICNS) still show the old black/white T3
-  mark.** The *source* is rebranded — `assets/prod/logo.svg`,
+- ~~`pnpm-lock.yaml` and `native/resource-monitor/Cargo.lock` are stale.~~
+  **Resolved 2026-08-06**: `pnpm install` reconciled `pnpm-lock.yaml` to
+  `@ch3tools/*` on its own; `Cargo.lock`'s package name was fixed with
+  `cargo generate-lockfile` after `pnpm dist:desktop:dmg:arm64` caught the
+  mismatch (`cargo build --locked` refused to proceed). Both verified via a
+  real build: `pnpm build` and the full DMG package succeeded.
+- **macOS Dock icon (`icon.icns`) still shows the old black/white T3 mark**
+  in the tracked repo assets. A hand-built replacement (correct `#E9C46A`
+  tile, proper 824×824-body/100px-margin safe area, no Icon Composer) was
+  produced and verified in a staged build, but was deliberately NOT committed
+  here — that's a real design decision, not just an execution detail, and
+  wasn't mine to make unilaterally. See the build session for the artifact
+  and how it was made if you want to commit it.
+- **iOS/Linux/Windows/web icon exports were not touched at all** — only the
+  macOS Dock icon was addressed (by hand, as above). The `Assets/text.svg`
+  used by Icon Composer.icon is the one CH3-rebranded source; the
+  platform-specific derived files still show the old black/white T3 mark.
+  The *source* is rebranded — `assets/prod/logo.svg`,
   `assets/prod/app-icon.icon/{icon.json,Assets/text.svg}` — but the shipped
   favicons, `apple-touch-icon`, Windows `.ico`, and macOS `.icns` are
   pre-rendered exports of that source, produced by Icon Composer 2 (macOS-only
