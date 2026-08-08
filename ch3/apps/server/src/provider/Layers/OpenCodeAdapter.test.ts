@@ -1150,6 +1150,111 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("emits a context-window reading from an assistant message's token block", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-token-usage");
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: {
+              id: "msg-token-usage",
+              role: "assistant",
+              providerID: "maple",
+              modelID: "glm-5-2",
+              // Deliberately spread across every bucket: cache reads and writes
+              // occupy the window too, and summing only input+output would
+              // under-report a cached conversation by most of its depth.
+              tokens: {
+                input: 1_000,
+                output: 200,
+                reasoning: 50,
+                cache: { read: 4_000, write: 750 },
+              },
+            },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const usageEvent = events.find((event) => event.type === "thread.token-usage.updated");
+      NodeAssert.ok(usageEvent, "expected a thread.token-usage.updated event");
+      if (usageEvent.type === "thread.token-usage.updated") {
+        const usage = usageEvent.payload.usage;
+        NodeAssert.equal(usage.usedTokens, 6_000);
+        NodeAssert.equal(usage.inputTokens, 1_000);
+        NodeAssert.equal(usage.cachedInputTokens, 4_000);
+        NodeAssert.equal(usage.outputTokens, 200);
+        NodeAssert.equal(usage.reasoningOutputTokens, 50);
+        NodeAssert.equal(usage.compactsAutomatically, true);
+      }
+    }),
+  );
+
+  it.effect("stays silent, and keeps the turn alive, when an assistant message has no tokens", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-token-usage-absent");
+      // OpenCode announces an assistant message when it STARTS, before any
+      // counts exist — even though the SDK types `tokens` as required. Reading
+      // it blindly killed the event pump and took the turn down with it.
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: { id: "msg-no-tokens", role: "assistant" },
+          },
+        },
+        {
+          type: "session.updated",
+          properties: {
+            info: {
+              id: "http://127.0.0.1:9999/session",
+              title: "Still streaming",
+            },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      NodeAssert.equal(
+        events.some((event) => event.type === "thread.token-usage.updated"),
+        false,
+      );
+      // The pump survived the tokenless message and went on delivering.
+      NodeAssert.ok(events.find((event) => event.type === "thread.metadata.updated"));
+    }),
+  );
+
   it.effect("lets OpenCode own session title generation and emits title metadata updates", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;

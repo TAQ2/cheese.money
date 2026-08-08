@@ -8,6 +8,7 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   ThreadId,
+  type ThreadTokenUsageSnapshot,
   type ToolLifecycleItemType,
   TurnId,
   type UserInputQuestion,
@@ -204,6 +205,126 @@ function openCodeEventSessionTitle(event: OpenCodeSubscribedEvent): string | und
   return trimText(event.properties.info.title);
 }
 
+/** The token block OpenCode attaches to every assistant message. */
+interface OpenCodeAssistantTokens {
+  readonly total?: number;
+  readonly input: number;
+  readonly output: number;
+  readonly reasoning: number;
+  readonly cache: { readonly read: number; readonly write: number };
+}
+
+/**
+ * Context occupancy after one assistant message.
+ *
+ * OpenCode reports the pieces and an optional `total`, but `total` is not what
+ * OpenCode's own display counts. The sum below is: a session reading
+ * "63,482 tokens / 17%" summed to exactly 63,482 against a 384,000 window.
+ * Cache reads and writes are included deliberately — cached tokens are resident
+ * in the window, merely cheaper, not absent from it.
+ *
+ * This is occupancy, NOT a running total. The newest assistant message carries
+ * the whole conversation as its input, so its figure *is* the current depth —
+ * and it correctly falls back down when OpenCode compacts.
+ */
+function openCodeContextTokens(tokens: OpenCodeAssistantTokens): number {
+  return (
+    tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+  );
+}
+
+/**
+ * Read the token block off a `message.updated` payload, or undefined if it is
+ * not fully there.
+ *
+ * The SDK types `tokens` as required on AssistantMessage, and the wire
+ * disagrees: an assistant message is announced when it starts, before any
+ * counts exist. Trusting the type here dereferenced undefined and killed the
+ * event pump — the turn died for a status meter. Every field is checked
+ * individually because a partially-filled block would render a confidently
+ * wrong depth, which is worse than rendering none.
+ */
+function readOpenCodeAssistantTokens(info: unknown): OpenCodeAssistantTokens | undefined {
+  const tokens = (info as { readonly tokens?: unknown } | undefined)?.tokens;
+  if (!tokens || typeof tokens !== "object") {
+    return undefined;
+  }
+  const record = tokens as Record<string, unknown>;
+  const cache = record.cache;
+  const cacheRecord =
+    cache && typeof cache === "object" ? (cache as Record<string, unknown>) : undefined;
+
+  const finite = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+
+  const input = finite(record.input);
+  const output = finite(record.output);
+  const reasoning = finite(record.reasoning);
+  const read = finite(cacheRecord?.read);
+  const write = finite(cacheRecord?.write);
+  if (
+    input === undefined ||
+    output === undefined ||
+    reasoning === undefined ||
+    read === undefined ||
+    write === undefined
+  ) {
+    return undefined;
+  }
+
+  return { input, output, reasoning, cache: { read, write } };
+}
+
+/** Read a required-on-paper string field without trusting the wire. */
+function readOpenCodeString(info: unknown, key: string): string | undefined {
+  const value = (info as Record<string, unknown> | undefined)?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Build the provider-agnostic snapshot the context meter renders. Returns
+ * undefined when there is nothing worth showing, so a still-streaming message
+ * with a zeroed token block does not blank an accurate earlier reading.
+ *
+ * `maxTokens` is optional on purpose: with no window known, the UI shows token
+ * counts and no percentage, which beats a percentage of a guessed window.
+ */
+function normalizeOpenCodeTokenUsage(input: {
+  readonly tokens: OpenCodeAssistantTokens;
+  readonly maxTokens: number | undefined;
+  readonly totalProcessedTokens: number;
+}): ThreadTokenUsageSnapshot | undefined {
+  const usedTokens = openCodeContextTokens(input.tokens);
+  if (!Number.isFinite(usedTokens) || usedTokens <= 0) {
+    return undefined;
+  }
+
+  const inputTokens = input.tokens.input;
+  const cachedInputTokens = input.tokens.cache.read;
+  const outputTokens = input.tokens.output;
+  const reasoningOutputTokens = input.tokens.reasoning;
+  const { maxTokens, totalProcessedTokens } = input;
+
+  return {
+    usedTokens,
+    ...(totalProcessedTokens > usedTokens ? { totalProcessedTokens } : {}),
+    ...(maxTokens !== undefined && maxTokens > 0 ? { maxTokens } : {}),
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    lastUsedTokens: usedTokens,
+    lastInputTokens: inputTokens,
+    lastCachedInputTokens: cachedInputTokens,
+    lastOutputTokens: outputTokens,
+    lastReasoningOutputTokens: reasoningOutputTokens,
+    // OpenCode ships auto-compaction on by default, and Conrad's config leaves
+    // it enabled as a backstop behind the /refresh plugin. The meter uses this
+    // only to decide whether to warn about running out.
+    compactsAutomatically: true,
+  };
+}
+
 interface OpenCodeSessionContext {
   session: ProviderSession;
   readonly client: OpencodeClient;
@@ -214,6 +335,23 @@ interface OpenCodeSessionContext {
   readonly pendingQuestions: Map<string, QuestionRequest>;
   readonly messageRoleById: Map<string, "user" | "assistant">;
   readonly partById: Map<string, Part>;
+  /**
+   * Context window per `providerID/modelID`, read once from `model.list()` and
+   * cached for the session. OpenCode reports per-message token counts but never
+   * the window they are measured against, and the window is a property of the
+   * model, not the turn — so refetching per message would be pure overhead.
+   * A model absent from the list leaves the entry unset: the meter then renders
+   * token counts with no percentage rather than a percentage of a guess.
+   */
+  readonly contextLimitByModelKey: Map<string, number>;
+  /** Set once the `model.list()` lookup has run, successful or not. */
+  modelLimitsLoaded: boolean;
+  /**
+   * Running sum of every assistant message's tokens. Distinct from the context
+   * occupancy below: this only grows, while occupancy drops when OpenCode
+   * compacts. The UI shows it as "Total processed".
+   */
+  totalProcessedTokens: number;
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
@@ -666,6 +804,98 @@ export function makeOpenCodeAdapter(
       },
     ) => writeNativeEvent(threadId, event).pipe(Effect.catchCause(() => Effect.void));
 
+    /**
+     * Context window for `providerID/modelID`, from OpenCode's own provider
+     * config so a custom provider (Maple, here) is covered without a hardcoded
+     * table. Fetched at most once per session: the window is a property of the
+     * model and does not move mid-conversation.
+     *
+     * Failure is not propagated. A missing window costs the percentage on the
+     * meter; it must never take down a turn that is otherwise fine.
+     */
+    const resolveContextLimit = Effect.fn("resolveContextLimit")(function* (
+      context: OpenCodeSessionContext,
+      providerID: string,
+      modelID: string,
+    ) {
+      const key = `${providerID}/${modelID}`;
+      const cached = context.contextLimitByModelKey.get(key);
+      if (cached !== undefined) {
+        return cached;
+      }
+      if (context.modelLimitsLoaded) {
+        return undefined;
+      }
+      context.modelLimitsLoaded = true;
+
+      const response = yield* runOpenCodeSdk("config.providers", () =>
+        context.client.config.providers(),
+      ).pipe(Effect.option);
+
+      const providers = Option.getOrUndefined(response)?.data?.providers;
+      if (!providers) {
+        return undefined;
+      }
+      for (const provider of providers) {
+        for (const [id, model] of Object.entries(provider.models)) {
+          const limit = model.limit?.context;
+          if (typeof limit === "number" && Number.isFinite(limit) && limit > 0) {
+            context.contextLimitByModelKey.set(`${provider.id}/${id}`, limit);
+          }
+        }
+      }
+      return context.contextLimitByModelKey.get(key);
+    });
+
+    /**
+     * Emit the context-window reading carried by a completed assistant message.
+     * Codex and Claude have done this since they landed; OpenCode never did,
+     * which is the whole reason its meter rendered empty in the composer.
+     */
+    const emitThreadTokenUsage = Effect.fn("emitThreadTokenUsage")(function* (
+      context: OpenCodeSessionContext,
+      info: unknown,
+      turnId: TurnId | undefined,
+      raw: unknown,
+    ) {
+      const tokens = readOpenCodeAssistantTokens(info);
+      if (!tokens) {
+        return;
+      }
+      const observed = openCodeContextTokens(tokens);
+      if (!Number.isFinite(observed) || observed <= 0) {
+        return;
+      }
+      context.totalProcessedTokens += observed;
+
+      const providerID = readOpenCodeString(info, "providerID");
+      const modelID = readOpenCodeString(info, "modelID");
+      // No model identity means no window to look up — still worth emitting the
+      // counts, just without a percentage.
+      const maxTokens =
+        providerID && modelID
+          ? yield* resolveContextLimit(context, providerID, modelID)
+          : undefined;
+      const usage = normalizeOpenCodeTokenUsage({
+        tokens,
+        maxTokens,
+        totalProcessedTokens: context.totalProcessedTokens,
+      });
+      if (!usage) {
+        return;
+      }
+
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId,
+          raw,
+        })),
+        type: "thread.token-usage.updated",
+        payload: { usage },
+      });
+    });
+
     const emitUnexpectedExit = Effect.fn("emitUnexpectedExit")(function* (
       context: OpenCodeSessionContext,
       message: string,
@@ -834,6 +1064,7 @@ export function makeOpenCodeAdapter(
               }
               yield* emitAssistantTextDelta(context, part, turnId, event);
             }
+            yield* emitThreadTokenUsage(context, event.properties.info, turnId, event);
           }
           break;
         }
@@ -1379,6 +1610,9 @@ export function makeOpenCodeAdapter(
           partById: new Map(),
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
+          contextLimitByModelKey: new Map(),
+          modelLimitsLoaded: false,
+          totalProcessedTokens: 0,
           completedAssistantPartIds: new Set(),
           turns: [],
           activeTurnId: undefined,
