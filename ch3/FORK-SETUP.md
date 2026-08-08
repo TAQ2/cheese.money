@@ -1,9 +1,16 @@
 # CH3 fork — setup, build, and install on a new machine
 
-This is a fork of CH3 carrying a large body of **uncommitted** work on the
-branch `feat/claude-statusline` (the working tree IS the deliverable; nothing
-is committed on top of upstream). The `.git` directory is included, so
-`git status` / `git diff HEAD` show the full delta (~140 files).
+This is a fork of T3 Code, rebranded to CH3. It lives at `ch3/` inside the
+`cheese.money` repo as ordinary committed files — no submodule, no nested
+`.git`, nothing left in a working tree. Clone the parent repo and everything
+needed to build is present; verified 2026-08-07 from a clean clone with
+`pnpm install --frozen-lockfile` followed by `pnpm build`, both green.
+
+> Earlier revisions of this file described the fork as **uncommitted** work on
+> a branch `feat/claude-statusline`, shipped as an archive with its `.git`
+> directory, to be inspected with `git diff HEAD`. That was true of the
+> one-off transfer bundle it was written for, and is false here — there is no
+> such branch and no delta to inspect. Ignore any instruction to look for one.
 
 What the fork adds, briefly: a Claude multi-account manager with automatic
 failover and smart account rotation; native text-to-speech read-aloud
