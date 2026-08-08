@@ -428,13 +428,29 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    // OpenCode has no `statusLine` hook of its own, so unlike Claude there is
+    // no upstream file to discover this from -- it lives here. Server-side by
+    // design: a command arriving from the client would be arbitrary code
+    // execution over RPC.
+    usageMetricsCommand: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Usage metrics command",
+        description:
+          "Shell command whose first two lines are shown under the composer. Runs in the thread's directory. Leave blank to show nothing.",
+        providerSettingsForm: {
+          placeholder: "~/.config/opencode/scripts/maple-usage.sh --oneline",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "serverUrl", "serverPassword"],
+    order: ["binaryPath", "serverUrl", "serverPassword", "usageMetricsCommand"],
   },
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
@@ -658,6 +674,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   serverUrl: Schema.optionalKey(TrimmedString),
   serverPassword: Schema.optionalKey(TrimmedString),
+  usageMetricsCommand: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 

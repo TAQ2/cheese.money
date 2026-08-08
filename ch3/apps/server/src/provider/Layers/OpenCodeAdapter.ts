@@ -228,9 +228,7 @@ interface OpenCodeAssistantTokens {
  * and it correctly falls back down when OpenCode compacts.
  */
 function openCodeContextTokens(tokens: OpenCodeAssistantTokens): number {
-  return (
-    tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
-  );
+  return tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write;
 }
 
 /**

@@ -47,6 +47,7 @@ import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as ClaudeStatusLine from "./provider/Drivers/ClaudeStatusLine.ts";
+import * as OpenCodeUsageMetrics from "./provider/Drivers/OpenCodeUsageMetrics.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -297,6 +298,9 @@ const CheckpointingLayerLive = Layer.empty.pipe(
 const PortScannerLayerLive = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
 
 const ClaudeStatusLineLayerLive = ClaudeStatusLine.layer.pipe(Layer.provide(ProcessRunner.layer));
+const OpenCodeUsageMetricsLayerLive = OpenCodeUsageMetrics.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+);
 
 const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PtyAdapterLive),
@@ -353,7 +357,12 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(
-    Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, ClaudeStatusLineLayerLive),
+    Layer.mergeAll(
+    TerminalLayerLive,
+    PreviewLayerLive,
+    ClaudeStatusLineLayerLive,
+    OpenCodeUsageMetricsLayerLive,
+  ),
   ),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),

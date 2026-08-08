@@ -204,6 +204,7 @@ import {
   formatProviderDisplayName,
 } from "../../lib/contextWindow";
 import { ClaudeStatusLineRow } from "./ClaudeStatusLineRow";
+import { OpenCodeUsageMetricsRow } from "./OpenCodeUsageMetricsRow";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -3294,6 +3295,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               modelDisplayName={selectedModel}
               contextWindowSize={activeContextWindow?.maxTokens}
               contextRemainingPercentage={activeContextWindow?.remainingPercentage}
+            />
+          )}
+          {/* OpenCode has no statusLine hook, so this is its own configured
+              usage command rather than a mirror of one */}
+          {isComposerCollapsedMobile || selectedProvider !== "opencode" ? null : (
+            <OpenCodeUsageMetricsRow
+              environmentId={environmentId}
+              cwd={gitCwd}
+              modelDisplayName={selectedModel}
             />
           )}
           {/* Bottom toolbar */}

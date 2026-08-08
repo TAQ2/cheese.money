@@ -9,6 +9,11 @@ import {
   ClaudeStatusLineResult,
 } from "./claudeStatusLine.ts";
 import {
+  OpenCodeUsageMetricsContext,
+  OpenCodeUsageMetricsError,
+  OpenCodeUsageMetricsResult,
+} from "./opencodeUsageMetrics.ts";
+import {
   ProviderSessionIdError,
   ProviderSessionIdInput,
   ProviderSessionIdResult,
@@ -292,6 +297,9 @@ export const WS_METHODS = {
 
   // Claude provider methods
   claudeStatusLineRender: "claude.statusLine.render",
+
+  // OpenCode provider methods
+  opencodeUsageMetricsRender: "opencode.usageMetrics.render",
   threadsGetProviderSessionId: "threads.getProviderSessionId",
   threadsGetMcpStatus: "threads.getMcpStatus",
   threadsMcpServerAction: "threads.mcpServerAction",
@@ -565,6 +573,12 @@ export const WsClaudeStatusLineRenderRpc = Rpc.make(WS_METHODS.claudeStatusLineR
   payload: ClaudeStatusLineContext,
   success: ClaudeStatusLineResult,
   error: Schema.Union([ClaudeStatusLineError, EnvironmentAuthorizationError]),
+});
+
+export const WsOpenCodeUsageMetricsRenderRpc = Rpc.make(WS_METHODS.opencodeUsageMetricsRender, {
+  payload: OpenCodeUsageMetricsContext,
+  success: OpenCodeUsageMetricsResult,
+  error: Schema.Union([OpenCodeUsageMetricsError, EnvironmentAuthorizationError]),
 });
 
 export const WsThreadsGetProviderSessionIdRpc = Rpc.make(WS_METHODS.threadsGetProviderSessionId, {
@@ -1008,6 +1022,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
   WsClaudeStatusLineRenderRpc,
+  WsOpenCodeUsageMetricsRenderRpc,
   WsThreadsGetProviderSessionIdRpc,
   WsThreadsGetMcpStatusRpc,
   WsThreadsMcpServerActionRpc,

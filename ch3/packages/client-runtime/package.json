@@ -47,6 +47,10 @@
       "types": "./src/state/claudeStatusLine.ts",
       "default": "./src/state/claudeStatusLine.ts"
     },
+    "./state/opencodeUsageMetrics": {
+      "types": "./src/state/opencodeUsageMetrics.ts",
+      "default": "./src/state/opencodeUsageMetrics.ts"
+    },
     "./state/claudeAccounts": {
       "types": "./src/state/claudeAccounts.ts",
       "default": "./src/state/claudeAccounts.ts"

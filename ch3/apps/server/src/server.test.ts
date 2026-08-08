@@ -108,6 +108,7 @@ import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as ClaudeStatusLine from "./provider/Drivers/ClaudeStatusLine.ts";
+import * as OpenCodeUsageMetrics from "./provider/Drivers/OpenCodeUsageMetrics.ts";
 import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory.ts";
 import { ProviderService } from "./provider/Services/ProviderService.ts";
 import { ProviderSessionNotFoundError } from "./provider/Errors.ts";
@@ -348,6 +349,7 @@ const buildAppUnderTest = (options?: {
     reviewService?: Partial<ReviewService.ReviewService["Service"]>;
     vcsStatusBroadcaster?: Partial<VcsStatusBroadcaster.VcsStatusBroadcaster["Service"]>;
     claudeStatusLine?: Partial<ClaudeStatusLine.ClaudeStatusLine["Service"]>;
+    opencodeUsageMetrics?: Partial<OpenCodeUsageMetrics.OpenCodeUsageMetrics["Service"]>;
     providerSessionDirectory?: Partial<ProviderSessionDirectory["Service"]>;
     projectSetupScriptRunner?: Partial<
       ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]
@@ -573,6 +575,11 @@ const buildAppUnderTest = (options?: {
       render: () => Effect.succeed({ text: null, durationMs: 0, failed: false }),
       ...options?.layers?.claudeStatusLine,
     });
+    // Same reasoning as the status line: this shells out to a user command.
+    const opencodeUsageMetricsLayer = Layer.mock(OpenCodeUsageMetrics.OpenCodeUsageMetrics)({
+      render: () => Effect.succeed({ text: null, durationMs: 0, failed: false }),
+      ...options?.layers?.opencodeUsageMetrics,
+    });
     const resourceTelemetryLayer = ResourceTelemetry.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -703,6 +710,7 @@ const buildAppUnderTest = (options?: {
         Layer.mergeAll(
           vcsStatusBroadcasterLayer,
           claudeStatusLineLayer,
+          opencodeUsageMetricsLayer,
           providerSessionDirectoryLayer,
           providerServiceLayer,
         ),

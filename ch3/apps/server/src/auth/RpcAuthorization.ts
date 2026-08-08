@@ -65,6 +65,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.filesystemBrowse]: AuthOrchestrationReadScope,
   [WS_METHODS.assetsCreateUrl]: AuthOrchestrationReadScope,
   [WS_METHODS.claudeStatusLineRender]: AuthOrchestrationReadScope,
+  [WS_METHODS.opencodeUsageMetricsRender]: AuthOrchestrationReadScope,
   [WS_METHODS.threadsGetProviderSessionId]: AuthOrchestrationReadScope,
   [WS_METHODS.threadsGetMcpStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.threadsMcpServerAction]: AuthOrchestrationOperateScope,

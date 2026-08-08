@@ -107,6 +107,7 @@ import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as ClaudeStatusLine from "./provider/Drivers/ClaudeStatusLine.ts";
+import * as OpenCodeUsageMetrics from "./provider/Drivers/OpenCodeUsageMetrics.ts";
 import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory.ts";
 import {
   awaitClaudeAccountLogin,
@@ -153,6 +154,32 @@ import {
 } from "./speech/speechDefaults.ts";
 import { resolveSpeechVoice } from "./speech/speechLanguage.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+
+/**
+ * Where the OpenCode usage-metrics command actually lives.
+ *
+ * The provider settings FORM writes to `providerInstances.<id>.config`, while
+ * `providers.opencode` is the legacy block that is empty on a modern install.
+ * Reading only the legacy block is the exact bug the Claude status line hit —
+ * it handed the renderer an empty command on every call and the row silently
+ * never appeared. Instance first, legacy only as a migration fallback.
+ */
+function resolveOpenCodeUsageMetricsCommand(settings: {
+  readonly providerInstances?:
+    | Record<string, { readonly driver?: string; readonly config?: unknown } | undefined>
+    | undefined;
+  readonly providers: { readonly opencode: { readonly usageMetricsCommand?: string | undefined } };
+}): string {
+  const instances = settings.providerInstances ?? {};
+  for (const instance of Object.values(instances)) {
+    if (instance?.driver !== "opencode") continue;
+    const config = instance.config;
+    if (typeof config !== "object" || config === null) continue;
+    const command = (config as { readonly usageMetricsCommand?: unknown }).usageMetricsCommand;
+    if (typeof command === "string" && command.trim().length > 0) return command;
+  }
+  return settings.providers.opencode.usageMetricsCommand ?? "";
+}
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const EDITOR_DISCOVERY_TIMEOUT = Duration.seconds(5);
@@ -809,6 +836,7 @@ const makeWsRpcLayer = (
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const relayClient = yield* RelayClient.RelayClient;
       const claudeStatusLine = yield* ClaudeStatusLine.ClaudeStatusLine;
+      const opencodeUsageMetrics = yield* OpenCodeUsageMetrics.OpenCodeUsageMetrics;
       const providerSessionDirectory = yield* ProviderSessionDirectory;
       // Sign-ins in flight: the browser half happens out of band, so the CLI
       // session that owns the OAuth state is held here between the start and
@@ -2712,6 +2740,26 @@ const makeWsRpcLayer = (
               ),
               Effect.orElseSucceed(() => ""),
               Effect.flatMap((homePath) => claudeStatusLine.render(input, { homePath })),
+            ),
+            {
+              "rpc.aggregate": "provider",
+            },
+          ),
+        [WS_METHODS.opencodeUsageMetricsRender]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.opencodeUsageMetricsRender,
+            // Settings are read per call so an edited command takes effect
+            // without a reconnect, mirroring the Claude status line. An
+            // unreadable settings file must not fail the row: fall back to no
+            // command, which renders nothing.
+            serverSettings.getSettings.pipe(
+              Effect.map((settings) => ({
+                usageMetricsCommand: resolveOpenCodeUsageMetricsCommand(settings),
+              })),
+              Effect.orElseSucceed(() => ({ usageMetricsCommand: "" })),
+              Effect.flatMap((openCodeSettings) =>
+                opencodeUsageMetrics.render(input, openCodeSettings),
+              ),
             ),
             {
               "rpc.aggregate": "provider",

@@ -2,6 +2,7 @@ export * from "./baseSchemas.ts";
 export * from "./background.ts";
 export * from "./auth.ts";
 export * from "./claudeStatusLine.ts";
+export * from "./opencodeUsageMetrics.ts";
 export * from "./providerSessionId.ts";
 export * from "./providerMcpStatus.ts";
 export * from "./providerRewind.ts";
