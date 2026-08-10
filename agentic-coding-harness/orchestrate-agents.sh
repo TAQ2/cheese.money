@@ -4,21 +4,9 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # =============================================================================
-# orchestrate-agents.sh — Multi-Agent Development Orchestrator (project-agnostic template)
+# orchestrate-agents.sh — Hark Multi-Agent Development Orchestrator
 # (tmux-driven, v2.0)
 # =============================================================================
-#
-# PROJECT-AGNOSTIC TEMPLATE — to instantiate for a project:
-#   1. Place this script in "<repo-or-workspace>/LLM coding agent documents/".
-#   2. Provide "<Name> Brain Agent.md", "<Name> Coding Agent.md", and
-#      FULL_DOCUMENTATION_UPDATE.md beside it (auto-discovered at startup).
-#   3. Set TEA_LOGIN below only for self-hosted Gitea with multiple logins on
-#      one host; leave empty for GitHub or single-login Gitea.
-#   4. Commit convention lives in the Stage-6 metadata prompt + conventional_re
-#      (defaults to Conventional Commits).
-#   5. Supports BOTH monorepos AND multi-repo WORKSPACES (a docs host with
-#      nested sibling service repos) — the workspace-host guard in main()
-#      forces a service-repo target so code is never stranded in the host.
 #
 # WHAT THIS VARIANT DOES DIFFERENTLY
 # -----------------------------------
@@ -187,7 +175,12 @@ IFS=$'\n\t'
 #     cd /repo
 #     git checkout feat/crm-bulk-ops && git pull origin feat/crm-bulk-ops
 #     git merge crm-audit-endpoint --squash --no-commit
-#     # Review in VS Code, then commit manually
+#     # Review in VS Code, then commit REUSING the branch tip's message.
+#     # --squash preserves the TREE but DISCARDS every branch commit message,
+#     # including Stage 6's long-form body. -C carries it across; a bare
+#     # `git commit` loses the run's entire rationale from git history.
+#     git commit -C crm-audit-endpoint
+#     git log -1 --format=%B | wc -w        # expect hundreds, not tens
 #     git push origin feat/crm-bulk-ops
 #
 #     git worktree remove /repo-wt-crm-audit-endpoint
@@ -218,7 +211,7 @@ IFS=$'\n\t'
 #   LLM coding agent documents/              <-- shared workspace docs folder
 #   ├── orchestrate-agents.sh                <-- the script (single source of truth)
 #   └── runs/                                <-- all orchestration runs, all repos
-#       ├── service-api/
+#       ├── baubap-api/
 #       │   ├── 20260402_160759/
 #       │   │   ├── artifacts/               <-- CCR, reviews, fix reports, docs
 #       │   │   ├── prompts/                 <-- every prompt sent to Claude
@@ -228,15 +221,15 @@ IFS=$'\n\t'
 #       │   │   ├── sessions.json            <-- metrics snapshot
 #       │   │   └── orchestration.log        <-- full execution log
 #       │   └── 20260402_155319/
-#       ├── service-bi/
+#       ├── baubap-bi/
 #       │   └── 20260401_230226/
-#       └── another-service/
+#       └── risk-profiles-labelling/
 #           └── 20260402_150953/
 #
 #   Runs are stored HERE, not inside target repos. This means:
 #   - No git clean/checkout/reset can destroy them
 #   - All runs across all repos are browsable from one place
-#   - Resume works: --resume-run runs/service-api/20260402_160759
+#   - Resume works: --resume-run runs/baubap-api/20260402_160759
 #
 # =============================================================================
 
@@ -358,9 +351,6 @@ BASE_BRANCH=""                 # branch the worktree was created from (stacked P
 # phase-5 business-outcome spot check. Blank = stage 7 never runs; nothing
 # about the 6-stage flow changes. Env override supported for resumed runs:
 #   TPM_CONVERSATION_ID=<uuid> ./orchestrate-agents.sh --resume-run <dir>
-# The env route is also the ONLY route when every interactive run-config flag
-# is already set on the command line (--clarify-rounds/--qa-rounds/
-# --skip-ccr-review/--caveman), because prompt_run_config short-circuits.
 TPM_CONVERSATION_ID="${TPM_CONVERSATION_ID:-}"
 STAGE7_FIRED=false
 S7_EXIT_CODE=""
@@ -402,11 +392,10 @@ KEEP_TMUX_ON_EXIT=false    # when true, do NOT kill tmux session at exit
 HUMAN_JITTER=true
 HUMAN_JITTER_MIN=12
 HUMAN_JITTER_MAX=44
-# Gitea PR login name (tea --login) for Stage 6. When several Gitea logins
-# share one host, tea cannot auto-disambiguate the login by host — pin it per
-# project here. Empty = let tea auto-match (the default; correct for GitHub
-# remotes and single-login Gitea setups).
-TEA_LOGIN=""
+# Gitea PR login name (tea --login) for Stage 6. Hark + VendeBien share one
+# Gitea host, so tea can't auto-disambiguate the login by host — pin it per
+# project. This is Hark → use the harkread login. Empty = let tea auto-match.
+TEA_LOGIN="harkread"
 # Effort is forced to `xhigh` on every Opus/Sonnet launch (Brain, Coder,
 # Reviewer). Skipped for Haiku oneshots (Haiku doesn't support --effort).
 # The --effort flag is accepted for backward compatibility but always pins
@@ -1305,22 +1294,36 @@ claude_account_note_change() {
     warn "CH3 switched accounts mid-run → ${who:-$shown}. Applying at the next turn boundary; the current turn finishes on ${CLAUDE_ACCOUNT_LABEL}."
 }
 
-# Is the run's transcript reachable under the candidate account? `tmux_launch`
-# decides between `--resume` and a fresh session by looking for the session id
-# under the CURRENT projects directory. CH3 points each profile's `projects` at
-# the default home's so transcripts are shared, but a profile created outside
-# CH3 has no such link — adopting that account would silently start every agent
-# in a brand-new conversation with none of the run's context.
+# Are this run's transcripts readable from ACCOUNT `dir`'s projects/ — carrying
+# them there when they are not?
+#
+# Transcripts are plain files whose content has nothing to do with the account
+# that wrote them; CH3's own model is one shared transcript store across
+# accounts. Until 2026-08-10 a missing file here REFUSED the switch, which
+# pinned the run to the account it started on even after that account stopped
+# serving turns: an exhausted plan then answers every agent with a one-line
+# banner and the run finishes on garbage. Copying is the whole fix — only a
+# failed copy is a reason to stay put.
 claude_account_sessions_reachable() {
-    local dir="$1" projects sf sid
+    local dir="$1" projects sf sid src dest
     projects="${dir:+$dir/projects}"
     projects="${projects:-$HOME/.claude/projects}"
-    [[ -d "$projects" ]] || return 1
+    mkdir -p "$projects" 2>/dev/null || return 1
     for sf in "${BRAIN_SESSION_FILE:-}" "${CODING_SESSION_FILE:-}"; do
         [[ -n "${sf:-}" && -s "${sf:-}" ]] || continue
         sid=$(tr -d '[:space:]' < "$sf")
         [[ -n "$sid" ]] || continue
-        find "$projects" -maxdepth 3 -name "${sid}.jsonl" -print -quit 2>/dev/null | grep -q . || return 1
+        find "$projects" -maxdepth 3 -name "${sid}.jsonl" -print -quit 2>/dev/null | grep -q . && continue
+        # ONLY this run's own transcripts move. Copying the whole projects tree
+        # would drag every unrelated conversation on the machine into another
+        # account's directory.
+        src=$(find "${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}" "$HOME/.claude/projects" \
+              -maxdepth 3 -name "${sid}.jsonl" -print -quit 2>/dev/null || true)
+        [[ -n "$src" ]] || return 1
+        dest="${projects}/$(basename "$(dirname "$src")")"
+        mkdir -p "$dest" 2>/dev/null || return 1
+        cp -p "$src" "$dest/" 2>/dev/null || return 1
+        verbose "Carried transcript ${sid}.jsonl into ${dest}"
     done
     return 0
 }
@@ -1350,7 +1353,7 @@ claude_account_refresh() {
         return 1
     fi
     if ! claude_account_sessions_reachable "$dir"; then
-        warn "CH3 now selects ${shown}, but this run's transcripts are not reachable from its projects/ directory. Staying on ${CLAUDE_ACCOUNT_LABEL} — resuming there would restart every agent with no context."
+        warn "CH3 now selects ${shown}, but this run's transcripts could not be carried into its projects/ directory. Staying on ${CLAUDE_ACCOUNT_LABEL}."
         return 1
     fi
 
@@ -2109,6 +2112,32 @@ invoke_agent() {
             return 1
         fi
 
+        # ── The bound account refused the turn ────────────────────────────
+        # An exhausted plan, or a CLAUDE_CONFIG_DIR the CLI cannot read, makes
+        # claude print ONE line and exit 0:
+        #   "You've hit your session limit \u00b7 resets 1:30pm (America/Mexico_City)"
+        #   "Not logged in \u00b7 Please run /login"
+        # Nothing here told that apart from a real reply. On 2026-08-10 the
+        # first banner was written to ccr.md, Stage 1 was declared complete on
+        # 69 bytes, and the Coding Agent was handed nine words as its plan.
+        # Retrying on the same account reproduces it exactly, so the only
+        # useful move is to rebind to whatever account CH3 now selects — and to
+        # stop, loudly, when there is no such account.
+        local refusal
+        refusal=$(claude_refusal_text "$raw_file")
+        if [[ -n "$refusal" ]]; then
+            warn "Call #${call_num}: ${CLAUDE_ACCOUNT_LABEL} refused the turn — ${refusal}"
+            log_raw "CALL #${call_num} ATTEMPT ${attempt} ACCOUNT REFUSAL (${CLAUDE_ACCOUNT_LABEL}): ${refusal}"
+            if claude_account_refresh && (( attempt < max_retries )); then
+                warn "Rebound to ${CLAUDE_ACCOUNT_LABEL} — retrying call #${call_num}"
+                continue
+            fi
+            error "Call #${call_num} cannot be served by any signed-in account — ${refusal}"
+            error "Wait for the reset, or pin a live account and resume:"
+            error "  CLAUDE_ACCOUNT_CONFIG_DIR=/path/to/config ./${SCRIPT_NAME} --resume-run \"${RUN_DIR}\""
+            return 1
+        fi
+
         call_succeeded=true
         break
     done
@@ -2133,6 +2162,27 @@ invoke_agent() {
     session_info "$label" "$session_file"
     log_raw "Call #${call_num} complete (tmux backend)"
     return 0
+}
+
+# The CLI's own refusal banners, verbatim as they land in the transcript.
+# Matched ONLY against a short final message: an agent discussing an account
+# limit writes paragraphs, the CLI writes one line and nothing else.
+CLAUDE_REFUSAL_PATTERN="hit your (session|usage) limit|usage limit reached|usage limit will reset|5-hour usage|Not logged in|Please run /login|Credit balance is too low|OAuth token (has )?expired"
+CLAUDE_REFUSAL_MAX_WORDS=40
+
+# Prints the refusal banner found in a transcript, or nothing at all.
+claude_refusal_text() {
+    local raw_file="${1:-}" text
+    [[ -n "$raw_file" && -s "$raw_file" ]] || return 0
+    text=$(jq -r 'select(.type=="result") | .result // empty' "$raw_file" 2>/dev/null | tail -n 1)
+    if [[ -z "$text" ]]; then
+        text=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text // empty' \
+               "$raw_file" 2>/dev/null | tail -n 1)
+    fi
+    [[ -n "$text" ]] || return 0
+    (( $(printf '%s' "$text" | wc -w | tr -d ' ') <= CLAUDE_REFUSAL_MAX_WORDS )) || return 0
+    printf '%s' "$text" | grep -qiE "$CLAUDE_REFUSAL_PATTERN" || return 0
+    printf '%s' "$text" | head -1
 }
 
 # ─── SECTION 6: OUTPUT PARSING & METRICS ─────────────────────────────────────
@@ -2524,7 +2574,7 @@ recover_missing_state() {
     fi
 
     # ORIGINAL_BRAIN_AGENT_FILE — find it in the agent documents directory
-    # MULTI-REPO WORKSPACE ADAPTATION: repo-local docs folder OR shared workspace-level fallback.
+    # HARK ADAPTATION: repo-local docs folder OR shared workspace-level fallback.
     if [[ -z "$ORIGINAL_BRAIN_AGENT_FILE" ]] && [[ -n "$ORIGINAL_REPO_ROOT" ]]; then
         local _rec_doc_dir="${ORIGINAL_REPO_ROOT}/LLM coding agent documents"
         [[ -d "$_rec_doc_dir" ]] || _rec_doc_dir="$(dirname "$ORIGINAL_REPO_ROOT")/LLM coding agent documents"
@@ -2699,10 +2749,10 @@ restore_worktree_context() {
     REPO_ROOT="$WORKTREE_DIR"
 
     # Re-derive DOC_DIR
-    # MULTI-REPO WORKSPACE ADAPTATION: root-level SERVICE_DOCUMENTATION.md is a per-service doc in
-    # the workspace docs host, NOT a docs-repo marker — docs-repo detection requires an actual
+    # HARK ADAPTATION: root-level SERVICE_DOCUMENTATION.md is a per-service doc in
+    # Hark, NOT a docs-repo marker — docs-repo detection requires an actual
     # root-level Brain Agent file. Fallback to the shared workspace-level
-    # 'LLM coding agent documents/' (sibling of every service repo/worktree).
+    # 'LLM coding agent documents/' (sibling of every Hark service repo/worktree).
     if compgen -G "${REPO_ROOT}/*Brain*Agent*.md" > /dev/null 2>&1; then
         DOC_DIR="$REPO_ROOT"
     elif [[ -d "${REPO_ROOT}/LLM coding agent documents" ]]; then
@@ -3082,7 +3132,7 @@ Examples:
   ./orchestrate-agents.sh --task "Add lead assignment endpoint" --qa-rounds 3
 
   # Resume a crashed run
-  ./orchestrate-agents.sh --resume-run runs/service-api/20260328_144502
+  ./orchestrate-agents.sh --resume-run runs/baubap-api/20260328_144502
 
   # Preview without running
   ./orchestrate-agents.sh --dry-run
@@ -3336,10 +3386,10 @@ check_prerequisites() {
 
     # LLM coding agent documents — detect whether we are inside the docs repo
     # itself or in a parent repo that contains it as a subdirectory.
-    # MULTI-REPO WORKSPACE ADAPTATION: root-level SERVICE_DOCUMENTATION.md is a per-service doc in
-    # the workspace docs host, NOT a docs-repo marker — docs-repo detection requires an actual
-    # root-level Brain Agent file. The canonical docs folder is shared at the
-    # WORKSPACE level (the workspace's LLM coding agent documents/), a sibling of
+    # HARK ADAPTATION: root-level SERVICE_DOCUMENTATION.md is a per-service doc in
+    # Hark, NOT a docs-repo marker — docs-repo detection requires an actual
+    # root-level Brain Agent file. Hark's canonical docs folder is shared at the
+    # WORKSPACE level (HarkDevelopment/LLM coding agent documents/), a sibling of
     # every service repo — hence the parent-directory fallback.
     if compgen -G "${REPO_ROOT}/*Brain*Agent*.md" > /dev/null 2>&1; then
         # We ARE inside the docs repo (it has its own .git)
@@ -3349,7 +3399,7 @@ check_prerequisites() {
         DOC_DIR="${REPO_ROOT}/LLM coding agent documents"
     elif [[ -d "$(dirname "$REPO_ROOT")/LLM coding agent documents" ]]; then
         DOC_DIR="$(dirname "$REPO_ROOT")/LLM coding agent documents"
-        info "Using shared workspace-level agent documents (multi-repo workspace layout)"
+        info "Using shared workspace-level agent documents (Hark layout)"
     else
         fatal "'LLM coding agent documents/' not found in repo or parent workspace. Run the Creation Playbook first."
     fi
@@ -5026,7 +5076,7 @@ You are generating pull request metadata from a completed code-change request.
 Read the BUSINESS PROBLEM and the CCR below and produce a single JSON object with EXACTLY these four string fields (no extra keys, no code fences, no commentary — just the JSON object):
 
 {
-  "commit_message": "<Conventional Commit SUBJECT LINE ONLY. Format: type(scope): description — type is one of feat|fix|docs|style|refactor|perf|test|build|ci|chore. Imperative mood, lower-case description, no trailing period. Example good: 'feat(booking): add seat-hold expiry'. NO newlines, NO body, NO bullets, NO 'Why:' prose. Maximum 160 characters total.>",
+  "commit_message": "<Conventional Commit SUBJECT LINE ONLY. Pattern (Hark standard): [short description of change or fix] in [function name] function. Join multiple functions with 'and' and end in 'functions' (e.g. 'in process_text_feed_item and process_audio_feed_item functions'). NO Conventional Commits type prefix, no trailing period. HARD LIMITS: single line only — NO newlines, NO body, NO bullets, NO dashes, NO 'Why:' or context prose. Maximum 160 characters total. Example good: 'fixed query payload error in execute_consolidate_command function'. Example BAD: 'fixed query payload error in execute_consolidate_command function\\n\\nThe payload was missing...' — body belongs in the 'why' field, not here.>",
   "what": "<One paragraph, 2-4 sentences, concretely describing what this PR changes in the codebase. Name the files/modules/functions touched. No motivation, no approach — just the observable change.>",
   "why": "<One paragraph, 2-4 sentences, explaining the business or technical motivation. What problem is being solved? Why now? What was wrong or missing before?>",
   "how": "<One paragraph, 2-4 sentences, explaining the implementation approach. Key design decisions, trade-offs, why this approach over alternatives. Not a line-by-line walkthrough.>"
@@ -5079,15 +5129,15 @@ PROMPT_BOUNDARY
         commit_msg=$(printf '%s\n' "$commit_msg" | awk 'NF{print; exit}')
     fi
 
-    # Validate commit_msg matches the Conventional Commits pattern
-    # (type(scope): description) AND is a sane subject length
+    # Validate commit_msg matches the HARK commit pattern ('[short description of
+    # change or fix] in [function name] function') AND is a sane subject length
     # (≤160 chars). If not, fall back to a deterministic default built from the
     # worktree branch name.
-    local conventional_re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?: .+'
+    local conventional_re='^.+ in .+ functions?$'
     local commit_msg_len=${#commit_msg}
     if ! [[ "$commit_msg" =~ $conventional_re ]] || (( commit_msg_len > 160 )); then
         local humanized="${WORKTREE_BRANCH//-/ }"
-        local fallback_msg="chore: ${humanized} (orchestrated change)"
+        local fallback_msg="updated ${humanized} in orchestrated change functions"
         # Truncate fallback too so we never push a giant title.
         if (( ${#fallback_msg} > 160 )); then
             fallback_msg="${fallback_msg:0:157}..."
@@ -5162,13 +5212,16 @@ PROMPT_BOUNDARY
             echo ""
             echo "Output a SINGLE markdown document. NO preface, NO commentary, NO trailing notes — your entire response is captured verbatim into the PR body. Start with \`## TL;DR\` on the first line."
             echo ""
-            echo "The PR body MUST follow the canonical PR template exactly. Read the template spec below and produce every required section in order, with byte-exact headings. The \`## What / Why?\` heading is validated by the PR-description CI check — a missing \`?\` or wrong spacing fails CI."
+            echo "The PR body MUST follow the Baubap canonical PR template exactly. Read the template spec below and produce every required section in order, with byte-exact headings. The \`## What / Why?\` heading is regex-checked by Baubap's PR-description GitHub Action — a missing \`?\` or wrong spacing fails CI."
             echo ""
             echo "<pr_template_spec>"
             cat "$pr_template_file"
             echo "</pr_template_spec>"
             echo ""
-            echo "If your project keeps exemplar PRs, mirror their structure (not their prose); otherwise follow the template spec above."
+            echo "Reference exemplars (read the live PRs for shape — do NOT copy prose):"
+            echo "- https://github.com/Baubap/risk-profiles-labelling/pull/60"
+            echo "- https://github.com/Baubap/baubap-airflow-data-eng/pull/444"
+            echo "- https://github.com/Baubap/baubap-airflow-data-eng/pull/434"
             echo ""
             echo "The change you shipped:"
             echo "- Branch: ${WORKTREE_BRANCH}"
@@ -5250,7 +5303,7 @@ Co-Authored-By: Claude $(model_label "$CODER_MODEL") (1M context) <noreply@anthr
     # compliant pr_body_agent.md from 6b2. The orchestrator validates it
     # against the canonical heading set (## TL;DR / ## What / Why? / ## How?
     # / ## Code Change Request Form) — those four are the regex-check anchors
-    # the PR-description CI check enforces. If validation fails OR
+    # Baubap's PR-description GitHub Action enforces. If validation fails OR
     # the agent step was skipped, we fall back to the deterministic Haiku-
     # derived body so PR creation never blocks on a bad agent run.
     local slack_url=""
@@ -5382,7 +5435,7 @@ Co-Authored-By: Claude $(model_label "$CODER_MODEL") (1M context) <noreply@anthr
 
 # Opens a DRAFT pull request for the just-pushed branch against <base>,
 # choosing the CLI by the origin remote: `gh` for github.com, `tea` for
-# self-hosted Gitea. Draft is gh's --draft on GitHub and
+# self-hosted Gitea (VendeBien + Hark). Draft is gh's --draft on GitHub and
 # the conventional 'WIP:' title prefix on Gitea. Writes the resulting PR URL
 # (or "(failed)") to <url_out_file>. Never aborts the run — a PR-create
 # failure leaves the branch pushed for a manual PR. Args:
@@ -5440,7 +5493,9 @@ open_pull_request() {
     fi
 }
 
-# ─── SECTION 16c: STAGE 7 — TPM HANDOFF (optional) ──────────────────────────
+# ─── SECTION 17: FINAL SUMMARY DASHBOARD ────────────────────────────────────
+
+# ─── SECTION 16b: STAGE 7 — TPM HANDOFF (optional) ──────────────────────────
 #
 # Fires only when TPM_CONVERSATION_ID was armed at setup. Assembles the run's
 # full artifact output into one handoff file, then launches a DETACHED tmux
@@ -5450,16 +5505,8 @@ open_pull_request() {
 # conversation (resume it in any window to see the verdict) and in the run's
 # outputs/stage7-tpm.log. Tool surface is confined to git + read-only tools.
 # A bad ID fails loudly into the log — stages 1-6 are already complete and are
-# never blocked or corrupted by Stage 7.
-#
-# Runs on the DEFAULT tmux server, not the orchestrator's per-run `-S
-# $TMUX_SOCK` socket, so cleanup()/tmux_cleanup() cannot tear the handoff down
-# when the orchestration exits.
-#
-# Multi-repo runs: ${RUN_DIR}/artifacts/ is shared across all N repos, so the
-# handoff carries every repo's phase files. ORIGINAL_REPO_ROOT is repo[0] in
-# multi-repo mode, so the repo-root fallback lands there; every repo root is
-# listed in the run context below so the TPM can Read/Bash across all of them.
+# never blocked or corrupted by Stage 7. The repo root used is the ORIGINAL
+# repo, never the worktree: Stage 6 consumes/removes the worktree.
 run_stage_7() {
     if [[ -z "$TPM_CONVERSATION_ID" ]]; then
         return 0
@@ -5527,16 +5574,7 @@ run_stage_7() {
         fi
         echo "Run context:"
         echo "- Branch: ${WORKTREE_BRANCH:-unknown} (base: ${BASE_BRANCH:-main})"
-        if [[ "$MULTI_REPO_MODE" == "true" ]]; then
-            echo "- Multi-repo run across ${REPO_COUNT} repos:"
-            local _i
-            for ((_i=0; _i<REPO_COUNT; _i++)); do
-                echo "    - ${REPO_NAMES_ARRAY[$_i]:-repo${_i}}: ${ORIGINAL_REPO_ROOTS_ARRAY[$_i]:-unknown}"
-            done
-        else
-            echo "- Repo: ${tpm_repo_root}"
-        fi
-        echo "- Stage 6 landing mode: ${STAGE6_MODE}"
+        echo "- Repo: ${tpm_repo_root}"
         echo "- Full run artifacts on disk: ${RUN_DIR}"
         echo ""
         echo "──────────────── ORCHESTRATION OUTPUT ────────────────"
@@ -5600,8 +5638,6 @@ run_stage_7() {
     info "Stage 7: transcript also mirrors to ${s7_log}; the conversation is ${TPM_CONVERSATION_ID}."
     return 0
 }
-
-# ─── SECTION 17: FINAL SUMMARY DASHBOARD ────────────────────────────────────
 
 print_summary() {
     local end_time
@@ -5751,7 +5787,13 @@ print_summary() {
         printf "  ${C_YELLOW}  cd %s${C_RESET}\n" "$ORIGINAL_REPO_ROOT"
         printf "  ${C_YELLOW}  git checkout %s && git pull origin %s${C_RESET}\n" "${BASE_BRANCH:-main}" "${BASE_BRANCH:-main}"
         printf "  ${C_YELLOW}  git merge %s --squash --no-commit${C_RESET}\n" "$WORKTREE_BRANCH"
-        printf "  ${C_DIM}  # Review in VS Code, then commit manually${C_RESET}\n"
+        printf "  ${C_DIM}  # Review in VS Code, then commit REUSING the branch tip's message.${C_RESET}\n"
+        printf "  ${C_DIM}  # -C carries Stage 6's full long-form body onto %s. A bare${C_RESET}\n" "${BASE_BRANCH:-main}"
+        printf "  ${C_DIM}  # 'git commit' silently discards it -- squash keeps the TREE, never${C_RESET}\n"
+        printf "  ${C_DIM}  # the MESSAGE -- and the run's rationale is gone from git history.${C_RESET}\n"
+        printf "  ${C_YELLOW}  git commit -C %s${C_RESET}\n" "$WORKTREE_BRANCH"
+        printf "  ${C_DIM}  # Verify before push -- expect hundreds of words, not tens:${C_RESET}\n"
+        printf "  ${C_YELLOW}  git log -1 --format=%%B | wc -w${C_RESET}\n"
         printf "  ${C_YELLOW}  git push origin %s${C_RESET}\n" "${BASE_BRANCH:-main}"
         printf "  ${C_YELLOW}  git worktree remove %s${C_RESET}\n" "$WORKTREE_DIR"
         printf "  ${C_YELLOW}  git branch -D %s${C_RESET}\n" "$WORKTREE_BRANCH"
@@ -5982,9 +6024,7 @@ cleanup() {
             printf "\n"
         fi
         # Stage 7 on failure: hand the wreck to the TPM's own conversation for
-        # diagnosis (read-only tools, explicit do-not-commit instruction). One
-        # EXIT trap covers all four run-completing paths — single- and multi-repo,
-        # fresh and resumed. Never allowed to break cleanup.
+        # diagnosis (read-only tools, explicit do-not-commit instruction).
         if [[ -n "${TPM_CONVERSATION_ID:-}" ]] && [[ -n "${RUN_DIR:-}" ]] && [[ -d "${RUN_DIR:-}" ]]; then
             S7_EXIT_CODE="$exit_code"
             run_stage_7 failed 2>/dev/null || true
@@ -5992,7 +6032,7 @@ cleanup() {
         if [[ -n "${WORKTREE_DIR:-}" ]] && [[ -d "${WORKTREE_DIR:-}" ]]; then
             warn "Worktree still exists: ${WORKTREE_DIR}"
             warn "Branch: ${WORKTREE_BRANCH:-unknown} (based on: ${BASE_BRANCH:-main})"
-            printf "  ${C_DIM}To merge back: cd %s && git checkout %s && git merge %s --squash${C_RESET}\n" "$ORIGINAL_REPO_ROOT" "${BASE_BRANCH:-main}" "${WORKTREE_BRANCH:-unknown}"
+            printf "  ${C_DIM}To merge back: cd %s && git checkout %s && git merge %s --squash --no-commit && git commit -C %s${C_RESET}\n" "$ORIGINAL_REPO_ROOT" "${BASE_BRANCH:-main}" "${WORKTREE_BRANCH:-unknown}" "${WORKTREE_BRANCH:-unknown}"
             printf "  ${C_DIM}To clean up:   git worktree remove %s && git branch -D %s${C_RESET}\n" "$WORKTREE_DIR" "${WORKTREE_BRANCH:-unknown}"
             printf "\n"
         fi
@@ -6013,7 +6053,7 @@ cleanup() {
             printf "\n"
             warn "Worktree still exists: ${WORKTREE_DIR}"
             warn "Branch: ${WORKTREE_BRANCH} (based on: ${BASE_BRANCH:-main})"
-            printf "  ${C_DIM}To merge back: cd %s && git checkout %s && git merge %s --squash${C_RESET}\n" "$ORIGINAL_REPO_ROOT" "${BASE_BRANCH:-main}" "$WORKTREE_BRANCH"
+            printf "  ${C_DIM}To merge back: cd %s && git checkout %s && git merge %s --squash --no-commit && git commit -C %s${C_RESET}\n" "$ORIGINAL_REPO_ROOT" "${BASE_BRANCH:-main}" "$WORKTREE_BRANCH" "$WORKTREE_BRANCH"
             printf "  ${C_DIM}To clean up:   git worktree remove %s && git branch -D %s${C_RESET}\n" "$WORKTREE_DIR" "$WORKTREE_BRANCH"
         fi
         printf "\n"
@@ -6192,8 +6232,8 @@ create_worktree() {
     REPO_ROOT="$WORKTREE_DIR"
 
     # Re-derive DOC_DIR in the worktree
-    # MULTI-REPO WORKSPACE ADAPTATION: see check_prerequisites — Brain-file marker + workspace-level
-    # shared docs fallback (worktrees are siblings of the repos under the workspace root).
+    # HARK ADAPTATION: see check_prerequisites — Brain-file marker + workspace-level
+    # shared docs fallback (worktrees are siblings of the repos under HarkDevelopment).
     if compgen -G "${REPO_ROOT}/*Brain*Agent*.md" > /dev/null 2>&1; then
         DOC_DIR="$REPO_ROOT"
     elif [[ -d "${REPO_ROOT}/LLM coding agent documents" ]]; then
@@ -6221,7 +6261,7 @@ create_worktree() {
     local wt_path
     wt_path="${WORKTREE_DIR}"
 
-    # MULTI-REPO WORKSPACE ADAPTATION: when DOC_DIR is the shared workspace-level folder (outside
+    # HARK ADAPTATION: when DOC_DIR is the shared workspace-level folder (outside
     # the worktree), do NOT rewrite it — it is canonical and serves all repos.
     if [[ "$DOC_DIR" == "${wt_path}"* ]]; then
         # WHITELIST, not a glob: rewrite ONLY the instruction files the orchestrator
@@ -6521,7 +6561,7 @@ select_repo_and_branch() {
         repo_names+=("$(basename "$repo_dir")")
     done < <(find "$scan_dir" -maxdepth 2 -name ".git" -type d 2>/dev/null | sort)
 
-    # Multi-repo workspace: the harness HOST repo holds only the
+    # Multi-repo workspace (e.g. Hark): the harness HOST repo holds only the
     # orchestrator + shared agent docs — the deployable code lives in sibling
     # service repos. Drop the host from the selectable targets so a run can't
     # accidentally target the docs repo and produce a docs-only PR. Only fires when
@@ -6551,7 +6591,7 @@ select_repo_and_branch() {
         local branch
         branch=$(git -C "${repos[$i]}" symbolic-ref --short HEAD 2>/dev/null || echo "detached")
         local has_agents=""
-        # MULTI-REPO WORKSPACE ADAPTATION: shared workspace-level docs folder counts as [agents].
+        # HARK ADAPTATION: shared workspace-level docs folder counts as [agents].
         if [[ -d "${repos[$i]}/LLM coding agent documents" ]] || [[ -d "$(dirname "${repos[$i]}")/LLM coding agent documents" ]]; then
             has_agents="${C_GREEN}[agents]${C_RESET}"
         else
@@ -6574,7 +6614,7 @@ select_repo_and_branch() {
     local selected_name="${repo_names[$((repo_choice - 1))]}"
     success "Selected: ${selected_name}"
 
-    # Check for agent documents (repo-local OR shared workspace-level)
+    # Check for agent documents (HARK: repo-local OR shared workspace-level)
     if [[ ! -d "${selected_repo}/LLM coding agent documents" ]] && [[ ! -d "$(dirname "${selected_repo}")/LLM coding agent documents" ]]; then
         fatal "${selected_name} does not have 'LLM coding agent documents/' (repo or parent workspace). Run the Creation Playbook first."
     fi
@@ -6716,7 +6756,7 @@ select_repos_and_branches_multi() {
         repo_names+=("$(basename "$repo_dir")")
     done < <(find "$scan_dir" -maxdepth 2 -name ".git" -type d 2>/dev/null | sort)
 
-    # Multi-repo workspace: the harness HOST repo holds only the
+    # Multi-repo workspace (e.g. Hark): the harness HOST repo holds only the
     # orchestrator + shared agent docs — the deployable code lives in sibling
     # service repos. Drop the host from the selectable targets so a run can't
     # accidentally target the docs repo and produce a docs-only PR. Only fires when
@@ -6746,7 +6786,7 @@ select_repos_and_branches_multi() {
         local branch
         branch=$(git -C "${repos[$i]}" symbolic-ref --short HEAD 2>/dev/null || echo "detached")
         local has_agents=""
-        # MULTI-REPO WORKSPACE ADAPTATION: shared workspace-level docs folder counts as [agents].
+        # HARK ADAPTATION: shared workspace-level docs folder counts as [agents].
         if [[ -d "${repos[$i]}/LLM coding agent documents" ]] || [[ -d "$(dirname "${repos[$i]}")/LLM coding agent documents" ]]; then
             has_agents="${C_GREEN}[agents]${C_RESET}"
         else
@@ -6876,7 +6916,7 @@ check_prerequisites_multi_repos() {
         local name="${REPO_NAMES_ARRAY[$i]}"
 
         local doc_dir=""
-        # MULTI-REPO WORKSPACE ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
+        # HARK ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
         if compgen -G "${repo}/*Brain*Agent*.md" > /dev/null 2>&1; then
             doc_dir="$repo"
         elif [[ -d "${repo}/LLM coding agent documents" ]]; then
@@ -7013,7 +7053,7 @@ create_worktrees_multi() {
         WORKTREE_DIRS_ARRAY+=("$wt_dir")
 
         # Rewrite agent instruction file paths inside the worktree's doc dir
-        # MULTI-REPO WORKSPACE ADAPTATION: Brain-file marker + workspace-level shared docs fallback;
+        # HARK ADAPTATION: Brain-file marker + workspace-level shared docs fallback;
         # never rewrite the shared folder (it is canonical, outside the worktree).
         local wt_doc_dir=""
         if compgen -G "${wt_dir}/*Brain*Agent*.md" > /dev/null 2>&1; then
@@ -8500,7 +8540,7 @@ You are generating pull request metadata for a completed code-change request in 
 Read the BUSINESS PROBLEM and the CCR for THIS REPO and produce a single JSON object:
 
 {
-  "commit_message": "<Conventional Commit SUBJECT LINE ONLY. Format: type(scope): description — type is one of feat|fix|docs|style|refactor|perf|test|build|ci|chore. Imperative mood, lower-case description, no trailing period. Example good: 'feat(booking): add seat-hold expiry'. NO newlines, NO body, NO bullets, NO 'Why:' prose. Maximum 160 characters total.>",
+  "commit_message": "<Conventional Commit SUBJECT LINE ONLY. Pattern (Hark standard): [short description of change or fix] in [function name] function. Join multiple functions with 'and' and end in 'functions'. NO type prefix, no trailing period. Single line only — NO newlines, NO body. Maximum 160 characters.>",
   "what": "<2-4 sentences on what THIS repo PR changes>",
   "why": "<2-4 sentences on motivation, referencing cross-repo context if relevant>",
   "how": "<2-4 sentences on implementation approach for this repo>"
@@ -8546,11 +8586,11 @@ PROMPT_BOUNDARY
             commit_msg=$(printf '%s\n' "$commit_msg" | awk 'NF{print; exit}')
         fi
 
-        local conventional_re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?: .+'  # Conventional Commits
+        local conventional_re='^.+ in .+ functions?$'  # HARK commit pattern: [short description] in [function name] function
         local commit_msg_len=${#commit_msg}
         if ! [[ "$commit_msg" =~ $conventional_re ]] || (( commit_msg_len > 160 )); then
             local humanized="${WORKTREE_BRANCH//-/ }"
-            local fallback_msg="chore: ${humanized} (orchestrated change)"
+            local fallback_msg="updated ${humanized} in orchestrated change functions"
             if (( ${#fallback_msg} > 160 )); then
                 fallback_msg="${fallback_msg:0:157}..."
             fi
@@ -8619,13 +8659,16 @@ PROMPT_BOUNDARY
                 echo ""
                 echo "Output a SINGLE markdown document. NO preface, NO commentary, NO trailing notes — your entire response is captured verbatim into the PR body. Start with \`## TL;DR\` on the first line."
                 echo ""
-                echo "The PR body MUST follow the canonical PR template exactly. Read the template spec below and produce every required section in order, with byte-exact headings. The \`## What / Why?\` heading is validated by the PR-description CI check — a missing \`?\` or wrong spacing fails CI."
+                echo "The PR body MUST follow the Baubap canonical PR template exactly. Read the template spec below and produce every required section in order, with byte-exact headings. The \`## What / Why?\` heading is regex-checked by Baubap's PR-description GitHub Action — a missing \`?\` or wrong spacing fails CI."
                 echo ""
                 echo "<pr_template_spec>"
                 cat "$pr_template_file"
                 echo "</pr_template_spec>"
                 echo ""
-                echo "If your project keeps exemplar PRs, mirror their structure (not their prose); otherwise follow the template spec above."
+                echo "Reference exemplars (read the live PRs for shape — do NOT copy prose):"
+                echo "- https://github.com/Baubap/risk-profiles-labelling/pull/60"
+                echo "- https://github.com/Baubap/baubap-airflow-data-eng/pull/444"
+                echo "- https://github.com/Baubap/baubap-airflow-data-eng/pull/434"
                 echo ""
                 echo "Multi-repo context:"
                 echo "- This is PR $((i + 1)) of ${REPO_COUNT} in the same change set."
@@ -8947,7 +8990,7 @@ restore_multi_repo_state() {
         CODING_SESSION_FILES_ARRAY+=("${RUN_DIR}/sessions/coding-repo-${i}.session")
 
         # Resolve ORIGINAL doc dir + brain file (pre-rewrite, still on disk)
-        # MULTI-REPO WORKSPACE ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
+        # HARK ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
         local orig_doc=""
         if compgen -G "${root}/*Brain*Agent*.md" > /dev/null 2>&1; then
             orig_doc="$root"
@@ -8966,7 +9009,7 @@ restore_multi_repo_state() {
         # Resolve WORKTREE doc dir + agent files (paths already rewritten)
         local wt_doc=""
         if [[ -n "$wt" ]] && [[ -d "$wt" ]]; then
-            # MULTI-REPO WORKSPACE ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
+            # HARK ADAPTATION: Brain-file marker + workspace-level shared docs fallback.
             if compgen -G "${wt}/*Brain*Agent*.md" > /dev/null 2>&1; then
                 wt_doc="$wt"
             elif [[ -d "${wt}/LLM coding agent documents" ]]; then
@@ -9385,10 +9428,6 @@ multi_main_flow() {
     run_multi_stage_6
     save_run_state 6
 
-    # Stage 7 (optional, armed by TPM_CONVERSATION_ID) hands the output to the
-    # TPM's own conversation for the phase-5 spot check — detached, non-blocking.
-    run_stage_7
-
     print_summary
     return 0
 }
@@ -9558,10 +9597,6 @@ multi_main_resume_flow() {
         STAGE_6_COMPLETE=true
     fi
 
-    # Stage 7 (optional, armed by TPM_CONVERSATION_ID) hands the output to the
-    # TPM's own conversation for the phase-5 spot check — detached, non-blocking.
-    run_stage_7
-
     print_summary
     return 0
 }
@@ -9577,7 +9612,7 @@ main() {
     local current_root
     current_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
 
-    # ── Multi-repo WORKSPACE-HOST guard (docs-host + nested service repos) ──
+    # ── Multi-repo WORKSPACE-HOST guard (Hark-style layouts) ─────────────────
     # The host repo holds the shared "LLM coding agent documents/" but its
     # deployable code lives in nested SIBLING service repos — each its own .git,
     # which the host repo .gitignores. Running an orchestration against the HOST
@@ -9588,7 +9623,7 @@ main() {
     # repo (the false-green merge-gate failures we kept hitting). When we detect
     # we are sitting in such a host repo, FORCE the selector so a SERVICE repo
     # becomes the worktree target (the selector already excludes the host).
-    # Monorepos (a single repo with no nested sibling .git repos) have no nested
+    # Monorepos (VendeBien, LMO, the consolidated Hark monorepo) have no nested
     # sibling repos, so this never fires for them.
     local _workspace_host=false
     if [[ -n "$current_root" ]]; then
@@ -9604,8 +9639,9 @@ main() {
 
     # Model picker ALWAYS runs — decoupled from repo selection so it is never
     # skipped when the run starts from a repo that already has its docs (the
-    # run-from-root case, where the repo-selection block below is a no-op).
-    # Skipped only on resume, where run_state.json restores the model.
+    # monorepo-from-root case, where the repo-selection block below is a no-op).
+    # Skipped only on resume, where run_state.json restores the model. Matches
+    # the VendeBien/LMO engines, which call select_model_config unconditionally.
     if [[ -z "$RESUME_RUN" ]]; then
         select_model_config
     fi
@@ -9618,7 +9654,11 @@ main() {
     if [[ -z "$RESUME_RUN" ]] && { [[ -z "$current_root" ]] \
         || [[ "$_workspace_host" == "true" ]] \
         || { [[ ! -d "${current_root}/LLM coding agent documents" ]] && [[ ! -f "${current_root}/SERVICE_DOCUMENTATION.md" ]]; }; }; then
-        prompt_repo_count
+        # Hark runs on a single unified monorepo — multi-repo selection is disabled.
+        # prompt_repo_count and the SECTION 19e multi-repo engine remain in the
+        # script but are never invoked; pin the classic single-repo flow.
+        REPO_COUNT=1
+        MULTI_REPO_MODE=false
         if [[ "$MULTI_REPO_MODE" == "true" ]]; then
             select_repos_and_branches_multi
         else
@@ -9872,9 +9912,6 @@ main() {
             STAGE_6_COMPLETE=true
         fi
 
-        # Stage 7 (optional, armed by TPM_CONVERSATION_ID) hands the output to
-        # the TPM's own conversation for the phase-5 spot check — detached,
-        # non-blocking. On resume, arm it via TPM_CONVERSATION_ID=<uuid>.
         run_stage_7
 
         print_summary
@@ -9933,6 +9970,8 @@ main() {
     run_stage_6
     save_run_state 6
 
+    # Orchestration ends after Stage 6: the change is committed and pushed on
+    # its branch (STAGE6_MODE=commit) or opened as a draft PR (STAGE6_MODE=pr).
     # Stage 7 (optional, armed by TPM_CONVERSATION_ID) hands the output to the
     # TPM's own conversation for the phase-5 spot check — detached, non-blocking.
     run_stage_7
