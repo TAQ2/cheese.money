@@ -173,6 +173,20 @@ export const readClaudeAccountIdentity = (raw: string): ClaudeAccountIdentity =>
   };
 };
 
+/**
+ * Which QUOTA a profile draws on, as a cache key for its usage reading.
+ *
+ * Account plus organization, the same pairing the rotation rules treat as one
+ * quota: two directories signed into that pair share a 5-hour window, a weekly
+ * window, and — the reason this exists — one rate-limit bucket. Reading them
+ * separately spends two calls to learn one number and doubles the pressure on
+ * the endpoint that refuses at 429.
+ */
+export const claudeAccountKey = (identity: {
+  readonly email?: string | undefined;
+  readonly organizationName?: string | undefined;
+}): string => `${identity.email ?? ""}|${identity.organizationName ?? ""}`;
+
 /** "default_claude_max_20x" -> "Claude Max Subscription". */
 const subscriptionLabelFromTier = (tier: string | undefined): string | undefined => {
   const normalized = tier?.toLowerCase() ?? "";
@@ -231,6 +245,7 @@ export const probeClaudeProfile = Effect.fn("probeClaudeProfile")(function* (inp
       ? yield* fetchClaudeAccountUsage({
           configDir: input.homePath,
           cliVersion: CLAUDE_USAGE_USER_AGENT_VERSION,
+          accountKey: claudeAccountKey(identity),
         }).pipe(Effect.orElseSucceed(() => ({}) as ClaudeAccountUsageFetch))
       : ({} as ClaudeAccountUsageFetch);
   // The CLI keeps ONE credential per signed-in ACCOUNT, not one per config
@@ -270,6 +285,10 @@ export const probeClaudeProfile = Effect.fn("probeClaudeProfile")(function* (inp
       const borrowed = yield* fetchClaudeAccountUsage({
         configDir: yield* defaultClaudeConfigDirPath(),
         cliVersion: CLAUDE_USAGE_USER_AGENT_VERSION,
+        // Same account and organization by the check above, so the borrowed
+        // read belongs in the same cache slot — asking twice for one quota is
+        // what the rate limiter punishes.
+        accountKey: claudeAccountKey(defaultIdentity),
       }).pipe(Effect.orElseSucceed(() => ({}) as ClaudeAccountUsageFetch));
       if (borrowed.usage) {
         fetched = borrowed;
@@ -283,6 +302,8 @@ export const probeClaudeProfile = Effect.fn("probeClaudeProfile")(function* (inp
     ...(fetched.usage ? { usage: fetched.usage } : {}),
     ...(fetched.unauthorized ? { usageUnauthorized: true } : {}),
     ...(!fetched.usage && fetched.credentialMissing ? { usageCredentialMissing: true } : {}),
+    ...(fetched.rateLimited ? { usageRateLimited: true } : {}),
+    ...(fetched.stale ? { usageStale: true } : {}),
     isCurrent: input.isCurrent,
     isDefaultHome,
   } satisfies ClaudeAccountProfile;

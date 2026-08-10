@@ -64,6 +64,18 @@ export const ClaudeAccountProfile = Schema.Struct({
    * from silence so the row can say "sign in again" instead of nothing.
    */
   usageCredentialMissing: Schema.optionalKey(Schema.Boolean),
+  /**
+   * True when the usage endpoint answered 429. The read failed for a reason
+   * that says NOTHING about the account's headroom, so a reader — human or
+   * rule — must not conclude "no room here" or "nothing to compare against".
+   */
+  usageRateLimited: Schema.optionalKey(Schema.Boolean),
+  /**
+   * True when `usage` is the last good reading rather than a fresh one,
+   * because the live read did not land. Still evidence, and far better than
+   * the paralysis that absent usage causes — but the row says so.
+   */
+  usageStale: Schema.optionalKey(Schema.Boolean),
 });
 export type ClaudeAccountProfile = typeof ClaudeAccountProfile.Type;
 

@@ -48,16 +48,48 @@ const turnsLayer = (running: number) =>
     countRunningSince: () => Effect.succeed(running),
   } as never);
 
+/**
+ * A ProcessRunner that answers the Keychain lookup and the usage call itself.
+ *
+ * The real runner made this suite read the operator's LIVE plan usage: the
+ * verdict changed with the time of day, and every run spent real calls against
+ * `/api/oauth/usage` — the endpoint whose 429s are the reason this reactor
+ * stalled in the first place. Every account is handed the same numbers here, so
+ * no candidate can beat the incumbent and the outcome is fixed.
+ */
+const usageBody = JSON.stringify({
+  five_hour: { utilization: 12, resets_at: "2026-08-10T20:20:00.000Z" },
+  seven_day: { utilization: 30, resets_at: "2026-08-13T06:00:00.000Z" },
+});
+const credentials = JSON.stringify({ claudeAiOauth: { accessToken: "test-token" } });
+
+const processRunnerLayer = Layer.succeed(ProcessRunner.ProcessRunner, {
+  run: (input: { readonly command: string }) =>
+    Effect.succeed({
+      stdout: input.command === "curl" ? `${usageBody}\n200\n{}` : credentials,
+      stderr: "",
+      code: 0,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }),
+} as never);
+
 const testLayer = (running: number) =>
-  Layer.mergeAll(settingsLayer, turnsLayer(running), ProcessRunner.layer).pipe(
+  Layer.mergeAll(settingsLayer, turnsLayer(running), processRunnerLayer).pipe(
     Layer.provideMerge(NodeServices.layer),
   );
 
 describe("Claude account failover reactor", () => {
-  it.effect("does nothing while a turn is in flight", () =>
+  it.effect("writes nothing while a turn is in flight", () =>
     Effect.gen(function* () {
       // The one thing that must never happen: the settings write rebuilds the
       // provider instance, which would kill a reply mid-stream.
+      //
+      // The guard now sits at the COMMIT rather than at the top of the tick —
+      // vetoing the evaluation too starved the feature on a machine that is
+      // never idle. What is asserted here is therefore the property that
+      // matters and always did: an in-flight turn produces no write.
       const decision = yield* runClaudeAccountFailoverOnce();
       expect(decision).toBeUndefined();
 
@@ -80,8 +112,9 @@ describe("Claude account failover reactor", () => {
       // defect that was logged and retried forever — the feature never ran and
       // nothing said so. Reaching a verdict at all proves the wiring resolves.
       const decision = yield* runClaudeAccountFailoverOnce();
-      // No account is over threshold on this machine's fixtures, so the honest
-      // outcome is "no hand-over" — what matters is that it got that far.
+      // Every account reads the same 12%/30% here, so nothing is over the 95%
+      // threshold and the honest outcome is "no hand-over" — what matters is
+      // that it got that far.
       expect(decision).toBeUndefined();
     }).pipe(Effect.provide(testLayer(0))),
   );

@@ -142,6 +142,35 @@ describe("claudeProfileUsageLabel", () => {
     );
     expect(claudeProfileUsageLabel(base)).toBeNull();
   });
+
+  it("says when a row is blank because the read was rate limited", () => {
+    // Blank rows are how three healthy accounts looked while the app refused
+    // to leave an exhausted one — the reader had no way to tell "no data" from
+    // "no room".
+    const base: ClaudeAccountProfile = {
+      homePath: "/Users/conradws/.claudio-aurelio",
+      displayPath: "~/.claudio-aurelio",
+      email: "claudio.aurelio@baubap.com",
+      isCurrent: false,
+      isDefaultHome: false,
+    };
+    expect(claudeProfileUsageLabel({ ...base, usageRateLimited: true })).toBe(
+      "usage read rate limited — retrying",
+    );
+  });
+
+  it("marks a cached reading as cached", () => {
+    const cached: ClaudeAccountProfile = {
+      homePath: "/Users/conradws/.claudio-aurelio",
+      displayPath: "~/.claudio-aurelio",
+      email: "claudio.aurelio@baubap.com",
+      isCurrent: false,
+      isDefaultHome: false,
+      usage: { sessionPercent: 12, weekPercent: 66 },
+      usageStale: true,
+    };
+    expect(claudeProfileUsageLabel(cached)).toBe("session 12% · week 66% · cached");
+  });
 });
 
 describe("recommended account", () => {
@@ -218,14 +247,63 @@ describe("recommended account", () => {
     };
     expect(recommendClaudeAccount({ profiles: [unknown, expiringSoon], nowMs })).toBeNull();
   });
+
+  it("never claims a comparison it could not make", () => {
+    // The live failure, 2026-08-10: the account in use sat at 100% of its
+    // 5-hour window, every rival's usage read came back 429, and the panel
+    // answered "no other account beats that by enough to be worth a switch" —
+    // a verdict on accounts it had no number for. `~/.claudio-aurelio` was at
+    // 12% at that moment.
+    const exhausted: ClaudeAccountProfile = {
+      ...current,
+      usage: { sessionPercent: 100, weekPercent: 36, weekResetsAt: inDays(6) },
+    };
+    const unreadable: ClaudeAccountProfile = {
+      homePath: "/Users/conradws/.claudio-aurelio",
+      displayPath: "~/.claudio-aurelio",
+      email: "claudio.aurelio@baubap.com",
+      organizationName: "claudio.aurelio@baubap.com's Organization",
+      isCurrent: false,
+      isDefaultHome: false,
+      usageRateLimited: true,
+    };
+    const recommendation = recommendClaudeAccount({
+      profiles: [exhausted, unreadable],
+      nowMs,
+    });
+    expect(recommendation?.isCurrent).toBe(true);
+    expect(recommendation?.detail).toContain("No other account's usage could be read");
+    expect(recommendation?.detail).toContain("rate limiting");
+    expect(recommendation?.detail).not.toContain("beats that by enough");
+  });
+
+  it("still compares when a rival's number is merely cached", () => {
+    // Stale is evidence; absent is not. A cached reading must keep driving the
+    // recommendation, or a rate-limited fleet is paralysed exactly as before.
+    const exhausted: ClaudeAccountProfile = {
+      ...current,
+      usage: { sessionPercent: 100, weekPercent: 36, weekResetsAt: inDays(6) },
+    };
+    const recommendation = recommendClaudeAccount({
+      profiles: [exhausted, { ...expiringSoon, usageStale: true }],
+      nowMs,
+    });
+    expect(recommendation?.homePath).toBe(expiringSoon.homePath);
+    expect(recommendation?.isCurrent).toBe(false);
+  });
 });
 
 describe("recommended account — incumbent about to stall", () => {
   // The live state that exposed the bug: the account in use held the most
   // expiring weekly allowance (24%/day vs 14%/day) and so read as "already
-  // ideal", while its 5-hour window sat at 91% — past the 85% escape, meaning
-  // the rotation reactor was about to rest it. The highlight and the reactor
+  // ideal", while its 5-hour window was past the session escape, meaning the
+  // rotation reactor was about to rest it. The highlight and the reactor
   // disagreed, which is precisely what this button exists to rule out.
+  //
+  // The escape sits at ROTATION_SESSION_ESCAPE_PERCENT (99), not the 85 this
+  // block was first written against — between 60 and 99 the margin rules
+  // already run every two minutes, and above 98 failover takes over. The
+  // fixtures below track that constant.
   const nowMs = Date.parse("2026-08-06T23:30:00.000Z");
 
   const exhaustingSession: ClaudeAccountProfile = {
@@ -235,7 +313,7 @@ describe("recommended account — incumbent about to stall", () => {
     organizationName: "Baubap",
     isCurrent: true,
     isDefaultHome: false,
-    usage: { sessionPercent: 91, weekPercent: 64, weekResetsAt: "2026-08-08T12:00:00.000Z" },
+    usage: { sessionPercent: 99, weekPercent: 64, weekResetsAt: "2026-08-08T12:00:00.000Z" },
   };
 
   const rested: ClaudeAccountProfile = {
@@ -271,6 +349,24 @@ describe("recommended account — incumbent about to stall", () => {
       nowMs,
     });
     expect(recommendation?.homePath).toBe("/Users/conradws/.claude-work");
+    expect(recommendation?.isCurrent).toBe(true);
+  });
+
+  it("keeps the seat at 91% — the documented trade, not an oversight", () => {
+    // Between the stickiness threshold and the escape, an incumbent holding
+    // the most expiring allowance keeps spending it; failover owns it from 98%.
+    // Pinned so a future reading of "91% should have switched" has to change
+    // the constant deliberately rather than by accident.
+    const recommendation = recommendClaudeAccount({
+      profiles: [
+        {
+          ...exhaustingSession,
+          usage: { sessionPercent: 91, weekPercent: 64, weekResetsAt: "2026-08-08T12:00:00.000Z" },
+        },
+        rested,
+      ],
+      nowMs,
+    });
     expect(recommendation?.isCurrent).toBe(true);
   });
 });

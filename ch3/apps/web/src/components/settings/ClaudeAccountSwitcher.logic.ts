@@ -139,6 +139,27 @@ export function recommendClaudeAccount(input: {
     return { homePath: decision.to.homePath, detail: decision.reason, isCurrent: false };
   }
 
+  // "No better account" and "no account I could read" are different answers,
+  // and only one of them is a comparison. Saying the first when the second is
+  // true is what this panel did while the account in use sat at 100% of its
+  // 5-hour window and a sibling sat at 12%: every rival's usage read had come
+  // back 429, so nothing was ever weighed, and the sentence claimed it was.
+  const rivals = input.profiles.filter(
+    (profile) => !profile.isCurrent && isSignedInClaudeProfile(profile),
+  );
+  if (rivals.length > 0 && !rivals.some((profile) => profile.usage)) {
+    const rateLimited = rivals.some((profile) => profile.usageRateLimited === true);
+    return {
+      homePath: current.homePath,
+      isCurrent: true,
+      detail:
+        `No other account's usage could be read${
+          rateLimited ? " — the usage endpoint is rate limiting these reads" : ""
+        }, so ${claudeProfilePrimaryLabel(current)} stays in use by default. ` +
+        `Nothing was compared. Refresh in a few minutes, or switch by hand.`,
+    };
+  }
+
   const rate = weeklyBurnableRate({
     weekPercent: current.usage.weekPercent,
     weekResetsAt: current.usage.weekResetsAt,
@@ -157,17 +178,23 @@ export function recommendClaudeAccount(input: {
 export function claudeProfileUsageLabel(profile: ClaudeAccountProfile): string | null {
   const usage = profile.usage;
   if (!usage) {
-    // The two knowable failure states are worth saying out loud: without
-    // this, a dead account and a merely-unread one both show nothing, and
-    // the reader cannot tell why their turns are failing. Genuine silence
-    // (network hiccup) still shows nothing.
+    // The knowable failure states are worth saying out loud: without this, a
+    // dead account, a rate-limited one and a merely-unread one all show
+    // nothing, and the reader cannot tell why their turns are failing — or
+    // why the app is refusing to switch to a row that looks perfectly fine.
+    // Genuine silence (network hiccup) still shows nothing.
     if (profile.usageUnauthorized === true) return "session expired — sign in again";
     if (profile.usageCredentialMissing === true) return "sign in again to see usage";
+    if (profile.usageRateLimited === true) return "usage read rate limited — retrying";
     return null;
   }
   const sessionReset = usage.sessionResetsAt ? formatSessionReset(usage.sessionResetsAt) : null;
   const session = `session ${Math.round(usage.sessionPercent)}%${
     sessionReset ? ` · resets ${sessionReset}` : ""
   }`;
-  return `${session} · week ${Math.round(usage.weekPercent)}%`;
+  // A cached reading is still the number the rules are acting on, so it is
+  // shown — labelled, never silently passed off as current.
+  return `${session} · week ${Math.round(usage.weekPercent)}%${
+    profile.usageStale === true ? " · cached" : ""
+  }`;
 }

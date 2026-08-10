@@ -36,6 +36,7 @@ import {
   resetClaudeAuthFailureSignal,
 } from "../Drivers/claudeAuthFailureSignal.ts";
 import {
+  ROTATION_SESSION_ESCAPE_PERCENT,
   chooseClaudeRotationTarget,
   rotationEngaged,
   type RotationPhase,
@@ -170,10 +171,13 @@ export const runClaudeAccountFailoverOnce = Effect.fn("runClaudeAccountFailoverO
   const before = yield* readFailoverSettings();
   if (!before?.failoverEnabled) return undefined;
 
-  // Never mid-reply: the instance rebuild would kill the stream. Between turns
-  // the same rebuild is harmless, so this only ever delays by a tick. Checked
-  // again after the network work below, because a turn can start meanwhile.
-  if (yield* turnInFlight()) return undefined;
+  // The mid-reply guard lives at the COMMIT, not here. Vetoing the evaluation
+  // as well starves the whole feature for anyone whose machine is rarely
+  // idle: measured over one 26-minute window on this machine, 28 of 39 ticks
+  // returned inside 40ms at this exact line, having decided nothing, while the
+  // account in use sat at 100% of its 5-hour window. Evaluating costs a cached
+  // usage read now, so the loop can arrive at an answer and hold it ready for
+  // the first gap between turns instead of never forming one.
 
   // Cheap first pass: identities only, no network.
   const known = yield* listClaudeAccountProfiles({
@@ -243,7 +247,20 @@ export const runClaudeAccountFailoverOnce = Effect.fn("runClaudeAccountFailoverO
         profiles: [current, ...candidates],
         thresholdPercent: before.thresholdPercent,
       });
-  if (!decision) return undefined;
+  if (!decision) {
+    // The incumbent is out of headroom by this point — every path above
+    // returned otherwise. Staying put because no sibling's usage could be READ
+    // is the failure this feature exists to prevent, and it used to happen in
+    // total silence.
+    if (!candidates.some((profile) => profile.usage)) {
+      yield* Effect.logWarning("claude.account.failover.no-readable-candidate", {
+        from: current.displayPath,
+        candidates: candidates.length,
+        rateLimited: candidates.filter((profile) => profile.usageRateLimited === true).length,
+      });
+    }
+    return undefined;
+  }
 
   return yield* commitClaudeAccountSwitch({
     before,
@@ -346,8 +363,9 @@ export const runClaudeAccountRotationOnce = Effect.fn("runClaudeAccountRotationO
   const before = yield* readFailoverSettings();
   if (!before?.rotationEnabled) return undefined;
 
-  // Never mid-reply, same contract as failover.
-  if (yield* turnInFlight()) return undefined;
+  // Mid-reply is the COMMIT's guard, not this one — see the note in
+  // runClaudeAccountFailoverOnce. Evaluating always is what lets the answer be
+  // ready for the first quiet moment.
 
   const known = yield* listClaudeAccountProfiles({
     configuredHomePath: before.currentHomePath,
@@ -381,7 +399,22 @@ export const runClaudeAccountRotationOnce = Effect.fn("runClaudeAccountRotationO
 
   const nowMs = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
   const decision = chooseClaudeRotationTarget({ profiles: [current, ...others], nowMs, phase });
-  if (!decision) return undefined;
+  if (!decision) {
+    // Same silence, same harm as in failover: an incumbent past its session
+    // escape stays seated only because nobody's usage could be read.
+    if (
+      current.usage.sessionPercent >= ROTATION_SESSION_ESCAPE_PERCENT &&
+      !others.some((profile) => profile.usage)
+    ) {
+      yield* Effect.logWarning("claude.account.rotation.no-readable-candidate", {
+        from: current.displayPath,
+        sessionPercent: current.usage.sessionPercent,
+        candidates: others.length,
+        rateLimited: others.filter((profile) => profile.usageRateLimited === true).length,
+      });
+    }
+    return undefined;
+  }
 
   return yield* commitClaudeAccountSwitch({
     before,
