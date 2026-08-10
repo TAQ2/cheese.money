@@ -5,7 +5,7 @@ import type {
   DesktopPreviewTabState,
 } from "@ch3tools/contracts";
 import { exposeClerkBridge } from "@clerk/electron/preload";
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
 
@@ -44,6 +44,17 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   },
   getLocalEnvironmentBearerToken: () =>
     ipcRenderer.invoke(IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL),
+  // Synchronous and local: webUtils reads the path Chromium already attached to
+  // the drag, with no main-process round trip. Returns null rather than
+  // throwing for a File that has no path, so callers can fall back.
+  getPathForFile: (file: File) => {
+    try {
+      const path = webUtils.getPathForFile(file);
+      return path.length > 0 ? path : null;
+    } catch {
+      return null;
+    }
+  },
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) =>
     ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),

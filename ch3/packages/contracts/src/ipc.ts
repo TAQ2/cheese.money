@@ -965,6 +965,13 @@ export interface DesktopBridge {
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
   getLocalEnvironmentBearerToken: () => Promise<string>;
+  /**
+   * Absolute filesystem path of a dropped or pasted `File`, or null when it has
+   * none (a synthetic blob, or a browser build where the renderer never sees
+   * one). Electron removed `File.path`, so this goes through `webUtils` in the
+   * preload — the renderer cannot reach it directly.
+   */
+  getPathForFile?: (file: File) => string | null;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   getConnectionCatalog?: () => Promise<string | null>;

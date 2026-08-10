@@ -54,6 +54,7 @@ import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
 } from "./composerMentionDrag";
+import { composerTextForDroppedPaths, resolveDroppedFilePaths } from "./droppedFilePaths";
 import {
   type ComposerImageAttachment,
   type DraftId,
@@ -2720,7 +2721,40 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     dragDepthRef.current = 0;
     setIsDragOverComposer(false);
     const files = Array.from(event.dataTransfer.files);
-    void addComposerImages(files);
+    // Images attach; anything else contributes its PATH to the prompt. Dragging
+    // a document in used to be answered with "Unsupported file type … attach
+    // image files only", which refused the one thing the drag was asking for.
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const otherFiles = files.filter((file) => !file.type.startsWith("image/"));
+    if (imageFiles.length > 0) {
+      void addComposerImages(imageFiles);
+    }
+    if (otherFiles.length > 0) {
+      // Read before any await: the DataTransfer is neutered once the event
+      // handler returns, so its uri-list has to be taken now.
+      const { paths, unresolved } = resolveDroppedFilePaths({
+        files: otherFiles,
+        uriList: event.dataTransfer.getData("text/uri-list"),
+        ...(window.desktopBridge?.getPathForFile
+          ? { getPathForFile: window.desktopBridge.getPathForFile }
+          : {}),
+      });
+      if (paths.length > 0) {
+        insertComposerTextAtEnd(composerTextForDroppedPaths(paths), {
+          ensureLeadingBoundary: true,
+        });
+      }
+      // Only what genuinely could not be resolved is reported, and it names the
+      // real problem — no path — instead of blaming the file's type.
+      if (unresolved.length > 0 && activeThreadId) {
+        setThreadError(
+          activeThreadId,
+          unresolved.length === 1
+            ? `Could not read a path for '${unresolved[0]}'. Attach it as an image, or paste its path.`
+            : `Could not read paths for ${unresolved.length} dropped files. Paste their paths instead.`,
+        );
+      }
+    }
     focusComposer();
   };
 
