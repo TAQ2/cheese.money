@@ -86,11 +86,22 @@ function writeSystemMessage(terminal: Terminal, message: string): void {
   terminal.write(`\r\n[terminal] ${message}\r\n`);
 }
 
-function writeTerminalBuffer(terminal: Terminal, buffer: string): void {
+/**
+ * Replay a whole buffer over a reset terminal.
+ *
+ * `onParsed` runs once the replay has actually been parsed. xterm's `write` is
+ * ASYNCHRONOUS — it queues — so anything reading `buffer.active.baseY` right
+ * after the call sees the PRE-write state. Restoring a scroll position from that
+ * stale number scrolls to the wrong line, which looks identical to the jank it
+ * is meant to fix.
+ */
+function writeTerminalBuffer(terminal: Terminal, buffer: string, onParsed?: () => void): void {
   terminal.write("\u001bc");
   if (buffer.length > 0) {
-    terminal.write(buffer);
+    terminal.write(buffer, onParsed);
+    return;
   }
+  onParsed?.();
 }
 
 function fitTerminalSafely(fitAddon: FitAddon): boolean {
@@ -221,6 +232,23 @@ function getTerminalSelectionRect(mountElement: HTMLElement): DOMRect | null {
 
   const boundingRect = range.getBoundingClientRect();
   return boundingRect.width > 0 || boundingRect.height > 0 ? boundingRect : null;
+}
+
+/**
+ * Where a viewport should sit after the whole buffer is replayed.
+ *
+ * The reader's position is "N lines back from the newest output", never an
+ * absolute line: a replay renumbers every line in the buffer. Returning null
+ * means "leave it alone" — the viewport was already following the tail, which
+ * is the case xterm handles by itself.
+ */
+export function terminalScrollRestoreLine(
+  before: { readonly viewportY: number; readonly baseY: number },
+  baseYAfter: number,
+): number | null {
+  if (before.viewportY >= before.baseY) return null;
+  const linesFromBottom = Math.max(0, before.baseY - before.viewportY);
+  return Math.max(0, baseYAfter - linesFromBottom);
 }
 
 export function resolveTerminalSelectionActionPosition(options: {
@@ -758,11 +786,37 @@ export function TerminalViewport({
       current.buffer.length >= previous.buffer.length &&
       current.buffer.startsWith(previous.buffer)
     ) {
+      // Appending BELOW the viewport invalidates neither the scroll position
+      // (xterm only follows the tail when the viewport is already at the
+      // bottom) nor a selection made above it. This path therefore touches
+      // neither — it used to clear the selection unconditionally, which is why
+      // a highlight vanished the instant any output arrived.
       terminal.write(current.buffer.slice(previous.buffer.length));
     } else {
-      writeTerminalBuffer(terminal, current.buffer);
+      // The buffer diverged — the server trimmed its head past our scrollback
+      // cap, so the tail cannot simply be appended. `writeTerminalBuffer`
+      // issues RIS (c) and replays everything, which discards scrollback
+      // and slams the viewport to the bottom. That is the jank: on a busy
+      // terminal the head is trimmed continuously, so every scroll-up was
+      // yanked back down within a second or two, mid-gesture.
+      //
+      // Distance from the BOTTOM is the thing to preserve, not the absolute
+      // line: the replay renumbers every line, and what the reader is looking
+      // at is "N screens back from the newest output".
+      const before = {
+        viewportY: terminal.buffer.active.viewportY,
+        baseY: terminal.buffer.active.baseY,
+      };
+      // A selection cannot survive RIS — its coordinates address lines that no
+      // longer exist — so this is the one path that must drop it.
+      terminal.clearSelection();
+      writeTerminalBuffer(terminal, current.buffer, () => {
+        const active = terminalRef.current?.buffer.active;
+        if (!active) return;
+        const line = terminalScrollRestoreLine(before, active.baseY);
+        if (line !== null) terminalRef.current?.scrollToLine(line);
+      });
     }
-    terminal.clearSelection();
 
     if (current.error !== null && current.error !== previous.error) {
       writeSystemMessage(terminal, current.error);

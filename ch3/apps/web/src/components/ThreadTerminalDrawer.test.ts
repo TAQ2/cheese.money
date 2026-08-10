@@ -4,6 +4,7 @@ import {
   resolveTerminalSelectionActionPosition,
   shouldHandleTerminalSelectionMouseUp,
   terminalSelectionActionDelayForClickCount,
+  terminalScrollRestoreLine,
 } from "./ThreadTerminalDrawer";
 
 describe("resolveTerminalSelectionActionPosition", () => {
@@ -71,5 +72,28 @@ describe("resolveTerminalSelectionActionPosition", () => {
     expect(shouldHandleTerminalSelectionMouseUp(true, 0)).toBe(true);
     expect(shouldHandleTerminalSelectionMouseUp(false, 0)).toBe(false);
     expect(shouldHandleTerminalSelectionMouseUp(true, 1)).toBe(false);
+  });
+});
+
+describe("terminalScrollRestoreLine", () => {
+  it("leaves a tail-following viewport alone", () => {
+    // Already at the bottom: xterm keeps following on its own, and forcing a
+    // scroll here is what made the view twitch on every write.
+    expect(terminalScrollRestoreLine({ viewportY: 500, baseY: 500 }, 480)).toBeNull();
+    expect(terminalScrollRestoreLine({ viewportY: 501, baseY: 500 }, 480)).toBeNull();
+  });
+
+  it("preserves distance from the bottom across a replay that renumbers lines", () => {
+    // The reader was 120 lines back. The server trimmed its head, so the same
+    // content now sits at a lower absolute line — 120 back from the NEW bottom
+    // is the only reading of "where I was" that survives the renumbering.
+    expect(terminalScrollRestoreLine({ viewportY: 380, baseY: 500 }, 460)).toBe(340);
+    expect(terminalScrollRestoreLine({ viewportY: 380, baseY: 500 }, 500)).toBe(380);
+  });
+
+  it("clamps to the top when the trim swallowed everything above the viewport", () => {
+    // 400 lines back but only 60 lines survive: scrolling to a negative line
+    // throws in xterm, and the honest answer is the top of the buffer.
+    expect(terminalScrollRestoreLine({ viewportY: 100, baseY: 500 }, 60)).toBe(0);
   });
 });
