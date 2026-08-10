@@ -91,7 +91,9 @@ export const make = Effect.gen(function* () {
           }),
         );
       const raw = yield* readAt(filePath).pipe(
-        Effect.flatMap((primary) => (Option.isSome(primary) ? Effect.succeed(primary) : readAt(legacyFilePath))),
+        Effect.flatMap((primary) =>
+          Option.isSome(primary) ? Effect.succeed(primary) : readAt(legacyFilePath),
+        ),
       );
       if (Option.isNone(raw)) {
         return Option.none<CH3ProjectFile>();

@@ -217,9 +217,9 @@
     "test": "vp test run"
   },
   "dependencies": {
+    "@ch3tools/contracts": "workspace:*",
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
-    "@ch3tools/contracts": "workspace:*",
     "effect": "catalog:",
     "jose": "catalog:",
     "yaml": "catalog:"

@@ -97,9 +97,7 @@ const IN_FLIGHT_TURN_HORIZON = Duration.hours(2);
 const turnInFlight = Effect.fn("claude.account.turnInFlight")(function* () {
   const turns = yield* ProjectionTurnRepository;
   const since = yield* DateTime.now.pipe(
-    Effect.map((now) =>
-      DateTime.formatIso(DateTime.subtractDuration(now, IN_FLIGHT_TURN_HORIZON)),
-    ),
+    Effect.map((now) => DateTime.formatIso(DateTime.subtractDuration(now, IN_FLIGHT_TURN_HORIZON))),
   );
   const running = yield* turns.countRunningSince(since).pipe(Effect.orElseSucceed(() => 1));
   return running > 0;

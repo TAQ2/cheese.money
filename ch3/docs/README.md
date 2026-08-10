@@ -36,6 +36,8 @@ policy in [CONTRIBUTING.md](../CONTRIBUTING.md); agent rules in [AGENTS.md](../A
 ### Runbooks
 
 - [Release](./operations/release.md)
+- [Build & install CH3 Desktop locally](./operations/desktop-build-install.md)
 - [Observability](./operations/observability.md)
 - [Relay observability](./operations/relay-observability.md)
 - [Mobile app store screenshots](./operations/mobile-app-store-screenshots.md)
+- [TLS env leak & title routing](./operations/tls-env-leak-title-routing.md) — incident postmortem

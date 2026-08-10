@@ -1,6 +1,6 @@
 <!-- ditto profile:start -->
 # Conrad — working profile
-Mined from 290 real coding sessions (Jun–Jul 2026), every law receipt-backed.
+Mined from 290 real coding sessions (Jun–Jul 2026), every law receipt-backed. Load before any task.
 
 ## Work laws
 
@@ -14,7 +14,7 @@ Mined from 290 real coding sessions (Jun–Jul 2026), every law receipt-backed.
    - Action: install deps, wire configs, run the commands. Return with it done.
 
 3. **Never stall.** Unattended runs never ask, never wait. Resolve ambiguity with the
-   safest reasoned default and document: what was ambiguous, options weighed, decision
+   safest reasoned default and document: what was ambiguous, options weighed, choice
    made. A documented decision is the deliverable; a hang is a failure.
 
 4. **Minimum entropy.** Every change shrinks the system or refuses to grow it. Edit

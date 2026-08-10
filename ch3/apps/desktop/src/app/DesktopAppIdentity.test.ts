@@ -127,9 +127,7 @@ const withIdentity = <A, E, R>(
             exists: (path) =>
               input.legacyPathProbeError
                 ? Effect.fail(input.legacyPathProbeError)
-                : Effect.succeed(
-                    input.legacyPathExists === true && path.includes("CH3 (Alpha)"),
-                  ),
+                : Effect.succeed(input.legacyPathExists === true && path.includes("CH3 (Alpha)")),
             readFileString: () =>
               Effect.succeed(input.packageJson ?? '{"ch3CommitHash":"abcdef1234567890"}'),
           }),

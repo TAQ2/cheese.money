@@ -31,9 +31,9 @@ describe("isTransportConnectionErrorMessage", () => {
   });
 
   it("returns true for the CH3 server WebSocket message", () => {
-    expect(isTransportConnectionErrorMessage("Unable to connect to the CH3 server WebSocket.")).toBe(
-      true,
-    );
+    expect(
+      isTransportConnectionErrorMessage("Unable to connect to the CH3 server WebSocket."),
+    ).toBe(true);
   });
 
   it("returns true for ping timeout", () => {

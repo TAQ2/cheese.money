@@ -41,7 +41,7 @@ The server resolves its capability once at startup and publishes it in the envir
 
 | Advertised value  | Process shape                                                                                 | Client behavior                                                       |
 | ----------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `boot-service`    | Linux server running under the CH3-managed systemd user service                                | Call the update RPC; the service unit is replaced and restarted.      |
+| `boot-service`    | Linux server running under the CH3-managed systemd user service                               | Call the update RPC; the service unit is replaced and restarted.      |
 | `respawn`         | Published npm CLI running in the foreground on macOS or Linux                                 | Call the update RPC; the process hands off to a detached replacement. |
 | `desktop-managed` | Backend supervised by the desktop app                                                         | Tell the user to update the desktop app on the server machine.        |
 | absent            | Older server, development checkout, Windows foreground process, or an unrecognized supervisor | Offer the exact manual relaunch command.                              |

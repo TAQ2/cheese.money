@@ -18,7 +18,7 @@ settings tab. See `FORK-SETUP.md` for the build/install runbook.
 `LICENSE` is unmodified MIT with T3 Tools Inc.'s original copyright notice.
 Two reasons this stayed rather than being rewritten or dropped, in case that
 choice ever needs re-litigating: the code under it isn't ours to relicense —
-MIT permits broad reuse but *conditions* that permission on keeping the notice
+MIT permits broad reuse but _conditions_ that permission on keeping the notice
 intact, so removing it doesn't make the obligation disappear, it makes the
 copy unlicensed; and this repo is public on GitHub (`TAQ2/cheese.money`), not
 private, so "internal, shared with one colleague" doesn't describe its actual
@@ -35,7 +35,7 @@ gone; none of that carried the same weight.
   in-editor AI context. Pristine copies of other people's already-public code,
   easy to refetch if ever needed.
 - **`node_modules/`, `release/`, `native/**/target/`** — regenerable build
-  output, excluded the same way upstream's own `.gitignore` excludes them.
+output, excluded the same way upstream's own `.gitignore` excludes them.
 
 ## Required follow-ups this fold-in could not finish
 
@@ -56,7 +56,7 @@ gone; none of that carried the same weight.
   macOS Dock icon was addressed (by hand, as above). The `Assets/text.svg`
   used by Icon Composer.icon is the one CH3-rebranded source; the
   platform-specific derived files still show the old black/white T3 mark.
-  The *source* is rebranded — `assets/prod/logo.svg`,
+  The _source_ is rebranded — `assets/prod/logo.svg`,
   `assets/prod/app-icon.icon/{icon.json,Assets/text.svg}` — but the shipped
   favicons, `apple-touch-icon`, Windows `.ico`, and macOS `.icns` are
   pre-rendered exports of that source, produced by Icon Composer 2 (macOS-only

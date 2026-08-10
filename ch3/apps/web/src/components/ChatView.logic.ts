@@ -10,16 +10,23 @@ import {
   type ThreadId,
   type TurnId,
 } from "@ch3tools/contracts";
+import type { PreviewAnnotationPayload } from "@ch3tools/contracts";
+import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@ch3tools/shared/model";
 import { type ChatMessage, type SessionPhase, type Thread, type ThreadShell } from "../types";
 import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
 import * as Schema from "effect/Schema";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
 import {
+  appendTerminalContextsToPrompt,
   filterTerminalContextsWithText,
   stripInlineTerminalContextPlaceholders,
   type TerminalContextDraft,
 } from "../lib/terminalContext";
+import { appendElementContextsToPrompt, type ElementContextDraft } from "../lib/elementContext";
+import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
+import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
+import { getProviderModelCapabilities } from "../providerModels";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "ch3:last-invoked-script-by-project";
@@ -291,6 +298,61 @@ export function deriveComposerSendState(options: {
       sendableTerminalContexts.length > 0 ||
       elementContextCount > 0,
   };
+}
+
+export const IMAGE_ONLY_BOOTSTRAP_PROMPT =
+  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
+
+/**
+ * Composes the exact text a turn is sent with: attached contexts appended in
+ * send order, then the provider's prompt-injected effort prefix.
+ *
+ * Shared so a send dispatched from the background queue is byte-identical to
+ * one dispatched from the composer — the queue snapshots the result of this,
+ * which is why it does not need the live component afterwards.
+ */
+/** Applies the provider's prompt-injected effort prefix to an outgoing message. */
+export function formatOutgoingPrompt(params: {
+  provider: ProviderDriverKind;
+  model: string | null;
+  models: ReadonlyArray<ServerProvider["models"][number]>;
+  effort: string | null;
+  text: string;
+}): string {
+  const capabilities = getProviderModelCapabilities(params.models, params.model, params.provider);
+  return applyClaudePromptEffortPrefix(
+    params.text,
+    resolvePromptInjectedEffort(capabilities, params.effort),
+  );
+}
+
+export function buildOutgoingTurnText(input: {
+  prompt: string;
+  terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  elementContexts: ReadonlyArray<ElementContextDraft>;
+  previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
+  reviewComments: ReadonlyArray<ReviewCommentContext>;
+  provider: ProviderDriverKind;
+  model: string | null;
+  models: ReadonlyArray<ServerProvider["models"][number]>;
+  effort: string | null;
+}): string {
+  const withContexts = appendElementContextsToPrompt(
+    appendTerminalContextsToPrompt(input.prompt, input.terminalContexts),
+    input.elementContexts,
+  );
+  const withAnnotations = input.previewAnnotations.reduce(
+    (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
+    withContexts,
+  );
+  const text = appendReviewCommentsToPrompt(withAnnotations, input.reviewComments);
+  return formatOutgoingPrompt({
+    provider: input.provider,
+    model: input.model,
+    models: input.models,
+    effort: input.effort,
+    text: text || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+  });
 }
 
 export function buildExpiredTerminalContextToastCopy(

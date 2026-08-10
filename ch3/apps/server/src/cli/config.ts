@@ -98,7 +98,9 @@ const EnvServerConfig = Config.all({
   otlpExportIntervalMs: Config.int("CH3CODE_OTLP_EXPORT_INTERVAL_MS").pipe(
     Config.withDefault(10_000),
   ),
-  otlpServiceName: Config.string("CH3CODE_OTLP_SERVICE_NAME").pipe(Config.withDefault("ch3-server")),
+  otlpServiceName: Config.string("CH3CODE_OTLP_SERVICE_NAME").pipe(
+    Config.withDefault("ch3-server"),
+  ),
   mode: Config.schema(ServerConfig.RuntimeMode, "CH3CODE_MODE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),

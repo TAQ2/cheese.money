@@ -2,10 +2,12 @@ import {
   type ModelCapabilities,
   type OpenCodeSettings,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@ch3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 
 import { createModelCapabilities } from "@ch3tools/shared/model";
@@ -22,13 +24,18 @@ import {
   openCodeRuntimeErrorDetail,
   type OpenCodeInventory,
 } from "../opencodeRuntime.ts";
-import type { Agent, ProviderListResponse } from "@opencode-ai/sdk/v2";
+import type { Agent, Command as OpenCodeCommand, ProviderListResponse } from "@opencode-ai/sdk/v2";
 
 const OPENCODE_PRESENTATION = {
   displayName: "OpenCode",
   showInteractionModeToggle: false,
 } as const;
 const MINIMUM_OPENCODE_VERSION = "1.14.19";
+
+/** See the timeout note at its use site in `checkOpenCodeProviderStatus`. */
+const OPENCODE_COMMAND_SERVER_START_TIMEOUT_MS = 10_000;
+/** Must stay ABOVE the start timeout — see the note at its use site. */
+const OPENCODE_COMMAND_PROBE_TIMEOUT = Duration.seconds(20);
 
 class OpenCodeProbeError extends Data.TaggedError("OpenCodeProbeError")<{
   readonly cause: unknown;
@@ -250,6 +257,39 @@ function flattenOpenCodeModels(input: OpenCodeInventory): ReadonlyArray<ServerPr
   return models.toSorted((left, right) => left.name.localeCompare(right.name));
 }
 
+/**
+ * OpenCode's command shape reduced to the contract's.
+ *
+ * `hints` is OpenCode's list of argument hints; the composer shows a single
+ * placeholder, so only the first is carried. Names arrive without a leading
+ * slash from `/command` and the contract stores them the same way, so nothing
+ * is stripped here — a name that did arrive with one would produce `//name` in
+ * the menu, which is why it is trimmed defensively.
+ *
+ * Skills appear in this list too (`source: "skill"`), which is correct: in
+ * OpenCode a skill IS invocable as a slash command, and the composer is the
+ * only place the user would look for it.
+ */
+export function toServerProviderSlashCommands(
+  commands: ReadonlyArray<OpenCodeCommand>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const mapped: Array<ServerProviderSlashCommand> = [];
+  const seen = new Set<string>();
+  for (const command of commands) {
+    const name = command.name?.trim().replace(/^\/+/, "") ?? "";
+    if (name.length === 0 || seen.has(name)) continue;
+    seen.add(name);
+    const description = command.description?.trim();
+    const hint = command.hints?.find((entry) => entry.trim().length > 0)?.trim();
+    mapped.push({
+      name,
+      ...(description && description.length > 0 ? { description } : {}),
+      ...(hint ? { input: { hint } } : {}),
+    });
+  }
+  return mapped.toSorted((left, right) => left.name.localeCompare(right.name));
+}
+
 export const makePendingOpenCodeProvider = (
   openCodeSettings: OpenCodeSettings,
 ): Effect.Effect<ServerProviderDraft> =>
@@ -390,26 +430,34 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     }
   }
 
+  const withServerClient = <A, E>(
+    use: (
+      client: ReturnType<typeof openCodeRuntime.createOpenCodeSdkClient>,
+    ) => Effect.Effect<A, E>,
+  ) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* openCodeRuntime.connectToOpenCodeServer({
+          binaryPath: openCodeSettings.binaryPath,
+          serverUrl: openCodeSettings.serverUrl,
+          environment: resolvedEnvironment,
+          timeoutMs: OPENCODE_COMMAND_SERVER_START_TIMEOUT_MS,
+        });
+        return yield* use(
+          openCodeRuntime.createOpenCodeSdkClient({
+            baseUrl: server.url,
+            directory: cwd,
+            ...(openCodeSettings.serverPassword
+              ? { serverPassword: openCodeSettings.serverPassword }
+              : {}),
+          }),
+        );
+      }),
+    );
+
   const inventoryExit = yield* Effect.exit(
     (isExternalServer
-      ? Effect.scoped(
-          Effect.gen(function* () {
-            const server = yield* openCodeRuntime.connectToOpenCodeServer({
-              binaryPath: openCodeSettings.binaryPath,
-              serverUrl: openCodeSettings.serverUrl,
-              environment: resolvedEnvironment,
-            });
-            return yield* openCodeRuntime.loadOpenCodeInventory(
-              openCodeRuntime.createOpenCodeSdkClient({
-                baseUrl: server.url,
-                directory: cwd,
-                ...(openCodeSettings.serverPassword
-                  ? { serverPassword: openCodeSettings.serverPassword }
-                  : {}),
-              }),
-            );
-          }),
-        )
+      ? withServerClient((client) => openCodeRuntime.loadOpenCodeInventory(client))
       : openCodeRuntime.loadInventoryFromCli({
           binaryPath: openCodeSettings.binaryPath,
           environment: resolvedEnvironment,
@@ -424,6 +472,55 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     return fallback(Cause.squash(inventoryExit.cause), version);
   }
 
+  // Commands have no CLI equivalent, so the local path pays for a short-lived
+  // server to read them.
+  //
+  // Deliberately sequential, after the inventory, despite the extra ~1.2s.
+  // Run CONCURRENTLY it timed out every single time while the very same spawn
+  // took ~1.2s standing alone: the server announces its URL on stdout, and
+  // `startOpenCodeServerProcess` only learns the URL by catching that line —
+  // it subscribes to the stream several steps after the spawn, so when the
+  // two `opencode` CLI probes are saturating the loop at the same moment, the
+  // subscription can attach after the line has already gone by. The wakeup is
+  // lost, the URL never resolves, and the whole probe waits out the timeout.
+  // Overlapping the spawn saves a second in theory and cost the feature
+  // entirely in practice.
+  //
+  // Any failure still means "no commands": a slash-command list is a
+  // convenience, and losing it must never turn a working provider into an
+  // error state.
+  const commands = yield* withServerClient((client) =>
+    openCodeRuntime.loadOpenCodeCommands(client),
+  ).pipe(
+    // Outer guard only. It sits ABOVE the server's own start timeout on
+    // purpose: set below it, this fires first and replaces the inner error —
+    // which is the one carrying the process's stdout/stderr — with a bare
+    // "timed out" that says nothing. That masking is why two rebuilds produced
+    // no usable evidence.
+    Effect.timeoutOption(OPENCODE_COMMAND_PROBE_TIMEOUT),
+    Effect.flatMap((result) =>
+      result._tag === "Some"
+        ? Effect.succeed(result.value)
+        : Effect.fail(
+            new OpenCodeProbeError({
+              cause: null,
+              detail: `Timed out after ${Duration.toSeconds(OPENCODE_COMMAND_PROBE_TIMEOUT)}s reading OpenCode commands.`,
+            }),
+          ),
+    ),
+    // Failing is survivable — commands are a convenience — but it must not be
+    // SILENT. A swallowed cause here is indistinguishable from "this machine
+    // has no commands", which is the state that cannot be diagnosed from the
+    // outside.
+    Effect.tapError((cause) =>
+      Effect.logWarning("opencode.commands.unavailable", {
+        detail: openCodeRuntimeErrorDetail(cause),
+      }),
+    ),
+    Effect.orElseSucceed(() => [] as ReadonlyArray<OpenCodeCommand>),
+  );
+  const slashCommands = toServerProviderSlashCommands(commands);
+
   const models = providerModelsFromSettings(
     flattenOpenCodeModels(inventoryExit.value),
     customModels,
@@ -435,6 +532,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     enabled: true,
     checkedAt,
     models,
+    slashCommands,
     probe: {
       installed: true,
       version,

@@ -7,10 +7,10 @@
     "test": "vp test run"
   },
   "dependencies": {
-    "@effect/platform-node": "catalog:",
     "@ch3tools/contracts": "workspace:*",
     "@ch3tools/shared": "workspace:*",
     "@ch3tools/tailscale": "workspace:*",
+    "@effect/platform-node": "catalog:",
     "effect": "catalog:",
     "pngjs": "7.0.0",
     "yaml": "catalog:"

@@ -168,6 +168,12 @@ export type MessagesTimelineRow =
       assistantCopyStreaming: boolean;
       assistantTurnDiffSummary?: TurnDiffSummary | undefined;
       revertTurnCount?: number | undefined;
+      /**
+       * The turn's fold, repeated under its terminal assistant message so the
+       * "Worked for ..." control is reachable without scrolling back up past a
+       * long reply. Same turn, same label, same toggle as the header row.
+       */
+      assistantTurnFold?: MessagesTimelineTurnFold | undefined;
     }
   | {
       kind: "proposed-plan";
@@ -186,6 +192,13 @@ export type MessagesTimelineRow =
       id: string;
       agents: ReadonlyArray<AgentRosterItem>;
     };
+
+/** A settled turn's fold, as both the header row and the footer control read it. */
+export interface MessagesTimelineTurnFold {
+  readonly turnId: TurnId;
+  readonly label: string;
+  readonly expanded: boolean;
+}
 
 /**
  * One subagent's rolling roster line, persisted for the thread's life:
@@ -502,6 +515,8 @@ interface TurnFold {
   createdAt: string;
   hiddenEntryIds: ReadonlySet<string>;
   label: string;
+  /** The turn's terminal assistant message — the fold's second anchor. */
+  terminalMessageId: string | null;
 }
 
 /**
@@ -646,6 +661,7 @@ function deriveTurnFolds(input: {
       createdAt: firstEntry.createdAt,
       hiddenEntryIds,
       label,
+      terminalMessageId: group.terminalEntry?.message.id ?? null,
     });
   }
   return foldsByAnchorEntryId;
@@ -682,11 +698,20 @@ export function deriveMessagesTimelineRows(input: {
     unsettledTurnId,
   });
   const collapsedEntryIds = new Set<string>();
+  const foldByTerminalMessageId = new Map<string, MessagesTimelineTurnFold>();
   for (const fold of foldsByAnchorEntryId.values()) {
-    if (!input.expandedTurnIds?.has(fold.turnId)) {
+    const expanded = input.expandedTurnIds?.has(fold.turnId) ?? false;
+    if (!expanded) {
       for (const entryId of fold.hiddenEntryIds) {
         collapsedEntryIds.add(entryId);
       }
+    }
+    if (fold.terminalMessageId !== null) {
+      foldByTerminalMessageId.set(fold.terminalMessageId, {
+        turnId: fold.turnId,
+        label: fold.label,
+        expanded,
+      });
     }
   }
 
@@ -813,6 +838,11 @@ export function deriveMessagesTimelineRows(input: {
         timelineEntry.message.role === "user"
           ? input.revertTurnCountByUserMessageId.get(timelineEntry.message.id)
           : undefined,
+      // Only the metadata row carries it; a message rendered without that row
+      // (commentary, or a turn still in flight) has no footer to hang it on.
+      assistantTurnFold: showAssistantMeta
+        ? foldByTerminalMessageId.get(timelineEntry.message.id)
+        : undefined,
     });
   }
 
@@ -942,7 +972,12 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.showAssistantCopyButton === bm.showAssistantCopyButton &&
         a.assistantCopyStreaming === bm.assistantCopyStreaming &&
         a.assistantTurnDiffSummary === bm.assistantTurnDiffSummary &&
-        a.revertTurnCount === bm.revertTurnCount
+        a.revertTurnCount === bm.revertTurnCount &&
+        // Rebuilt each derive, so it has to be compared field-wise or every
+        // folded turn's terminal message would re-render on every pass.
+        a.assistantTurnFold?.turnId === bm.assistantTurnFold?.turnId &&
+        a.assistantTurnFold?.label === bm.assistantTurnFold?.label &&
+        a.assistantTurnFold?.expanded === bm.assistantTurnFold?.expanded
       );
     }
   }

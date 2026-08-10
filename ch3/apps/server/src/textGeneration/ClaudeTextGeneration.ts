@@ -30,6 +30,7 @@ import {
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitle,
+  stripClaudeWorkspaceTrustNotice,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
 import {
@@ -215,7 +216,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       );
 
       if (exitCode !== 0) {
-        const stderrDetail = stderr.trim();
+        const stderrDetail = stripClaudeWorkspaceTrustNotice(stderr);
         const stdoutDetail = stdout.trim();
         const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
         return yield* new TextGenerationError({

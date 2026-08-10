@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   TurnId,
@@ -15,6 +16,7 @@ import {
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
   buildLoadingThreadFromShell,
+  buildOutgoingTurnText,
   buildThreadTurnInterruptInput,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
@@ -676,5 +678,51 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingApproval: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingUserInput: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, threadError: "failed" })).toBe(true);
+  });
+});
+
+describe("buildOutgoingTurnText", () => {
+  const base = {
+    prompt: "run the tests",
+    terminalContexts: [],
+    elementContexts: [],
+    previewAnnotations: [],
+    reviewComments: [],
+    provider: ProviderDriverKind.make("codex"),
+    model: "gpt-5",
+    models: [],
+    effort: null,
+  };
+
+  it("passes a plain prompt through untouched", () => {
+    expect(buildOutgoingTurnText(base)).toBe("run the tests");
+  });
+
+  it("substitutes the image-only bootstrap prompt when there is no text", () => {
+    // An image-only send still needs a prompt the model can act on.
+    expect(buildOutgoingTurnText({ ...base, prompt: "" })).toContain("attached one or more images");
+  });
+
+  it("appends review comments after the prompt", () => {
+    const text = buildOutgoingTurnText({
+      ...base,
+      reviewComments: [
+        {
+          id: "review-1",
+          sectionId: "section-1",
+          sectionTitle: "src/app.ts",
+          filePath: "src/app.ts",
+          startIndex: 12,
+          endIndex: 14,
+          rangeLabel: "L12-L14",
+          text: "this leaks",
+          diff: "- old\n+ new",
+        },
+      ],
+    });
+
+    expect(text.startsWith("run the tests")).toBe(true);
+    expect(text).toContain("src/app.ts");
+    expect(text).toContain("this leaks");
   });
 });

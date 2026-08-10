@@ -154,6 +154,25 @@ export function sanitizeThreadTitle(raw: string): string {
   return `${wordCapped.slice(0, 47).trimEnd()}...`;
 }
 
+/**
+ * The Claude CLI prints this notice to stderr on *every* `-p` invocation
+ * against a directory whose `hasTrustDialogAccepted` flag is false in the
+ * active `CLAUDE_CONFIG_DIR`'s config — including ones that go on to
+ * succeed (verified directly: identical stderr on a 0-exit run and a
+ * non-zero one). Left in place, it silently wins the `stderrDetail.length >
+ * 0` check in `runClaudeJson` on every real failure too, so whatever
+ * actually broke — auth, rate limit, a crash — never reaches the user or
+ * the logs. Strip it before it is used as failure detail so a genuine error
+ * message (elsewhere in stderr, or nothing left at all) surfaces instead.
+ */
+const CLAUDE_WORKSPACE_TRUST_NOTICE_PATTERN =
+  /^Ignoring \d+ permissions\.allow entries from .*workspace has not been trusted\..*$/gm;
+
+/** Remove the benign workspace-trust notice from Claude CLI stderr output. */
+export function stripClaudeWorkspaceTrustNotice(stderr: string): string {
+  return stderr.replace(CLAUDE_WORKSPACE_TRUST_NOTICE_PATTERN, "").trim();
+}
+
 /** CLI name to human-readable label, e.g. "codex" → "Codex CLI (`codex`)" */
 function cliLabel(cliName: string): string {
   const capitalized = cliName.charAt(0).toUpperCase() + cliName.slice(1);

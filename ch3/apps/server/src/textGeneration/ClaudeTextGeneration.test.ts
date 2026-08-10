@@ -1,10 +1,11 @@
-import { ClaudeSettings, ProviderInstanceId } from "@ch3tools/contracts";
+import { ClaudeSettings, ProviderInstanceId, TextGenerationError } from "@ch3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { createModelSelection } from "@ch3tools/shared/model";
 import { expect } from "vite-plus/test";
@@ -339,6 +340,75 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
           });
 
           expect(generated.title).toBe("New thread");
+        }),
+    ),
+  );
+
+  it.effect(
+    "strips the benign workspace-trust notice so it never masks the real failure reason",
+    () =>
+      withFakeClaudeEnv(
+        {
+          output: "",
+          exitCode: 1,
+          stderr:
+            'Ignoring 61 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/some/dir"].hasTrustDialogAccepted: true in /some/config/.claude.json.',
+        },
+        (textGeneration) =>
+          Effect.gen(function* () {
+            const result = yield* textGeneration
+              .generateThreadTitle({
+                cwd: process.cwd(),
+                message: "Name this thread.",
+                modelSelection: {
+                  instanceId: ProviderInstanceId.make("claudeAgent"),
+                  model: "claude-sonnet-4-6",
+                },
+              })
+              .pipe(Effect.result);
+
+            expect(Result.isFailure(result)).toBe(true);
+            if (Result.isFailure(result)) {
+              expect(result.failure).toBeInstanceOf(TextGenerationError);
+              // The only stderr content was the benign trust notice, so once
+              // it is stripped nothing is left — the error must say so
+              // honestly (exit code) rather than repeat the misleading notice.
+              expect(result.failure.message).not.toContain("has not been trusted");
+              expect(result.failure.message).toContain("Claude CLI command failed with code 1.");
+            }
+          }),
+      ),
+  );
+
+  it.effect("surfaces the real failure reason alongside the trust notice, not instead of it", () =>
+    withFakeClaudeEnv(
+      {
+        output: "",
+        exitCode: 1,
+        stderr: [
+          'Ignoring 61 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/some/dir"].hasTrustDialogAccepted: true in /some/config/.claude.json.',
+          "Error: usage limit reached for this account.",
+        ].join("\n"),
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration
+            .generateThreadTitle({
+              cwd: process.cwd(),
+              message: "Name this thread.",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                model: "claude-sonnet-4-6",
+              },
+            })
+            .pipe(Effect.result);
+
+          expect(Result.isFailure(result)).toBe(true);
+          if (Result.isFailure(result)) {
+            expect(result.failure).toBeInstanceOf(TextGenerationError);
+            expect(result.failure.message).not.toContain("has not been trusted");
+            expect(result.failure.message).toContain("usage limit reached for this account");
+          }
         }),
     ),
   );

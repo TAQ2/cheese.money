@@ -4671,7 +4671,9 @@ it.layer(ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer)))(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-ws-project-search-" });
+        const workspaceDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "ch3-ws-project-search-",
+        });
         yield* fs.writeFileString(
           path.join(workspaceDir, "needle-file.ts"),
           "export const needle = 1;",

@@ -9,6 +9,7 @@ import {
   shouldInterceptComposerBuiltin,
   isCollapsedCursorAdjacentToInlineToken,
   parseComposerInteractiveBuiltin,
+  resolveInterceptedComposerBuiltin,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
   shouldSubmitComposerOnEnter,
@@ -387,6 +388,22 @@ describe("shouldInterceptComposerBuiltin", () => {
     ).toBe(false);
   });
 
+  // OpenCode does not advertise /clear, so CH3 intercepts it — and handles it
+  // natively (stop the session) rather than refusing. Claude advertises it and
+  // is left alone by the test above; both halves matter.
+  it("intercepts /clear for a runtime that does not advertise it", () => {
+    expect(
+      shouldInterceptComposerBuiltin({
+        builtin: "clear",
+        providerCommandNames: ["refresh", "usage", "init"],
+      }),
+    ).toBe(true);
+  });
+
+  it("gives /clear no refusal notice, because CH3 handles it natively", () => {
+    expect(describeInteractiveBuiltin("clear")).toBeNull();
+  });
+
   it("still intercepts a command the runtime does not advertise", () => {
     expect(
       shouldInterceptComposerBuiltin({
@@ -440,5 +457,59 @@ describe("parseComposerInteractiveBuiltin", () => {
     expect(describeInteractiveBuiltin("mcp")).toBeNull();
     expect(describeInteractiveBuiltin("rewind")).toBeNull();
     expect(describeInteractiveBuiltin("resume")?.description).toContain("sidebar");
+  });
+});
+
+describe("resolveInterceptedComposerBuiltin", () => {
+  it("intercepts a CH3-native builtin even when the runtime advertises it", () => {
+    expect(
+      resolveInterceptedComposerBuiltin({
+        trimmedPrompt: "/mcp",
+        hasAttachments: false,
+        providerCommandNames: ["mcp"],
+      }),
+    ).toBe("mcp");
+  });
+
+  it("sends /clear to a runtime that advertises it, rather than intercepting", () => {
+    // Claude executes its own /clear in-session; intercepting it broke real
+    // work, so a queued "/clear" must still go out as text.
+    expect(
+      resolveInterceptedComposerBuiltin({
+        trimmedPrompt: "/clear",
+        hasAttachments: false,
+        providerCommandNames: ["clear"],
+      }),
+    ).toBeNull();
+  });
+
+  it("intercepts /clear on a runtime that does not advertise it", () => {
+    expect(
+      resolveInterceptedComposerBuiltin({
+        trimmedPrompt: "/clear",
+        hasAttachments: false,
+        providerCommandNames: [],
+      }),
+    ).toBe("clear");
+  });
+
+  it("treats a builtin with something attached as an ordinary message", () => {
+    expect(
+      resolveInterceptedComposerBuiltin({
+        trimmedPrompt: "/login here is the screenshot",
+        hasAttachments: true,
+        providerCommandNames: [],
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null for text that is not a builtin", () => {
+    expect(
+      resolveInterceptedComposerBuiltin({
+        trimmedPrompt: "run the tests",
+        hasAttachments: false,
+        providerCommandNames: [],
+      }),
+    ).toBeNull();
   });
 });

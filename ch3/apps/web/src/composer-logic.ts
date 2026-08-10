@@ -294,10 +294,18 @@ const INTERACTIVE_BUILTIN_NOTICES = {
     description:
       "CH3 threads resume automatically from the sidebar. To import an external Claude conversation, run /resume <session-id> — a new thread opens in that session's repository and continues it.",
   },
-  clear: {
-    title: "/clear isn't supported here",
-    description: "Start a new thread instead — that is CH3's fresh context.",
-  },
+  // Natively handled, not blocked. CH3's own equivalent of a fresh context is
+  // stopping the thread's provider session: the next message opens a new one
+  // in the same thread, which is precisely what /clear means. Telling the user
+  // to "start a new thread" instead was wrong — it threw away the thread's
+  // history and its place in the sidebar to achieve something CH3 can already
+  // do in place.
+  //
+  // Still absent from NATIVELY_HANDLED_BUILTINS on purpose: a runtime that
+  // advertises its own /clear (Claude does, and it clears in-session) must
+  // keep executing it. This native path is the fallback for runtimes that do
+  // not — OpenCode among them.
+  clear: null,
   login: {
     title: "/login isn't supported here",
     description: "Manage provider sign-in from Settings → Providers.",
@@ -316,8 +324,7 @@ const INTERACTIVE_BUILTIN_NOTICES = {
   },
   statusline: {
     title: "/statusline isn't supported here",
-    description:
-      "CH3 already renders your configured Claude Code status line above the composer.",
+    description: "CH3 already renders your configured Claude Code status line above the composer.",
   },
   agents: {
     title: "/agents isn't supported here",
@@ -426,6 +433,31 @@ export function shouldInterceptComposerBuiltin(input: {
     return true;
   }
   return !input.providerCommandNames.some((name) => name.trim().toLowerCase() === input.builtin);
+}
+
+/**
+ * The built-in CH3 intercepts instead of sending, or null to send as text.
+ *
+ * Both halves matter and are easy to get half-right: a builtin only counts
+ * when nothing is attached (`/login here's the screenshot` is a message), and
+ * only when the runtime does not advertise it (Claude executes its own
+ * `/clear` in-session). Shared so the composer's queued path and the live send
+ * path cannot drift apart on either rule.
+ */
+export function resolveInterceptedComposerBuiltin(input: {
+  readonly trimmedPrompt: string;
+  readonly hasAttachments: boolean;
+  readonly providerCommandNames: ReadonlyArray<string>;
+}): ComposerInteractiveBuiltin | null {
+  if (input.hasAttachments) return null;
+  const builtin = parseComposerInteractiveBuiltin(input.trimmedPrompt);
+  if (builtin === null) return null;
+  return shouldInterceptComposerBuiltin({
+    builtin,
+    providerCommandNames: input.providerCommandNames,
+  })
+    ? builtin
+    : null;
 }
 
 /** Notice copy for a guarded built-in; null when it has a native CH3 view. */

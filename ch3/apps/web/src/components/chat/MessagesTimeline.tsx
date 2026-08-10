@@ -84,6 +84,7 @@ import {
   resolveTimelineMinimapTopPercent,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
+  type MessagesTimelineTurnFold,
   TIMELINE_MINIMAP_MIN_ITEMS,
   type TimelineLatestTurn,
 } from "./MessagesTimeline.logic";
@@ -1078,22 +1079,33 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
   );
 }
 
-function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-fold" }> }) {
+/**
+ * The "Worked for ..." control. Rendered twice per folded turn — once above the
+ * turn's work and once under its terminal reply — so a long answer never puts
+ * the toggle out of reach.
+ */
+function TurnFoldToggle({ fold }: { fold: MessagesTimelineTurnFold }) {
   const ctx = use(TimelineRowCtx);
-  const Icon = row.expanded ? ChevronDownIcon : ChevronRightIcon;
+  const Icon = fold.expanded ? ChevronDownIcon : ChevronRightIcon;
 
   return (
+    <button
+      type="button"
+      aria-expanded={fold.expanded}
+      data-scroll-anchor-ignore
+      onClick={() => ctx.onToggleTurnFold(fold.turnId)}
+      className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-xs text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+    >
+      <span>{fold.label}</span>
+      <Icon className="size-3.5" />
+    </button>
+  );
+}
+
+function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-fold" }> }) {
+  return (
     <div className="border-b border-border/60 pb-2 pt-1">
-      <button
-        type="button"
-        aria-expanded={row.expanded}
-        data-scroll-anchor-ignore
-        onClick={() => ctx.onToggleTurnFold(row.turnId)}
-        className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-xs text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-      >
-        <span>{row.label}</span>
-        <Icon className="size-3.5" />
-      </button>
+      <TurnFoldToggle fold={{ turnId: row.turnId, label: row.label, expanded: row.expanded }} />
     </div>
   );
 }
@@ -1119,21 +1131,30 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           onOpenTurnDiff={ctx.onOpenTurnDiff}
         />
         {row.showAssistantMeta ? (
-          <div className="mt-1.5 flex items-center justify-end gap-2 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
-            <AssistantCopyButton row={row} />
-            <AssistantSpeakButton row={row} />
-            {!row.message.streaming && (
-              <Tooltip>
-                <TooltipTrigger
-                  render={<p className="text-muted-foreground text-xs tabular-nums" />}
-                >
-                  {formatShortTimestamp(row.message.updatedAt, ctx.timestampFormat)}
-                </TooltipTrigger>
-                <TooltipPopup>
-                  {formatChatTimestampTooltip(row.message.updatedAt, ctx.timestampFormat)}
-                </TooltipPopup>
-              </Tooltip>
-            )}
+          <div className="mt-1.5 flex items-center justify-end gap-2 text-xs tabular-nums">
+            {/* The duration reads as content, not an action: it stays legible
+                at rest while the action cluster keeps fading in on hover. */}
+            {row.assistantTurnFold ? (
+              <div className="me-auto min-w-0">
+                <TurnFoldToggle fold={row.assistantTurnFold} />
+              </div>
+            ) : null}
+            <div className="flex items-center gap-2 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
+              <AssistantCopyButton row={row} />
+              <AssistantSpeakButton row={row} />
+              {!row.message.streaming && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={<p className="text-muted-foreground text-xs tabular-nums" />}
+                  >
+                    {formatShortTimestamp(row.message.updatedAt, ctx.timestampFormat)}
+                  </TooltipTrigger>
+                  <TooltipPopup>
+                    {formatChatTimestampTooltip(row.message.updatedAt, ctx.timestampFormat)}
+                  </TooltipPopup>
+                </Tooltip>
+              )}
+            </div>
           </div>
         ) : null}
       </div>

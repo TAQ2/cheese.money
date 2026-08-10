@@ -1,5 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
-import { createAssetEnvironmentAtoms, resolveAssetUrl } from "@ch3tools/client-runtime/state/assets";
+import {
+  createAssetEnvironmentAtoms,
+  resolveAssetUrl,
+} from "@ch3tools/client-runtime/state/assets";
 import type { AssetResource, EnvironmentId } from "@ch3tools/contracts";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 

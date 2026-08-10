@@ -22,8 +22,8 @@ The update does not remove saved threads, settings, or project files.
 
 ## Choose the Action You See
 
-| Action                     | What to do                                                                                                                                                                  |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Action                     | What to do                                                                                                                                                              |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Update server**          | Select the button and leave CH3 open. It prepares the matching version, restarts the server, and reconnects automatically. This can take several minutes.               |
 | **Update the desktop app** | Open the CH3 desktop app on the machine that runs the server and install the app update there. Reopen it if needed.                                                     |
 | **Copy update command**    | Copy the command, open a terminal on the server machine, stop the current CH3 server, and relaunch it with the copied command and any startup options you normally use. |

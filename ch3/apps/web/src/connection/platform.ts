@@ -23,7 +23,10 @@ import {
 } from "@ch3tools/client-runtime/connection";
 import { bootstrapRemoteBearerSession } from "@ch3tools/client-runtime/authorization";
 import { fetchRemoteEnvironmentDescriptor } from "@ch3tools/client-runtime/environment";
-import { managedRelayAccountChanges, managedRelaySessionAtom } from "@ch3tools/client-runtime/relay";
+import {
+  managedRelayAccountChanges,
+  managedRelaySessionAtom,
+} from "@ch3tools/client-runtime/relay";
 import { EnvironmentRpcRequestObserver } from "@ch3tools/client-runtime/rpc";
 import {
   AuthStandardClientScopes,

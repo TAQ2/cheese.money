@@ -823,24 +823,62 @@ const make = Effect.gen(function* () {
    * capable model rather than whatever writes code. Claude's default text
    * generation model is Haiku, so prefer that.
    *
+   * The INSTANCE is as load-bearing as the model. Every Claude instance owns
+   * its account — the account IS the instance's `homePath` — and
+   * `TextGeneration` routes purely on `modelSelection.instanceId`. Naming the
+   * default instance unconditionally therefore titled through whichever
+   * account that slot happened to hold, not the one the thread is actually
+   * talking to: on a machine with a second Claude instance the work was billed
+   * to the wrong account, and when that account was rate-limited or signed out
+   * every rename failed while the thread beside it kept streaming.
+   *
+   * So a thread already running on a Claude instance titles through THAT
+   * instance. Only a thread on some other provider borrows the default Claude
+   * slot, which is what the previous behaviour did for everyone.
+   *
    * The configured text-generation model is the fallback, not the first choice:
    * it may point at a CLI that is not installed, and a title must not depend on
    * a provider the user does not have. If both fail, the caller's existing
    * warning path applies and the title simply does not change.
    */
-  const claudeTitleModelSelection = (): ModelSelection | null => {
+  const claudeTitleModelSelection = (input: {
+    readonly threadInstanceId: ModelSelection["instanceId"] | undefined;
+    readonly instances: Readonly<Record<string, { readonly driver?: string } | undefined>>;
+  }): ModelSelection | null => {
     const claudeDriver = ProviderDriverKind.make("claudeAgent");
     const model = DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[claudeDriver];
-    return model === undefined
-      ? null
-      : createModelSelection(defaultInstanceIdForDriver(claudeDriver), model);
+    if (model === undefined) return null;
+
+    // An absent instance entry is the default slot the settings panels
+    // synthesize for a user who never opened them; it is a Claude instance in
+    // every way that matters here, so the thread still titles through itself.
+    const threadInstanceId = input.threadInstanceId;
+    const isClaudeThreadInstance =
+      threadInstanceId !== undefined &&
+      (input.instances[threadInstanceId]?.driver ?? claudeDriver) === claudeDriver &&
+      (input.instances[threadInstanceId] !== undefined ||
+        threadInstanceId === defaultInstanceIdForDriver(claudeDriver));
+
+    return createModelSelection(
+      isClaudeThreadInstance ? threadInstanceId : defaultInstanceIdForDriver(claudeDriver),
+      model,
+    );
   };
 
   const generateThreadTitleWithFallback = Effect.fn("generateThreadTitleWithFallback")(function* (
-    input: Omit<Parameters<typeof textGeneration.generateThreadTitle>[0], "modelSelection">,
+    input: Omit<Parameters<typeof textGeneration.generateThreadTitle>[0], "modelSelection"> & {
+      /** The thread's own instance, so the title spends the thread's account. */
+      readonly threadInstanceId?: ModelSelection["instanceId"] | undefined;
+    },
   ) {
-    const { textGenerationModelSelection } = yield* serverSettingsService.getSettings;
-    const preferred = claudeTitleModelSelection();
+    const settings = yield* serverSettingsService.getSettings;
+    const { textGenerationModelSelection } = settings;
+    const preferred = claudeTitleModelSelection({
+      threadInstanceId: input.threadInstanceId,
+      instances: (settings.providerInstances ?? {}) as Readonly<
+        Record<string, { readonly driver?: string } | undefined>
+      >,
+    });
     if (preferred === null) {
       return yield* textGeneration.generateThreadTitle({
         ...input,
@@ -875,9 +913,16 @@ const make = Effect.gen(function* () {
     }) {
       const attachments = input.attachments ?? [];
       yield* Effect.gen(function* () {
+        // Read once up front purely for the instance the thread runs on, so the
+        // title spends that thread's account. The thread is read AGAIN after
+        // generation because seconds pass in between and the title may have
+        // been set meanwhile — that later read is the freshness check, not this
+        // one, and collapsing them would reintroduce the race it guards.
+        const titlingThread = yield* resolveThread(input.threadId);
         const generated = yield* generateThreadTitleWithFallback({
           cwd: input.cwd,
           message: input.messageText,
+          ...(titlingThread ? { threadInstanceId: titlingThread.modelSelection.instanceId } : {}),
           ...(attachments.length > 0 ? { attachments } : {}),
         });
         if (!generated) return;
@@ -938,6 +983,7 @@ const make = Effect.gen(function* () {
       cwd,
       message,
       previousTitle,
+      threadInstanceId: thread.modelSelection.instanceId,
       ...(attachments.length > 0 ? { attachments } : {}),
     });
     if (generated.title === DEFAULT_THREAD_TITLE || generated.title === previousTitle) {

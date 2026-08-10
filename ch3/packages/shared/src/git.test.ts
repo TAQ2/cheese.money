@@ -44,9 +44,9 @@ describe("normalizeGitRemoteUrl", () => {
 
 describe("parseGitHubRepositoryNameWithOwnerFromRemoteUrl", () => {
   it("extracts the owner and repository from common GitHub remote shapes", () => {
-    expect(
-      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("git@github.com:CH3Tools/CH3.git"),
-    ).toBe("CH3Tools/CH3");
+    expect(parseGitHubRepositoryNameWithOwnerFromRemoteUrl("git@github.com:CH3Tools/CH3.git")).toBe(
+      "CH3Tools/CH3",
+    );
     expect(
       parseGitHubRepositoryNameWithOwnerFromRemoteUrl("https://github.com/CH3Tools/CH3.git"),
     ).toBe("CH3Tools/CH3");

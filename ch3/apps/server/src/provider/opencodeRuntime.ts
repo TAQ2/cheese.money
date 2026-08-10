@@ -4,6 +4,7 @@ import type { ChatAttachment, ProviderApprovalDecision, RuntimeMode } from "@ch3
 import {
   createOpencodeClient,
   type Agent,
+  type Command as OpenCodeCommand,
   type FilePartInput,
   type Model,
   type OpencodeClient,
@@ -148,6 +149,19 @@ export interface OpenCodeRuntimeShape {
   readonly loadOpenCodeInventory: (
     client: OpencodeClient,
   ) => Effect.Effect<OpenCodeInventory, OpenCodeRuntimeError>;
+  /**
+   * The slash commands OpenCode resolves for the connected directory —
+   * `command/*.md` at user and project scope plus anything a skill contributes.
+   *
+   * Separate from {@link loadOpenCodeInventory} because it is the one part of a
+   * status check with no CLI equivalent: `opencode` exposes commands over the
+   * server's `/command` endpoint only. Callers on the local path therefore have
+   * to stand a server up for it, which is why this is not folded into the
+   * inventory every probe already loads.
+   */
+  readonly loadOpenCodeCommands: (
+    client: OpencodeClient,
+  ) => Effect.Effect<ReadonlyArray<OpenCodeCommand>, OpenCodeRuntimeError>;
   readonly loadInventoryFromCli: (input: {
     readonly binaryPath: string;
     readonly environment?: NodeJS.ProcessEnv;
@@ -573,9 +587,21 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       const readyOption = readyExit.value;
       if (Option.isNone(readyOption)) {
         yield* Fiber.interrupt(exitFiber).pipe(Effect.ignore);
+        // Report what the process actually said. A bare "timed out" is the one
+        // failure here that carries no evidence at all — the server is alive,
+        // so the exit path that does attach output never runs, and the reader
+        // is left unable to tell "never started" from "started but its ready
+        // line was not recognised".
+        const stdout = (yield* Ref.get(stdoutRef)).trim();
+        const stderr = (yield* Ref.get(stderrRef)).trim();
         return yield* new OpenCodeRuntimeError({
           operation: "startOpenCodeServerProcess",
-          detail: `Timed out waiting for OpenCode server start after ${timeoutMs}ms.`,
+          detail: [
+            `Timed out waiting for OpenCode server start after ${timeoutMs}ms.`,
+            `command: ${spawnCommand.command} ${spawnCommand.args.join(" ")}`,
+            stdout ? `stdout:\n${stdout}` : "stdout: <empty>",
+            stderr ? `stderr:\n${stderr}` : "stderr: <empty>",
+          ].join("\n\n"),
         });
       }
 
@@ -646,6 +672,11 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
   const loadAgents = (client: OpencodeClient) =>
     runOpenCodeSdk("app.agents", () => client.app.agents()).pipe(
+      Effect.map((result) => result.data ?? []),
+    );
+
+  const loadCommands: OpenCodeRuntimeShape["loadOpenCodeCommands"] = (client) =>
+    runOpenCodeSdk("command.list", () => client.command.list()).pipe(
       Effect.map((result) => result.data ?? []),
     );
 
@@ -737,6 +768,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     runOpenCodeCommand,
     createOpenCodeSdkClient,
     loadOpenCodeInventory,
+    loadOpenCodeCommands: loadCommands,
     loadInventoryFromCli,
   } satisfies OpenCodeRuntimeShape;
 });

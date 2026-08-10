@@ -79,9 +79,7 @@ const serviceInstallCommand = Command.make("install", projectLocationFlags).pipe
       Effect.gen(function* () {
         const result = yield* reconcileService();
         if (!result.changed) {
-          yield* Console.log(
-            `CH3 service is already installed with ch3@${packageJson.version}.`,
-          );
+          yield* Console.log(`CH3 service is already installed with ch3@${packageJson.version}.`);
           return;
         }
         yield* Console.log(
@@ -121,9 +119,7 @@ const serviceUninstallCommand = Command.make("uninstall", projectLocationFlags).
       Effect.gen(function* () {
         const service = yield* BootService.BootService;
         const removed = yield* service.uninstall;
-        yield* Console.log(
-          removed ? "Removed the CH3 service." : "CH3 service is not installed.",
-        );
+        yield* Console.log(removed ? "Removed the CH3 service." : "CH3 service is not installed.");
       }),
     ),
   ),

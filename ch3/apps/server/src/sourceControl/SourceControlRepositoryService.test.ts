@@ -81,7 +81,9 @@ function makeLayer(input: {
     Layer.provide(
       ServerConfig.layerTest(
         process.cwd(),
-        input.fileSystem ? "/tmp/ch3-source-control-repos" : { prefix: "ch3-source-control-repos-" },
+        input.fileSystem
+          ? "/tmp/ch3-source-control-repos"
+          : { prefix: "ch3-source-control-repos-" },
       ),
     ),
   );

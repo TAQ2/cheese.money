@@ -131,9 +131,9 @@ ssh -L 34338:127.0.0.1:34338 <host>
 
 In **Clerk Dashboard > JWT templates**, create a template with:
 
-| Setting | Value                        |
-| ------- | ---------------------------- |
-| Name    | `ch3-relay`                   |
+| Setting | Value                    |
+| ------- | ------------------------ |
+| Name    | `ch3-relay`              |
 | Claims  | `{ "aud": "ch3-relay" }` |
 
 Set `CH3CODE_CLERK_JWT_TEMPLATE=ch3-relay` in the repository-root `.env`, and set

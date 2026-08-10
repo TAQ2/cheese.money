@@ -19,6 +19,7 @@ import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@ch3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@ch3tools/client-runtime/connection";
+import { scopeThreadRef, scopedThreadKey } from "@ch3tools/client-runtime/environment";
 import { serializeComposerFileLink } from "@ch3tools/shared/composerTrigger";
 import { createModelSelection, normalizeModelSlug } from "@ch3tools/shared/model";
 import {
@@ -41,9 +42,14 @@ import {
   expandCollapsedComposerCursor,
   parseComposerInteractiveBuiltin,
   replaceTextRange,
+  resolveInterceptedComposerBuiltin,
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
-import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
+import {
+  buildOutgoingTurnText,
+  deriveComposerSendState,
+  readFileAsDataUrl,
+} from "../ChatView.logic";
 import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
@@ -57,6 +63,12 @@ import {
   useComposerThreadDraft,
   useEffectiveComposerModelState,
 } from "../../composerDraftStore";
+import {
+  claimQueuedSend,
+  composerDraftSignature,
+  useQueuedSendStore,
+  type QueuedSendSnapshot,
+} from "../../queuedSendStore";
 import {
   MAX_STASH_ENTRIES,
   partitionStashAttachments,
@@ -681,7 +693,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     routeThreadRef,
     draftId,
     activeThreadId,
-    activeThreadEnvironmentId: _activeThreadEnvironmentId,
+    activeThreadEnvironmentId,
     activeThread,
     isServerThread: _isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
@@ -1986,39 +1998,141 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   /**
    * A send held until the agent finishes.
    *
-   * Keyed by thread so switching away never fires someone else's message, and
-   * kept as the live draft rather than a copy: the text stays visible and
-   * editable while it waits, and whatever is in the composer when the turn
-   * ends is what gets sent.
+   * Two paths release it, one owner each. This effect owns the thread the user
+   * is looking at, so the send keeps its optimistic message and scroll anchor.
+   * `QueuedSendWatcher` owns every other armed thread, which is what makes a
+   * queued send fire while you work elsewhere instead of on your return.
+   *
+   * The snapshot below is what the watcher sends. It is refreshed on every
+   * edit while this thread is active — so the text stays live and editable —
+   * and freezes at whatever it last held when the composer unmounts.
    */
-  const [queuedSendThreadId, setQueuedSendThreadId] = useState<ThreadId | null>(null);
-  const isSendQueued = queuedSendThreadId !== null && queuedSendThreadId === activeThreadId;
+  const queuedSendRef = useMemo(
+    () =>
+      activeThreadId && activeThreadEnvironmentId
+        ? scopeThreadRef(activeThreadEnvironmentId, activeThreadId)
+        : null,
+    [activeThreadEnvironmentId, activeThreadId],
+  );
+  const armQueuedSend = useQueuedSendStore((store) => store.arm);
+  const refreshQueuedSend = useQueuedSendStore((store) => store.refresh);
+  const disarmQueuedSend = useQueuedSendStore((store) => store.disarm);
+  // Subscribing to the boolean rather than the entry keeps a refresh per
+  // keystroke from re-rendering the composer.
+  const isSendQueued = useQueuedSendStore((store) =>
+    queuedSendRef === null
+      ? false
+      : store.entriesByThreadKey[scopedThreadKey(queuedSendRef)] !== undefined,
+  );
+  /**
+   * The builtin CH3 would intercept rather than send — mirroring `onSend`'s
+   * guard exactly, both halves of it.
+   *
+   * A builtin only counts when nothing is attached, and only when the runtime
+   * does *not* advertise it: Claude executes its own `/clear` in-session, and
+   * intercepting that broke real work. Treating every slash builtin as
+   * un-sendable would refuse "finish this turn, then clear the context".
+   */
+  const queuedInterceptedBuiltin = useMemo(
+    () =>
+      resolveInterceptedComposerBuiltin({
+        trimmedPrompt: composerSendState.trimmedPrompt,
+        hasAttachments:
+          composerImages.length > 0 ||
+          composerSendState.sendableTerminalContexts.length > 0 ||
+          composerElementContexts.length > 0 ||
+          composerPreviewAnnotations.length > 0 ||
+          composerReviewComments.length > 0,
+        providerCommandNames: (selectedProviderStatus?.slashCommands ?? []).map(
+          (command) => command.name,
+        ),
+      }),
+    [
+      composerElementContexts.length,
+      composerImages.length,
+      composerPreviewAnnotations.length,
+      composerReviewComments.length,
+      composerSendState.sendableTerminalContexts.length,
+      composerSendState.trimmedPrompt,
+      selectedProviderStatus?.slashCommands,
+    ],
+  );
+  const buildQueuedSendSnapshot = useCallback(
+    (): QueuedSendSnapshot => ({
+      text: buildOutgoingTurnText({
+        prompt,
+        terminalContexts: composerSendState.sendableTerminalContexts,
+        elementContexts: composerElementContexts,
+        previewAnnotations: composerPreviewAnnotations,
+        reviewComments: composerReviewComments,
+        provider: selectedProvider,
+        model: selectedModel,
+        models: selectedProviderModels,
+        effort: selectedPromptEffort,
+      }),
+      images: composerImages,
+      modelSelection: selectedModelSelection,
+      runtimeMode,
+      interactionMode,
+      hasSendableContent: composerSendState.hasSendableContent,
+      interactiveBuiltin: queuedInterceptedBuiltin,
+      draftSignature: composerDraftSignature(composerDraft),
+    }),
+    [
+      composerElementContexts,
+      composerImages,
+      composerPreviewAnnotations,
+      composerReviewComments,
+      composerSendState.hasSendableContent,
+      composerSendState.sendableTerminalContexts,
+      composerDraft,
+      interactionMode,
+      queuedInterceptedBuiltin,
+      runtimeMode,
+      selectedModel,
+      selectedModelSelection,
+      selectedPromptEffort,
+      selectedProvider,
+      selectedProviderModels,
+    ],
+  );
   const toggleQueuedSend = useCallback(() => {
-    setQueuedSendThreadId((existing) =>
-      existing === activeThreadId ? null : (activeThreadId ?? null),
-    );
-  }, [activeThreadId]);
+    if (!queuedSendRef) return;
+    if (isSendQueued) {
+      disarmQueuedSend(queuedSendRef);
+      return;
+    }
+    armQueuedSend(queuedSendRef, buildQueuedSendSnapshot());
+  }, [armQueuedSend, buildQueuedSendSnapshot, disarmQueuedSend, isSendQueued, queuedSendRef]);
+
+  useEffect(() => {
+    if (!queuedSendRef || !isSendQueued) return;
+    refreshQueuedSend(queuedSendRef, buildQueuedSendSnapshot());
+  }, [buildQueuedSendSnapshot, isSendQueued, queuedSendRef, refreshQueuedSend]);
 
   // Release the moment the turn is no longer running. `phase` covers every way
   // a turn can end — completed, interrupted, or failed — so a queued message
   // is never stranded by a turn that stopped without finishing cleanly.
   useEffect(() => {
-    if (!isSendQueued || phase === "running") return;
+    if (!queuedSendRef || !isSendQueued || phase === "running") return;
     if (isSendBusy || isConnecting) return;
     if (!composerSendState.hasSendableContent) {
       // Nothing left to send (the draft was cleared): drop the queue rather
       // than sit armed forever.
-      setQueuedSendThreadId(null);
+      disarmQueuedSend(queuedSendRef);
       return;
     }
-    setQueuedSendThreadId(null);
+    // Claim disarms in the same tick, so the watcher can never also send this.
+    if (claimQueuedSend(queuedSendRef) === null) return;
     submitComposer();
   }, [
     composerSendState.hasSendableContent,
+    disarmQueuedSend,
     isConnecting,
     isSendBusy,
     isSendQueued,
     phase,
+    queuedSendRef,
     submitComposer,
   ]);
 

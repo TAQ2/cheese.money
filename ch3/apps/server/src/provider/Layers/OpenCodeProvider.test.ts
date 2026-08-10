@@ -14,7 +14,7 @@ import {
   OpenCodeRuntimeError,
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
-import { checkOpenCodeProviderStatus } from "./OpenCodeProvider.ts";
+import { checkOpenCodeProviderStatus, toServerProviderSlashCommands } from "./OpenCodeProvider.ts";
 import type { OpenCodeInventory } from "../opencodeRuntime.ts";
 const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
@@ -34,6 +34,8 @@ const runtimeMock = {
     runVersionError: null as Error | null,
     versionStdout: DEFAULT_VERSION_STDOUT,
     inventoryError: null as Error | null,
+    commandsError: null as Error | null,
+    commands: [] as ReadonlyArray<unknown>,
     closeCalls: 0,
     inventory: {
       providerList: { connected: [] as string[], all: [] as unknown[], default: {} },
@@ -44,6 +46,8 @@ const runtimeMock = {
     this.state.runVersionError = null;
     this.state.versionStdout = DEFAULT_VERSION_STDOUT;
     this.state.inventoryError = null;
+    this.state.commandsError = null;
+    this.state.commands = [];
     this.state.closeCalls = 0;
     this.state.inventory = {
       providerList: { connected: [], all: [] as unknown[], default: {} },
@@ -85,6 +89,20 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       : Effect.succeed({ stdout: runtimeMock.state.versionStdout, stderr: "", code: 0 }),
   createOpenCodeSdkClient: () =>
     ({}) as unknown as ReturnType<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>,
+  loadOpenCodeCommands: () =>
+    runtimeMock.state.commandsError
+      ? Effect.fail(
+          new OpenCodeRuntimeError({
+            operation: "command.list",
+            detail: runtimeMock.state.commandsError.message,
+            cause: runtimeMock.state.commandsError,
+          }),
+        )
+      : Effect.succeed(
+          runtimeMock.state.commands as ReadonlyArray<
+            Parameters<typeof toServerProviderSlashCommands>[0][number]
+          >,
+        ),
   loadOpenCodeInventory: () =>
     runtimeMock.state.inventoryError
       ? Effect.fail(
@@ -207,11 +225,19 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
     }),
   );
 
-  it.effect("does not spawn a local server for health check (uses CLI instead)", () =>
+  // The model/agent inventory still comes from the CLI on the local path — that
+  // is what keeps a health check cheap. The single server this now stands up is
+  // for the command list alone, which `opencode` exposes over its server only
+  // (there is no `opencode command list`). It runs CONCURRENTLY with the CLI
+  // probe and finishes inside it — measured on a real machine: server ready
+  // ~1.2s, `opencode models --verbose` ~1.4s — so the check's wall clock is
+  // unchanged. If commands ever gain a CLI equivalent, drop the spawn and put
+  // this assertion back to zero.
+  it.effect("reads the local inventory over the CLI, spawning a server only for commands", () =>
     Effect.gen(function* () {
       yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
 
-      NodeAssert.equal(runtimeMock.state.closeCalls, 0);
+      NodeAssert.equal(runtimeMock.state.closeCalls, 1);
     }),
   );
 
@@ -271,6 +297,40 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
         snapshot.message,
         "Couldn't reach the configured OpenCode server at http://127.0.0.1:9999. Check that the server is running and the URL is correct.",
       );
+    }),
+  );
+  it.effect("exposes OpenCode's commands as provider slash commands", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.commands = [
+        { name: "refresh", description: "Manual context compaction", template: "", hints: [] },
+        { name: "usage", description: "Maple spend", template: "", hints: ["days"] },
+        { name: "speak", description: "Toggle TTS", template: "", hints: [], source: "skill" },
+      ];
+      const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings({}), process.cwd());
+
+      NodeAssert.deepEqual(
+        snapshot.slashCommands.map((command) => command.name),
+        ["refresh", "speak", "usage"],
+      );
+      // A skill is invocable as a slash command in OpenCode, so it belongs in
+      // the composer alongside the rest.
+      NodeAssert.equal(
+        snapshot.slashCommands.find((command) => command.name === "usage")?.input?.hint,
+        "days",
+      );
+    }),
+  );
+
+  // Losing the command list must never downgrade a working provider: it is a
+  // convenience, and the server spawn it needs is the most failure-prone part
+  // of the check.
+  it.effect("stays ready when the command list cannot be read", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.commandsError = new Error("command.list exploded");
+      const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings({}), process.cwd());
+
+      NodeAssert.notEqual(snapshot.status, "error");
+      NodeAssert.deepEqual([...snapshot.slashCommands], []);
     }),
   );
 });

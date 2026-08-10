@@ -213,6 +213,14 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         }),
       },
     }) as unknown as ReturnType<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>,
+  loadOpenCodeCommands: () =>
+    Effect.fail(
+      new OpenCodeRuntimeError({
+        operation: "command.list",
+        detail: "OpenCodeRuntimeTestDouble.loadOpenCodeCommands not used in this test",
+        cause: null,
+      }),
+    ),
   loadOpenCodeInventory: () =>
     Effect.fail(
       new OpenCodeRuntimeError({

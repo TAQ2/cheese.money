@@ -182,7 +182,10 @@ describe("recommended account", () => {
 
   it("points at the account in use when nothing beats it by enough to switch", () => {
     const recommendation = recommendClaudeAccount({
-      profiles: [current, { ...expiringSoon, usage: { sessionPercent: 0, weekPercent: 61, weekResetsAt: inDays(2) } }],
+      profiles: [
+        current,
+        { ...expiringSoon, usage: { sessionPercent: 0, weekPercent: 61, weekResetsAt: inDays(2) } },
+      ],
       nowMs,
     });
     expect(recommendation?.homePath).toBe(current.homePath);
@@ -193,7 +196,10 @@ describe("recommended account", () => {
   it("ignores stickiness, so a fresh session does not make the incumbent look ideal", () => {
     // With `steady` phase this returns null (session under 60%) and the panel
     // would call the incumbent ideal purely because its window just opened.
-    const fresh = { ...current, usage: { sessionPercent: 2, weekPercent: 61, weekResetsAt: inDays(2) } };
+    const fresh = {
+      ...current,
+      usage: { sessionPercent: 2, weekPercent: 61, weekResetsAt: inDays(2) },
+    };
     const recommendation = recommendClaudeAccount({ profiles: [fresh, expiringSoon], nowMs });
     expect(recommendation?.homePath).toBe(expiringSoon.homePath);
   });

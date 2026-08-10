@@ -35,10 +35,8 @@ import {
   scopeThreadRef,
 } from "@ch3tools/client-runtime/environment";
 import {
-  applyClaudePromptEffortPrefix,
   createModelSelection,
   getOutputStyleSelection,
-  resolvePromptInjectedEffort,
   withOutputStyleSelection,
 } from "@ch3tools/shared/model";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@ch3tools/shared/chatList";
@@ -77,9 +75,8 @@ import { useDiffPanelStore } from "../diffPanelStore";
 import {
   collapseExpandedComposerCursor,
   describeInteractiveBuiltin,
-  parseComposerInteractiveBuiltin,
+  resolveInterceptedComposerBuiltin,
   parseComposerResumeSessionId,
-  shouldInterceptComposerBuiltin,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
@@ -173,7 +170,7 @@ import {
   projectScriptIdFromCommand,
 } from "~/projectScripts";
 import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
-import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
+import { resolveSelectableProvider } from "../providerModels";
 import { NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import { useClientSettings, useEnvironmentSettings } from "../hooks/useSettings";
 import { useNowMinute } from "../hooks/useNowMinute";
@@ -193,18 +190,12 @@ import {
   type DraftId,
 } from "../composerDraftStore";
 import {
-  appendTerminalContextsToPrompt,
   formatTerminalContextLabel,
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
-import {
-  appendElementContextsToPrompt,
-  type ElementContextDraft,
-  formatElementContextLabel,
-} from "../lib/elementContext";
-import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
-import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
+import { type ElementContextDraft, formatElementContextLabel } from "../lib/elementContext";
+import { type ReviewCommentContext } from "../reviewCommentContext";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -267,6 +258,8 @@ import {
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   buildLoadingThreadFromShell,
+  buildOutgoingTurnText,
+  formatOutgoingPrompt,
   buildThreadTurnInterruptInput,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
@@ -321,8 +314,6 @@ import {
 } from "../versionSkew";
 import { useAssetUrls } from "../assets/assetUrls";
 
-const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_THREAD_ACTIVITIES: ReadonlyArray<never> = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -463,17 +454,6 @@ function shouldTypeToFocusComposer(event: KeyboardEvent): boolean {
   return true;
 }
 
-function formatOutgoingPrompt(params: {
-  provider: ProviderDriverKind;
-  model: string | null;
-  models: ReadonlyArray<ServerProvider["models"][number]>;
-  effort: string | null;
-  text: string;
-}): string {
-  const caps = getProviderModelCapabilities(params.models, params.model, params.provider);
-  const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
-  return applyClaudePromptEffortPrefix(params.text, promptEffort);
-}
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
 
@@ -1194,6 +1174,9 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const setThreadInteractionMode = useAtomCommand(threadEnvironment.setInteractionMode, {
+    reportFailure: false,
+  });
+  const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
@@ -5102,30 +5085,22 @@ function ChatViewContent(props: ChatViewProps) {
     }
     // Interactive Claude Code built-ins never reach the model as text: the
     // runtime can't execute them from a prompt, so sending them would burn a
-    // paid model turn on a message that just describes the command.
-    const interactiveBuiltin =
-      composerImages.length === 0 &&
-      sendableComposerTerminalContexts.length === 0 &&
-      composerElementContexts.length === 0 &&
-      composerPreviewAnnotations.length === 0 &&
-      composerReviewComments.length === 0
-        ? parseComposerInteractiveBuiltin(trimmed)
-        : null;
-    // The runtime's own advertised command list is the authority: anything
-    // it can execute from prompt text must reach it untouched. /clear is the
-    // proof — the Claude runtime advertises and executes it (it starts a
-    // fresh session, keeping the thread), and intercepting it broke a real
-    // workflow. Only CH3's native surfaces (/mcp, /rewind, /resume <id>) win
-    // over the advertised list, because CH3 implements them better.
-    const interceptBuiltin =
-      interactiveBuiltin !== null &&
-      shouldInterceptComposerBuiltin({
-        builtin: interactiveBuiltin,
-        providerCommandNames: (activeProviderStatus?.slashCommands ?? []).map(
-          (command) => command.name,
-        ),
-      });
-    if (interactiveBuiltin && interceptBuiltin) {
+    // paid model turn on a message that just describes the command. The
+    // runtime's own advertised list wins where it has one — /clear is the
+    // proof, and intercepting it broke a real workflow.
+    const interactiveBuiltin = resolveInterceptedComposerBuiltin({
+      trimmedPrompt: trimmed,
+      hasAttachments:
+        composerImages.length > 0 ||
+        sendableComposerTerminalContexts.length > 0 ||
+        composerElementContexts.length > 0 ||
+        composerPreviewAnnotations.length > 0 ||
+        composerReviewComments.length > 0,
+      providerCommandNames: (activeProviderStatus?.slashCommands ?? []).map(
+        (command) => command.name,
+      ),
+    });
+    if (interactiveBuiltin) {
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
@@ -5141,6 +5116,34 @@ function ChatViewContent(props: ChatViewProps) {
           environmentId: activeThread.environmentId,
           threadId: activeThread.id,
         });
+        return;
+      }
+      if (interactiveBuiltin === "clear") {
+        // Only reached when the runtime does NOT advertise its own /clear.
+        // Stopping the session is CH3's fresh context: the thread, its
+        // history and its sidebar position all survive, and the next message
+        // starts the provider over.
+        void (async () => {
+          const result = await stopThreadSession({
+            environmentId: activeThread.environmentId,
+            input: { threadId: activeThread.id },
+          });
+          toastManager.add(
+            stackedThreadToast(
+              result._tag === "Failure"
+                ? {
+                    type: "error",
+                    title: "Could not clear the context",
+                    description: "The provider session could not be stopped.",
+                  }
+                : {
+                    type: "success",
+                    title: "Context cleared",
+                    description: "The next message starts a fresh provider session in this thread.",
+                  },
+            ),
+          );
+        })();
         return;
       }
       if (interactiveBuiltin === "resume") {
@@ -5227,26 +5230,18 @@ function ChatViewContent(props: ChatViewProps) {
     const composerElementContextsSnapshot = [...composerElementContexts];
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
     const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
-    const messageTextWithContexts = appendElementContextsToPrompt(
-      appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
-      composerElementContextsSnapshot,
-    );
-    const messageTextWithPreviewAnnotations = composerPreviewAnnotationsSnapshot.reduce(
-      (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
-      messageTextWithContexts,
-    );
-    const messageTextForSend = appendReviewCommentsToPrompt(
-      messageTextWithPreviewAnnotations,
-      composerReviewCommentsSnapshot,
-    );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
-    const outgoingMessageText = formatOutgoingPrompt({
+    const outgoingMessageText = buildOutgoingTurnText({
+      prompt: promptForSend,
+      terminalContexts: composerTerminalContextsSnapshot,
+      elementContexts: composerElementContextsSnapshot,
+      previewAnnotations: composerPreviewAnnotationsSnapshot,
+      reviewComments: composerReviewCommentsSnapshot,
       provider: ctxSelectedProvider,
       model: ctxSelectedModel,
       models: ctxSelectedProviderModels,
       effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
     });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({

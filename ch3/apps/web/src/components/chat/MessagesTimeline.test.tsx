@@ -657,4 +657,56 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("lucide-x");
     expect(markup).toContain('aria-label="Tool call failed"');
   });
+
+  it("renders the Worked-for control above the turn and again under its reply", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "user-entry",
+            kind: "message",
+            createdAt: "2026-03-17T19:12:00.000Z",
+            message: {
+              id: MessageId.make("message-user"),
+              role: "user",
+              text: "Build it",
+              turnId: null,
+              createdAt: "2026-03-17T19:12:00.000Z",
+              updatedAt: "2026-03-17T19:12:00.000Z",
+              streaming: false,
+            },
+          },
+          {
+            id: "work-entry",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:05.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:05.000Z",
+              turnId: TurnId.make("turn-1"),
+              label: "Ran command",
+              tone: "tool",
+            },
+          },
+          {
+            id: "assistant-final-entry",
+            kind: "message",
+            createdAt: "2026-03-17T19:12:20.000Z",
+            message: {
+              id: MessageId.make("message-assistant"),
+              role: "assistant",
+              text: "Done",
+              turnId: TurnId.make("turn-1"),
+              createdAt: "2026-03-17T19:12:20.000Z",
+              updatedAt: "2026-03-17T19:12:22.000Z",
+              streaming: false,
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup.match(/Worked for 22s/g)).toHaveLength(2);
+  });
 });
