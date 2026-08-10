@@ -64,6 +64,17 @@ describe("resolveDroppedFilePaths", () => {
     expect(result.unresolved).toEqual(["a.epub"]);
   });
 
+  it("uses the uri-list alone when the drag exposes no File objects", () => {
+    // The silent no-op: types said "Files", dataTransfer.files was empty, and
+    // requiring a File per URL meant nothing was inserted and nothing said so.
+    const result = resolveDroppedFilePaths({
+      files: [],
+      uriList: "file:///Users/Conrad/a.epub\nfile:///Users/Conrad/b%20c.pdf",
+    });
+    expect(result.paths).toEqual(["/Users/Conrad/a.epub", "/Users/Conrad/b c.pdf"]);
+    expect(result.unresolved).toEqual([]);
+  });
+
   it("reports files whose path cannot be established", () => {
     const result = resolveDroppedFilePaths({ files: [file("pasted.bin")] });
     expect(result.paths).toEqual([]);

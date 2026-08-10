@@ -2729,30 +2729,46 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (imageFiles.length > 0) {
       void addComposerImages(imageFiles);
     }
-    if (otherFiles.length > 0) {
-      // Read before any await: the DataTransfer is neutered once the event
-      // handler returns, so its uri-list has to be taken now.
+    // The DataTransfer is neutered the moment this handler returns, so every
+    // read of it happens here, synchronously. `text/plain` is consulted too:
+    // some sources publish the file URL only there.
+    const uriList = [
+      event.dataTransfer.getData("text/uri-list"),
+      event.dataTransfer.getData("text/plain"),
+    ]
+      .filter((value) => value.length > 0)
+      .join("\n");
+    if (otherFiles.length > 0 || (imageFiles.length === 0 && uriList.length > 0)) {
       const { paths, unresolved } = resolveDroppedFilePaths({
         files: otherFiles,
-        uriList: event.dataTransfer.getData("text/uri-list"),
+        uriList,
         ...(window.desktopBridge?.getPathForFile
           ? { getPathForFile: window.desktopBridge.getPathForFile }
           : {}),
       });
       if (paths.length > 0) {
-        insertComposerTextAtEnd(composerTextForDroppedPaths(paths), {
+        const inserted = insertComposerTextAtEnd(composerTextForDroppedPaths(paths), {
           ensureLeadingBoundary: true,
         });
-      }
-      // Only what genuinely could not be resolved is reported, and it names the
-      // real problem — no path — instead of blaming the file's type.
-      if (unresolved.length > 0 && activeThreadId) {
-        setThreadError(
-          activeThreadId,
-          unresolved.length === 1
-            ? `Could not read a path for '${unresolved[0]}'. Attach it as an image, or paste its path.`
-            : `Could not read paths for ${unresolved.length} dropped files. Paste their paths instead.`,
-        );
+        // A rejected insert means the composer is mid-approval, connecting, or
+        // waiting on plan input. Saying so beats a drop that appears to work
+        // and leaves the prompt untouched.
+        if (!inserted) {
+          toastManager.add({
+            type: "error",
+            title: "Unable to add to chat",
+            description: "The composer is busy; try again once it is ready.",
+          });
+        }
+      } else if (unresolved.length > 0) {
+        toastManager.add({
+          type: "error",
+          title: "Could not read a path for that file",
+          description:
+            unresolved.length === 1
+              ? `'${unresolved[0]}' carried no filesystem path. Paste its path instead.`
+              : `${unresolved.length} dropped files carried no filesystem path.`,
+        });
       }
     }
     focusComposer();

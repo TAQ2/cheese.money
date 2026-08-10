@@ -35,6 +35,19 @@ export function resolveDroppedFilePaths(input: {
   const unresolved: string[] = [];
   const seen = new Set<string>();
 
+  // A drag can carry file URLs while exposing no File objects at all — a drop
+  // out of an app that publishes only `text/uri-list`, or one Chromium
+  // declines to materialise. The URLs are the whole answer in that case, and
+  // requiring a matching File turned the drop into a silent no-op.
+  if (input.files.length === 0) {
+    for (const path of fromUriList) {
+      if (seen.has(path)) continue;
+      seen.add(path);
+      paths.push(path);
+    }
+    return { paths, unresolved };
+  }
+
   input.files.forEach((file, index) => {
     const bridgePath = input.getPathForFile?.(file) ?? null;
     // The uri-list entries arrive in drop order, so index alignment holds; the
