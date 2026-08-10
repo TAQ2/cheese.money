@@ -22,15 +22,15 @@ A hard platform constraint you must respect and communicate: **you cannot execut
 Claude Code writes the live transcript to:
 
 ```
-~/.claude/projects/<project-slug>/<session-uuid>.jsonl
+${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<project-slug>/<session-uuid>.jsonl
 ```
 
-where `<project-slug>` is the absolute working directory with every `/` replaced by `-` (e.g. `/Users/Conrad/Desktop/Foo` → `-Users-Conrad-Desktop-Foo`).
+where `<project-slug>` is the absolute working directory with every `/` replaced by `-` (e.g. `/Users/Conrad/Desktop/Foo` → `-Users-Conrad-Desktop-Foo`). Use the variable, not a literal `~/.claude`: a session running on a non-default account has its own config directory, and that is where its transcripts are.
 
 The current session is the **most recently modified** `.jsonl` in that directory:
 
 ```bash
-ls -t ~/.claude/projects/<project-slug>/*.jsonl | head -1
+ls -t "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/<project-slug>/*.jsonl | head -1
 ```
 
 **Verify it is really this session** before proceeding: grep the candidate file for a distinctive string from the last few turns of this conversation (an unusual phrase the user typed, a filename you just created). If it doesn't match (parallel session in the same project), check the next-newest file. Never summarize the wrong session.

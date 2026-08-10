@@ -68,6 +68,48 @@ The doctrine is carried in three places that must stay in agreement:
 
 ---
 
+## Which account the run spends
+
+Every `claude` the orchestrator launches binds to the account the **CH3 work environment currently has selected** — the one shown in CH3's account switcher — not to whatever `~/.claude` happens to hold. In CH3 an account *is* a `CLAUDE_CONFIG_DIR` (its own OAuth credentials, settings, MCP servers and rate limits), so the binding is that directory, exported into every launch.
+
+Resolution order, first hit wins:
+
+| Source | When it applies |
+|---|---|
+| `CLAUDE_ACCOUNT_CONFIG_DIR` | Explicit operator override. Set it to the empty string to force Claude Code's own default account. |
+| `CH3_SETTINGS_PATH` | Exported by CH3 into every terminal it spawns. Re-read at launch, so the **live** selection beats a value inherited before the last account switch. |
+| `~/.ch3/userdata/settings.json` | Runs started outside a CH3 terminal. (`~/.ch3/dev` belongs to `bun dev` and is deliberately not consulted.) |
+| `CLAUDE_CONFIG_DIR` | Already in the environment, and no CH3 settings file was readable. |
+| — | Claude Code's default config directory. |
+
+A settings file that resolves to an **empty** `homePath` is an answer, not a miss: it means CH3 has the default account selected, and the run then unsets `CLAUDE_CONFIG_DIR` rather than letting an inherited value stand in for it.
+
+The preflight prints the resolved account and **refuses to start** on:
+
+- a selected directory that does not exist — Claude Code would create an empty, signed-out config there and every pane would stall on an unwatched `/login`;
+- nothing signed into it (unless `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` is set, or `CLAUDE_ACCOUNT_ALLOW_UNIDENTIFIED=true`, for profiles that authenticate without OAuth);
+- a settings file that exists but cannot be parsed — falling through would quietly bind the run to whatever the next source says;
+- a relative `homePath` — it would resolve differently in the CH3 server, the orchestrator, and each tmux pane.
+
+If no CH3 settings file is readable at all, the run continues but warns: the account is a fallback, not a verified match against what CH3 shows.
+
+### Switching accounts mid-run
+
+Switching accounts in CH3 while a run is in flight reaches the run. A live `claude` process cannot be repointed — it read `CLAUDE_CONFIG_DIR` at startup and already holds that account's credentials — so the change lands in two ways:
+
+- **Every later launch** (next stage, next reviewer, every oneshot) resolves the selection again and starts on the new account.
+- **Every running pane** is relaunched onto the new account at its next **turn boundary**, resuming the same session id, so the conversation continues instead of restarting.
+
+Never mid-turn: killing a pane while the model is answering throws away that turn's work. A change spotted during a turn is announced immediately and applied the moment the turn ends.
+
+A switch is **refused**, with the run continuing on the account it started with, when the new account does not exist, has nobody signed in, or cannot reach this run's transcripts from its own `projects/` directory (resuming there would restart every agent with no context). A half-written settings file is ignored rather than mistaken for a switch.
+
+`CLAUDE_ACCOUNT_WATCH_INTERVAL_SECS` (default 10) sets how often a run re-checks the selection.
+
+Turn completion is polled from the bound account's own transcript store (`<config dir>/projects/`), not from a fixed `~/.claude/projects`.
+
+---
+
 ## Quick start
 
 1. Copy this folder into your repo (or a sibling "LLM coding agent documents/" folder).
