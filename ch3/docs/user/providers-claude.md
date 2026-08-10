@@ -84,6 +84,31 @@ CLAUDE_CONFIG_DIR path: ~/.claude_personal_home
 Use the email shown in Settings to confirm each provider is using the intended account. Emails are
 blurred by default; click the blurred email to reveal it.
 
+## The Terminal Uses The Same Account
+
+The selected account is not only for the composer. Every terminal CH3 starts is given that
+account's config directory, so a `claude` you launch yourself — or a script or orchestrator that
+launches several — runs as the same account the composer runs as, and spends the same limits.
+
+Two variables carry it into the terminal:
+
+| Variable            | What it is                                                                                                                                                     |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_CONFIG_DIR` | The selected account's config directory. **Absent** when the selection is Claude Code's default account, because that account is the one with no variable set. |
+| `CH3_SETTINGS_PATH` | Where the live selection can be re-read.                                                                                                                       |
+
+A shell keeps the environment it was started with for its whole life, so a terminal opened _before_
+you switched accounts still holds the old `CLAUDE_CONFIG_DIR`. Switching accounts does not restart
+terminals — that would kill whatever is running in them — so a long-lived process that needs the
+current account should re-read `CH3_SETTINGS_PATH` rather than trust the inherited variable. Opening
+a new terminal, or restarting one, also picks up the switch.
+
+An explicit environment variable set on a terminal still wins over the selection.
+
+If CH3 cannot read its own settings file, it falls back to its defaults everywhere — the composer
+included — so terminals are handed the default account too. The terminal and the composer never
+disagree about which account they are on.
+
 ## Can I Switch Claude Accounts In An Existing Thread?
 
 Usually, no.

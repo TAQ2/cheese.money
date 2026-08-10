@@ -51,14 +51,30 @@ export const effectiveClaudeHomePathSetting = Effect.fn("effectiveClaudeHomePath
   },
 );
 
+/**
+ * The `CLAUDE_CONFIG_DIR` value a Claude setting implies, or `null` when the
+ * account is the CLI's own default config directory.
+ *
+ * `null` means the variable must be UNSET, not set to `~/.claude` — see
+ * `effectiveClaudeHomePathSetting` for why those differ. Callers that overlay
+ * an inherited environment must honour the distinction by DELETING the
+ * variable, otherwise a stale inherited value silently outranks the account
+ * the user actually selected.
+ */
+export const claudeConfigDirOverride = Effect.fn("claudeConfigDirOverride")(function* (
+  config: Pick<ClaudeSettings, "homePath">,
+): Effect.fn.Return<string | null, never, Path.Path> {
+  const homePath = yield* effectiveClaudeHomePathSetting(config);
+  return homePath.length === 0 ? null : yield* resolveClaudeHomePath({ homePath });
+});
+
 export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function* (
   config: Pick<ClaudeSettings, "homePath">,
   baseEnv?: NodeJS.ProcessEnv,
 ): Effect.fn.Return<NodeJS.ProcessEnv, never, Path.Path> {
   const resolvedBaseEnv = baseEnv ?? process.env;
-  const homePath = yield* effectiveClaudeHomePathSetting(config);
-  if (homePath.length === 0) return resolvedBaseEnv;
-  const resolvedHomePath = yield* resolveClaudeHomePath({ homePath });
+  const resolvedHomePath = yield* claudeConfigDirOverride(config);
+  if (resolvedHomePath === null) return resolvedBaseEnv;
   return {
     ...resolvedBaseEnv,
     // Isolate this instance's config via CLAUDE_CONFIG_DIR rather than HOME.

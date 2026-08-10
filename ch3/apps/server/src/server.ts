@@ -305,6 +305,11 @@ const OpenCodeUsageMetricsLayerLive = OpenCodeUsageMetrics.layer.pipe(
 const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PtyAdapterLive),
   Layer.provide(PortScannerLayerLive),
+  // Terminals bind to the Claude account the environment has selected, so the
+  // manager reads settings on every spawn. Provided explicitly rather than
+  // relying on the runtime chain below, where this layer sits ahead of
+  // `ServerSettingsLayerLive` and would not see it.
+  Layer.provide(ServerSettingsLayerLive),
 );
 
 const PreviewLayerLive = Layer.empty.pipe(
@@ -358,11 +363,11 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(
     Layer.mergeAll(
-    TerminalLayerLive,
-    PreviewLayerLive,
-    ClaudeStatusLineLayerLive,
-    OpenCodeUsageMetricsLayerLive,
-  ),
+      TerminalLayerLive,
+      PreviewLayerLive,
+      ClaudeStatusLineLayerLive,
+      OpenCodeUsageMetricsLayerLive,
+    ),
   ),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),

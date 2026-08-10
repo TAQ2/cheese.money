@@ -59,6 +59,12 @@ import {
 } from "../observability/Metrics.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
+import { claudeConfigDirOverride } from "../provider/Drivers/ClaudeHome.ts";
+import {
+  resolveClaudeInstanceHomePath,
+  type ClaudeInstanceMap,
+} from "../provider/Drivers/claudeInstanceHome.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
 
 export {
@@ -1112,9 +1118,37 @@ function stripAppImageRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return scrubbed;
 }
 
+/**
+ * The Claude account the environment has selected, as it reaches a terminal.
+ *
+ * `configDir: null` means the selection IS the CLI's default config directory,
+ * which the variable must be absent for — so `null` deletes an inherited value
+ * instead of leaving it in place. Anything the user starts in a terminal
+ * (`claude`, an orchestrator driving it, a status script) then runs as the same
+ * account the composer runs as, which is what the account switcher promises.
+ */
+interface TerminalClaudeAccount {
+  /**
+   * `null` covers two states that behave identically and must: CH3 has the
+   * default account selected, and CH3 could not read its own settings at all
+   * (a corrupt settings file falls back to defaults server-wide, so the
+   * composer runs on the default account too — a terminal that matched it is
+   * correct, not a silent downgrade).
+   */
+  readonly configDir: string | null;
+  /**
+   * Where the live selection can be re-read. A shell started before an account
+   * switch carries the OLD `CLAUDE_CONFIG_DIR` for its whole life, so a
+   * long-lived process needs a way to resolve the CURRENT account rather than
+   * the one that happened to be selected when its terminal opened.
+   */
+  readonly settingsPath: string;
+}
+
 function createTerminalSpawnEnv(
   baseEnv: NodeJS.ProcessEnv,
   runtimeEnv?: Record<string, string> | null,
+  claudeAccount?: TerminalClaudeAccount | null,
 ): NodeJS.ProcessEnv {
   const spawnEnv: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
@@ -1122,6 +1156,25 @@ function createTerminalSpawnEnv(
     if (shouldExcludeTerminalEnvKey(key)) continue;
     spawnEnv[key] = value;
   }
+  if (claudeAccount) {
+    spawnEnv.CH3_SETTINGS_PATH = claudeAccount.settingsPath;
+    // Windows environment names are case-insensitive, so an inherited
+    // `Claude_Config_Dir` is the SAME variable to the CLI while being a
+    // different key in this plain object. Deleting only the canonical spelling
+    // would leave it behind and let it outrank the selected account.
+    for (const key of Object.keys(spawnEnv)) {
+      if (key !== "CLAUDE_CONFIG_DIR" && key.toUpperCase() === "CLAUDE_CONFIG_DIR") {
+        delete spawnEnv[key];
+      }
+    }
+    if (claudeAccount.configDir === null) {
+      delete spawnEnv.CLAUDE_CONFIG_DIR;
+    } else {
+      spawnEnv.CLAUDE_CONFIG_DIR = claudeAccount.configDir;
+    }
+  }
+  // Applied last: an explicit per-terminal env is the caller stating exactly
+  // what it wants, which outranks the ambient account selection.
   if (runtimeEnv) {
     for (const [key, value] of Object.entries(runtimeEnv)) {
       spawnEnv[key] = value;
@@ -1158,17 +1211,75 @@ interface TerminalManagerOptions {
     readonly threadId: string;
     readonly terminalId: string;
   }) => Effect.Effect<void>;
+  /**
+   * Resolved at every PTY spawn, not once at construction, so a terminal
+   * started after an account switch binds to the account selected NOW. Total
+   * by contract: when the account cannot be determined at all, this yields
+   * `null` and the terminal's environment is left untouched rather than the
+   * spawn failing.
+   *
+   * Deliberately NOT part of the session's `runtimeEnv`: a change there
+   * restarts a live terminal (`launchContextChanged`), which would kill
+   * whatever is running in it — an in-flight orchestration included — the
+   * moment the account was switched.
+   */
+  claudeAccount?: () => Effect.Effect<TerminalClaudeAccount | null>;
 }
 
+/**
+ * The account a terminal must bind to, from the settings it is spawned under.
+ *
+ * Read from the provider INSTANCE config, which is where the account switcher
+ * writes `homePath` — the legacy `providers.claudeAgent` block is an empty
+ * object on a switched machine, so reading that would hand every terminal the
+ * default account no matter which one is selected.
+ *
+ * Exported for the sake of being testable: with the resolution buried in a
+ * closure inside `make`, a version that read the legacy block instead would
+ * pass every terminal test, because those inject the resolver.
+ */
+export const resolveTerminalClaudeAccount = Effect.fn("resolveTerminalClaudeAccount")(
+  function* (input: {
+    readonly providerInstances: ClaudeInstanceMap | undefined;
+    readonly legacyHomePath: string | undefined;
+    readonly settingsPath: string;
+  }): Effect.fn.Return<TerminalClaudeAccount, never, Path.Path> {
+    const homePath = resolveClaudeInstanceHomePath({
+      providerInstances: input.providerInstances,
+      legacyHomePath: input.legacyHomePath,
+    });
+    const configDir = yield* claudeConfigDirOverride({ homePath });
+    return { configDir, settingsPath: input.settingsPath };
+  },
+);
+
 export const make = Effect.fn("TerminalManager.make")(function* () {
-  const { terminalLogsDir } = yield* ServerConfig.ServerConfig;
+  const { terminalLogsDir, settingsPath } = yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
   const portDiscovery = yield* PortScanner.PortDiscovery;
+  const serverSettings = yield* ServerSettingsService;
+  const path = yield* Path.Path;
   return yield* makeWithOptions({
     logsDir: terminalLogsDir,
     ptyAdapter,
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
+    claudeAccount: () =>
+      serverSettings.getSettings.pipe(
+        Effect.flatMap((settings) =>
+          resolveTerminalClaudeAccount({
+            providerInstances: settings.providerInstances,
+            legacyHomePath: settings.providers?.claudeAgent?.homePath,
+            settingsPath,
+          }),
+        ),
+        Effect.provideService(Path.Path, path),
+        // `orElseSucceed` alone only covers the typed error channel. A defect —
+        // a settings object missing a branch this walks, a throw from inside a
+        // `map` — would otherwise escape and fail the whole spawn, turning
+        // "we could not tell which account" into "you get no terminal".
+        Effect.catchCause(() => Effect.succeed(null)),
+      ),
   });
 });
 
@@ -1884,7 +1995,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.andThen(
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
-            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
+            const claudeAccount = options.claudeAccount ? yield* options.claudeAccount() : null;
+            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv, claudeAccount);
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;

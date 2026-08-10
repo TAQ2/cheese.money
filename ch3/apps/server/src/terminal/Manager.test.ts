@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as NodeOS from "node:os";
 import {
   DEFAULT_TERMINAL_ID,
   type TerminalAttachStreamEvent,
@@ -24,7 +25,7 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
-import { expect } from "vite-plus/test";
+import { describe, expect } from "vite-plus/test";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as TerminalManager from "./Manager.ts";
@@ -213,6 +214,10 @@ interface CreateManagerOptions {
   processKillGraceMs?: number;
   maxRetainedInactiveSessions?: number;
   ptyAdapter?: FakePtyAdapter;
+  claudeAccount?: () => Effect.Effect<{
+    readonly configDir: string | null;
+    readonly settingsPath: string;
+  } | null>;
 }
 
 interface ManagerFixture {
@@ -254,6 +259,7 @@ const createManager = (
         ...(options.maxRetainedInactiveSessions !== undefined
           ? { maxRetainedInactiveSessions: options.maxRetainedInactiveSessions }
           : {}),
+        ...(options.claudeAccount !== undefined ? { claudeAccount: options.claudeAccount } : {}),
       });
       const eventsRef = yield* Ref.make<ReadonlyArray<TerminalEvent>>([]);
       const unsubscribe = yield* manager.subscribe((event) =>
@@ -1410,6 +1416,208 @@ it.layer(
       assert.equal(spawnInput.env.CH3CODE_PROJECT_ROOT, "/repo");
       assert.equal(spawnInput.env.CH3CODE_WORKTREE_PATH, "/repo/worktree-a");
       assert.equal(spawnInput.env.CUSTOM_FLAG, "1");
+    }),
+  );
+
+  // A `claude` started in a terminal — by hand or by an orchestrator driving
+  // tmux panes — must run as the account the environment has selected. Without
+  // this the CLI reads its default config directory and silently spends a
+  // different subscription's limits than the composer does.
+  it.effect("binds spawned terminals to the selected Claude account", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { PATH: "/usr/bin" },
+        claudeAccount: () =>
+          Effect.succeed({
+            configDir: "/home/user/.claude-work",
+            settingsPath: "/home/user/.ch3/userdata/settings.json",
+          }),
+      });
+      yield* manager.open(openInput());
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      assert.equal(spawnInput.env.CLAUDE_CONFIG_DIR, "/home/user/.claude-work");
+      // The live selection stays re-readable: a shell outlives the switch that
+      // happens after it started, so its inherited value can go stale.
+      assert.equal(spawnInput.env.CH3_SETTINGS_PATH, "/home/user/.ch3/userdata/settings.json");
+    }),
+  );
+
+  it.effect("unsets CLAUDE_CONFIG_DIR when the default account is selected", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        // CH3 itself may have been launched from a shell that exported this.
+        // Selecting the default account must WIN over that inherited value,
+        // and the default account is the one with no variable set at all —
+        // pointing it at ~/.claude makes the CLI report "Not logged in".
+        env: { PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "/home/user/.claude-stale" },
+        claudeAccount: () =>
+          Effect.succeed({
+            configDir: null,
+            settingsPath: "/home/user/.ch3/userdata/settings.json",
+          }),
+      });
+      yield* manager.open(openInput());
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      expect(spawnInput.env.CLAUDE_CONFIG_DIR).toBeUndefined();
+    }),
+  );
+
+  it.effect("lets an explicit terminal env override the selected account", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { PATH: "/usr/bin" },
+        claudeAccount: () =>
+          Effect.succeed({
+            configDir: "/home/user/.claude-work",
+            settingsPath: "/home/user/.ch3/userdata/settings.json",
+          }),
+      });
+      yield* manager.open(openInput({ env: { CLAUDE_CONFIG_DIR: "/home/user/.claude-explicit" } }));
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      assert.equal(spawnInput.env.CLAUDE_CONFIG_DIR, "/home/user/.claude-explicit");
+    }),
+  );
+
+  // These pin the resolution itself, not the overlay. Every test above injects
+  // `claudeAccount`, so an implementation that read the legacy
+  // `providers.claudeAgent` block — empty on a switched machine, and the exact
+  // bug this feature exists to avoid — would pass all of them.
+  describe("resolveTerminalClaudeAccount", () => {
+    const claudeInstance = (config: unknown, enabled?: boolean) => ({
+      driver: "claudeAgent" as never,
+      ...(enabled === undefined ? {} : { enabled }),
+      config: config as never,
+    });
+
+    const resolve = (
+      providerInstances: Record<string, unknown> | undefined,
+      legacyHomePath?: string,
+    ) =>
+      TerminalManager.resolveTerminalClaudeAccount({
+        providerInstances: providerInstances as never,
+        legacyHomePath,
+        settingsPath: "/state/settings.json",
+      });
+
+    it.effect("takes the selected account from the provider instance", () =>
+      Effect.gen(function* () {
+        const account = yield* resolve(
+          { claudeAgent: claudeInstance({ homePath: "/home/user/.claude-work" }) },
+          // A legacy value must never win: it is stale on a switched machine.
+          "/home/user/.claude-legacy",
+        );
+        assert.equal(account.configDir, "/home/user/.claude-work");
+        assert.equal(account.settingsPath, "/state/settings.json");
+      }),
+    );
+
+    it.effect("prefers the default instance id, then enabled ones", () =>
+      Effect.gen(function* () {
+        // Default slot carries no path, so the next instance decides — and a
+        // disabled instance sorts behind an enabled one even when declared first.
+        const account = yield* resolve({
+          claudeAgent: claudeInstance({ homePath: "" }),
+          older: claudeInstance({ homePath: "/home/user/.claude-disabled" }, false),
+          newer: claudeInstance({ homePath: "/home/user/.claude-enabled" }, true),
+        });
+        assert.equal(account.configDir, "/home/user/.claude-enabled");
+      }),
+    );
+
+    it.effect("treats an instance with no homePath as the default account", () =>
+      Effect.gen(function* () {
+        // Must NOT fall through to the legacy block — that fallback is what
+        // silently pinned earlier features to the default account.
+        const account = yield* resolve(
+          { claudeAgent: claudeInstance({}) },
+          "/home/user/.claude-legacy",
+        );
+        assert.equal(account.configDir, null);
+      }),
+    );
+
+    it.effect("falls back to the legacy home path only when no instance exists", () =>
+      Effect.gen(function* () {
+        const account = yield* resolve(
+          { codex: { driver: "codexCli" as never, config: {} as never } },
+          "/home/user/.claude-legacy",
+        );
+        assert.equal(account.configDir, "/home/user/.claude-legacy");
+      }),
+    );
+
+    it.effect("reports the default account as null rather than ~/.claude", () =>
+      Effect.gen(function* () {
+        // Setting CLAUDE_CONFIG_DIR to the default directory is not the same as
+        // leaving it unset — the CLI keeps its config beside that directory, so
+        // an explicit path there makes it report "Not logged in".
+        const path = yield* Path.Path;
+        const account = yield* resolve({
+          claudeAgent: claudeInstance({
+            homePath: path.join(NodeOS.homedir(), ".claude"),
+          }),
+        });
+        assert.equal(account.configDir, null);
+      }),
+    );
+
+    it.effect("ignores a whitespace-only homePath", () =>
+      Effect.gen(function* () {
+        const account = yield* resolve({
+          claudeAgent: claudeInstance({ homePath: "   " }),
+          other: claudeInstance({ homePath: "/home/user/.claude-real" }),
+        });
+        assert.equal(account.configDir, "/home/user/.claude-real");
+      }),
+    );
+
+    it.effect("survives an instance whose config is not an object", () =>
+      Effect.gen(function* () {
+        // `config` is an unvalidated blob in the settings schema, so a garbage
+        // value reaches this code rather than being rejected on load.
+        const account = yield* resolve({
+          claudeAgent: claudeInstance("broken"),
+          other: claudeInstance({ homePath: "/home/user/.claude-real" }),
+        });
+        assert.equal(account.configDir, "/home/user/.claude-real");
+      }),
+    );
+
+    it.effect("expands a tilde home path", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const account = yield* resolve({
+          claudeAgent: claudeInstance({ homePath: "~/.claude-tilde" }),
+        });
+        assert.equal(account.configDir, path.join(NodeOS.homedir(), ".claude-tilde"));
+      }),
+    );
+  });
+
+  it.effect("leaves the terminal env alone when the account cannot be resolved", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "/home/user/.claude-inherited" },
+        // An unreadable settings file resolves to `null`: a terminal must
+        // still open, carrying whatever the environment already had.
+        claudeAccount: () => Effect.succeed(null),
+      });
+      yield* manager.open(openInput());
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      assert.equal(spawnInput.env.CLAUDE_CONFIG_DIR, "/home/user/.claude-inherited");
+      expect(spawnInput.env.CH3_SETTINGS_PATH).toBeUndefined();
     }),
   );
 
