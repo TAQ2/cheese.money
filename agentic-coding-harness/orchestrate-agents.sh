@@ -1533,6 +1533,19 @@ claude_prepare_config_dir() {
     local version; version=$(claude --version 2>/dev/null | awk '{print $1}')
     [[ -n "$version" ]] || version="0.0.0"
     [[ -f "$config_json" ]] || echo '{}' > "$config_json" 2>/dev/null || return 0
+    # The bypass-permissions dialog is gated from settings.json, not
+    # .claude.json, and it is the dangerous one: its default is "1. No, exit",
+    # so a pasted prompt's Enter QUITS the CLI. Verified by accepting it once
+    # and diffing the config dir — this is the exact key the CLI writes.
+    local settings_json; settings_json="$(dirname "$config_json")/settings.json"
+    [[ "$config_json" == "$HOME/.claude.json" ]] && settings_json="$HOME/.claude/settings.json"
+    if [[ -d "$(dirname "$settings_json")" ]]; then
+        [[ -f "$settings_json" ]] || echo '{}' > "$settings_json" 2>/dev/null || true
+        local stmp="${settings_json}.orch-prep.$$"
+        jq '.skipDangerousModePermissionPrompt = true' "$settings_json" > "$stmp" 2>/dev/null \
+            && mv "$stmp" "$settings_json" 2>/dev/null || rm -f "$stmp" 2>/dev/null
+    fi
+
     local tmp="${config_json}.orch-prep.$$"
     jq --arg dir "$real_cwd" --arg ver "$version" '
         .hasCompletedOnboarding = true
