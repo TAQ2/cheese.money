@@ -947,7 +947,13 @@ tmux_new_uuid() {
 
 # Locate session JSONL by UUID (Claude Code's cwd-encoding is fiddly; just find).
 tmux_jsonl_for() {
-    find "$CLAUDE_PROJECTS_DIR" -maxdepth 3 -name "${1}.jsonl" -print -quit 2>/dev/null
+    # -L is load-bearing. CH3 shares transcripts between accounts by making
+    # <config-dir>/projects a SYMLINK to the default account's projects dir,
+    # and `find` does not descend a symlinked starting point — so this returned
+    # nothing for every rotated-to account, tmux_wait waited out its 180s on a
+    # JSONL that was there the whole time, and the run died with
+    # "JSONL not created for sid=... within 180s".
+    find -L "$CLAUDE_PROJECTS_DIR" -maxdepth 3 -name "${1}.jsonl" -print -quit 2>/dev/null
 }
 
 # session_file basename → tmux window/role:
@@ -1313,11 +1319,14 @@ claude_account_sessions_reachable() {
         [[ -n "${sf:-}" && -s "${sf:-}" ]] || continue
         sid=$(tr -d '[:space:]' < "$sf")
         [[ -n "$sid" ]] || continue
-        find "$projects" -maxdepth 3 -name "${sid}.jsonl" -print -quit 2>/dev/null | grep -q . && continue
+        # Same -L as tmux_jsonl_for, and for the same reason: the target's
+        # projects/ is usually a symlink into the default account's store, in
+        # which case the transcripts are ALREADY shared and nothing is copied.
+        find -L "$projects" -maxdepth 3 -name "${sid}.jsonl" -print -quit 2>/dev/null | grep -q . && continue
         # ONLY this run's own transcripts move. Copying the whole projects tree
         # would drag every unrelated conversation on the machine into another
         # account's directory.
-        src=$(find "${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}" "$HOME/.claude/projects" \
+        src=$(find -L "${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}" "$HOME/.claude/projects" \
               -maxdepth 3 -name "${sid}.jsonl" -print -quit 2>/dev/null || true)
         [[ -n "$src" ]] || return 1
         dest="${projects}/$(basename "$(dirname "$src")")"
@@ -1500,6 +1509,39 @@ tmux_window_for() {
 }
 
 # Idempotent. Existing JSONL for the UUID → --resume; else --session-id (new).
+# Make a config directory safe to launch the INTERACTIVE CLI against.
+#
+# A config dir that has never run `claude` interactively opens on modal
+# dialogs, and the harness pastes its prompt into them. Two of the three are
+# survivable by luck — the theme picker defaults to a theme, the folder-trust
+# prompt defaults to "Yes, I trust this folder" — but the bypass-permissions
+# prompt defaults to "1. No, exit", so the paste's Enter EXITS the CLI. No
+# session is created, nothing is written, and the run waits out its timeout
+# against a dead pane. Observed the moment rotation moved a run onto an account
+# whose config dir had only ever been used headlessly.
+#
+# Only ever seeds the two first-run flags and trust for THIS run's own working
+# directory — a worktree the orchestrator just created from the user's own
+# repository, which it is about to run in with --dangerously-skip-permissions
+# anyway. Nothing else in the file is touched, and a failure here is never
+# fatal: the dialogs still appear, exactly as before.
+claude_prepare_config_dir() {
+    local cwd="${1:-}" config_json="${CLAUDE_ACCOUNT_CONFIG_JSON:-$HOME/.claude.json}"
+    [[ -n "$cwd" ]] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    local real_cwd; real_cwd=$(cd "$cwd" 2>/dev/null && pwd -P) || real_cwd="$cwd"
+    local version; version=$(claude --version 2>/dev/null | awk '{print $1}')
+    [[ -n "$version" ]] || version="0.0.0"
+    [[ -f "$config_json" ]] || echo '{}' > "$config_json" 2>/dev/null || return 0
+    local tmp="${config_json}.orch-prep.$$"
+    jq --arg dir "$real_cwd" --arg ver "$version" '
+        .hasCompletedOnboarding = true
+        | .lastOnboardingVersion = (.lastOnboardingVersion // $ver)
+        | .projects = ((.projects // {}) | .[$dir] = ((.[$dir] // {}) | .hasTrustDialogAccepted = true))
+    ' "$config_json" > "$tmp" 2>/dev/null && mv "$tmp" "$config_json" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    return 0
+}
+
 tmux_launch() {
     local target="$1" sf="$2" sp="$3" model="$4" cwd="$5"
     # Reuse the pane only when a live claude PROCESS already owns it. Keying on
@@ -1515,6 +1557,9 @@ tmux_launch() {
         mkdir -p "$(dirname "$sf")"
         echo "$sid" > "$sf"
     fi
+    # Clear the first-run modals before the pane exists, or the prompt below is
+    # pasted into a dialog whose default answer quits the CLI.
+    claude_prepare_config_dir "$cwd"
     local flag="--session-id"
     [[ -n "$(tmux_jsonl_for "$sid")" ]] && flag="--resume"
     local env_prefix cmd
