@@ -49,14 +49,25 @@ export function resolveDroppedFilePaths(input: {
   }
 
   input.files.forEach((file, index) => {
-    const bridgePath = input.getPathForFile?.(file) ?? null;
+    // The bridge call is wrapped because it crosses Electron's context
+    // isolation boundary with a DOM object. When that boundary refuses to
+    // clone a File it throws HERE, in the renderer, before the preload's own
+    // try/catch is ever reached — and an exception thrown inside a React drop
+    // handler aborts it silently: no path, no error, nothing at all. That is
+    // exactly what a drop looked like after the bridge was introduced.
+    let bridgePath: string | null = null;
+    try {
+      bridgePath = input.getPathForFile?.(file) ?? null;
+    } catch {
+      bridgePath = null;
+    }
     // The uri-list entries arrive in drop order, so index alignment holds; the
     // name check keeps a mismatched list (a drag carrying unrelated URLs) from
     // attributing the wrong path to a file.
     const listed = fromUriList[index];
     const candidate =
       bridgePath ??
-      (listed !== undefined && (file.name.length === 0 || listed.endsWith(file.name))
+      (listed !== undefined && (file.name.length === 0 || endsWithFileName(listed, file.name))
         ? listed
         : null);
     if (candidate === null || candidate.length === 0) {
@@ -69,6 +80,18 @@ export function resolveDroppedFilePaths(input: {
   });
 
   return { paths, unresolved };
+}
+
+/**
+ * Does a uri-list path end with this file's name?
+ *
+ * Normalised on both sides: macOS stores filenames decomposed (NFD) while the
+ * name Chromium hands to the renderer can be composed (NFC), so a plain
+ * comparison fails on any accented character — and fails by claiming the file
+ * has no path, which is the worst of the available answers.
+ */
+function endsWithFileName(path: string, name: string): boolean {
+  return path.normalize("NFC").endsWith(name.normalize("NFC"));
 }
 
 /** Absolute paths from a `text/uri-list` payload; non-`file://` entries are ignored. */

@@ -2739,37 +2739,59 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       .filter((value) => value.length > 0)
       .join("\n");
     if (otherFiles.length > 0 || (imageFiles.length === 0 && uriList.length > 0)) {
-      const { paths, unresolved } = resolveDroppedFilePaths({
-        files: otherFiles,
-        uriList,
-        ...(window.desktopBridge?.getPathForFile
-          ? { getPathForFile: window.desktopBridge.getPathForFile }
-          : {}),
-      });
-      if (paths.length > 0) {
-        const inserted = insertComposerTextAtEnd(composerTextForDroppedPaths(paths), {
-          ensureLeadingBoundary: true,
+      // Everything below is wrapped because a throw inside a React drop handler
+      // is invisible: the drop simply does nothing, with no error and no clue.
+      // A drop must always end in one of insert / named failure.
+      try {
+        const { paths, unresolved } = resolveDroppedFilePaths({
+          files: otherFiles,
+          uriList,
+          ...(window.desktopBridge?.getPathForFile
+            ? { getPathForFile: window.desktopBridge.getPathForFile }
+            : {}),
         });
-        // A rejected insert means the composer is mid-approval, connecting, or
-        // waiting on plan input. Saying so beats a drop that appears to work
-        // and leaves the prompt untouched.
-        if (!inserted) {
+        if (paths.length > 0) {
+          const inserted = insertComposerTextAtEnd(composerTextForDroppedPaths(paths), {
+            ensureLeadingBoundary: true,
+          });
+          // A rejected insert means the composer is mid-approval, connecting, or
+          // waiting on plan input. Saying so beats a drop that appears to work
+          // and leaves the prompt untouched.
+          if (!inserted) {
+            toastManager.add({
+              type: "error",
+              title: "Unable to add to chat",
+              description: "The composer is busy; try again once it is ready.",
+            });
+          }
+        } else if (unresolved.length > 0) {
           toastManager.add({
             type: "error",
-            title: "Unable to add to chat",
-            description: "The composer is busy; try again once it is ready.",
+            title: "Could not read a path for that file",
+            description:
+              unresolved.length === 1
+                ? `'${unresolved[0]}' carried no filesystem path. Paste its path instead.`
+                : `${unresolved.length} dropped files carried no filesystem path.`,
           });
         }
-      } else if (unresolved.length > 0) {
+      } catch (cause) {
         toastManager.add({
           type: "error",
-          title: "Could not read a path for that file",
-          description:
-            unresolved.length === 1
-              ? `'${unresolved[0]}' carried no filesystem path. Paste its path instead.`
-              : `${unresolved.length} dropped files carried no filesystem path.`,
+          title: "Could not read the dropped file",
+          description: cause instanceof Error ? cause.message : String(cause),
         });
       }
+    } else if (imageFiles.length === 0) {
+      // The drag announced files (the guard above) yet exposed neither a File
+      // nor a URL. Naming what it DID carry is the only way to tell that apart
+      // from a handler that never ran.
+      toastManager.add({
+        type: "error",
+        title: "Nothing to add from that drop",
+        description: `The drag carried no file path. It offered: ${
+          Array.from(event.dataTransfer.types).join(", ") || "nothing"
+        }.`,
+      });
     }
     focusComposer();
   };
