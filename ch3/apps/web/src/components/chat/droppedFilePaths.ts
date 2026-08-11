@@ -49,12 +49,10 @@ export function resolveDroppedFilePaths(input: {
   }
 
   input.files.forEach((file, index) => {
-    // The bridge call is wrapped because it crosses Electron's context
-    // isolation boundary with a DOM object. When that boundary refuses to
-    // clone a File it throws HERE, in the renderer, before the preload's own
-    // try/catch is ever reached — and an exception thrown inside a React drop
-    // handler aborts it silently: no path, no error, nothing at all. That is
-    // exactly what a drop looked like after the bridge was introduced.
+    // Defensive only. Passing a File to a contextBridge-exposed function is the
+    // documented webUtils pattern and does not throw (verified against the
+    // app's own Electron under sandbox + contextIsolation); this guard exists
+    // so a future bridge change cannot take the whole drop down with it.
     let bridgePath: string | null = null;
     try {
       bridgePath = input.getPathForFile?.(file) ?? null;

@@ -2739,9 +2739,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       .filter((value) => value.length > 0)
       .join("\n");
     if (otherFiles.length > 0 || (imageFiles.length === 0 && uriList.length > 0)) {
-      // Everything below is wrapped because a throw inside a React drop handler
-      // is invisible: the drop simply does nothing, with no error and no clue.
-      // A drop must always end in one of insert / named failure.
+      // Wrapped so an unexpected failure is named rather than swallowed: a
+      // throw inside a React drop handler leaves no UI trace at all.
       try {
         const { paths, unresolved } = resolveDroppedFilePaths({
           files: otherFiles,
@@ -2793,7 +2792,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }.`,
       });
     }
-    focusComposer();
+    // Deferred, not synchronous. focusAtEnd makes the editor write its
+    // last-synced snapshot back through onChange, and inside this handler that
+    // snapshot is still pre-insert — so a synchronous focus erases the text
+    // this drop just inserted, in the same tick, leaving no error and no clue.
+    // composerMentionDrag.ts:35-40 documents this trap; the mention drop path
+    // never focuses synchronously for exactly this reason.
+    scheduleComposerFocus();
   };
 
   const insertComposerTextAtEnd = (
