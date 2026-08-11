@@ -1620,6 +1620,23 @@ function ComposerPromptEditorInner({
     (nextCursor: number) => {
       const rootElement = editor.getRootElement();
       if (!rootElement) return;
+      // A controlled update can be in flight: the parent has set a new `value`
+      // but the layout effect above has not ingested it yet, because React
+      // batches within an event handler. `snapshotRef` therefore still holds
+      // the PREVIOUS text, and reporting it below would overwrite the parent's
+      // new value with the old one — a focus call that silently reverts an
+      // edit. That is precisely how a dropped file path was inserted and then
+      // erased in the same tick (ChatComposer's drop handler), and how a
+      // dragged mention was lost before it (composerMentionDrag.ts:35-40).
+      //
+      // Focus is still moved, because that is what the caller asked for. The
+      // selection is left to the pending effect, which places it from the
+      // `cursor` prop against the text it is about to render — placing it here
+      // would be against text that is one render out of date.
+      if (value !== snapshotRef.current.value) {
+        rootElement.focus({ preventScroll: true });
+        return;
+      }
       const boundedCursor = clampCollapsedComposerCursor(snapshotRef.current.value, nextCursor);
       rootElement.focus({ preventScroll: true });
       editor.update(() => {
@@ -1639,7 +1656,7 @@ function ComposerPromptEditorInner({
         snapshotRef.current.terminalContextIds,
       );
     },
-    [editor],
+    [editor, value],
   );
 
   const readSnapshot = useCallback((): {
