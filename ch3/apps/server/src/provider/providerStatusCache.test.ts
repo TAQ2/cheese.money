@@ -13,6 +13,7 @@ import * as Logger from "effect/Logger";
 
 import {
   hydrateCachedProvider,
+  preserveProviderCapabilities,
   isCachedProviderCorrelated,
   readProviderStatusCache,
   resolveProviderStatusCachePath,
@@ -268,4 +269,50 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       fallbackCodex,
     );
   });
+});
+
+it("keeps capabilities a failed probe never measured", () => {
+  // 2026-08-11: one version-probe timeout wrote status "error" with empty
+  // slashCommands and skills for claudeAgent. CH3 then believed the provider
+  // advertised nothing: /clear silently degraded to its "runtime does not
+  // advertise /clear" fallback and the composer menu lost every command.
+  const previous = makeProvider(CLAUDE_AGENT_DRIVER, {
+    status: "ready",
+    slashCommands: [{ name: "clear" }, { name: "refresh" }],
+    skills: [{ name: "refresh", path: "/s/refresh/SKILL.md", enabled: true, scope: "user" }],
+  });
+  const timedOut = makeProvider(CLAUDE_AGENT_DRIVER, {
+    status: "error",
+    message: "Claude Agent CLI is installed but failed to run. Timed out while running command.",
+    slashCommands: [],
+    skills: [],
+  });
+
+  const merged = preserveProviderCapabilities({ previous, next: timedOut });
+  assert.deepStrictEqual(
+    merged.slashCommands.map((command) => command.name),
+    ["clear", "refresh"],
+  );
+  assert.strictEqual(merged.skills.length, 1);
+  // The failure itself is still reported — only the erasure is refused.
+  assert.strictEqual(merged.status, "error");
+  assert.match(merged.message ?? "", /Timed out/);
+});
+
+it("lets a successful probe report zero commands", () => {
+  // "I looked and there are none" is authoritative; only a degraded snapshot is
+  // barred from erasing what a ready one established.
+  const previous = makeProvider(CLAUDE_AGENT_DRIVER, {
+    status: "ready",
+    slashCommands: [{ name: "clear" }],
+  });
+  const ready = makeProvider(CLAUDE_AGENT_DRIVER, { status: "ready", slashCommands: [] });
+  assert.deepStrictEqual(preserveProviderCapabilities({ previous, next: ready }).slashCommands, []);
+});
+
+it("never borrows capabilities across providers", () => {
+  const previous = makeProvider(CODEX_DRIVER, { status: "ready", slashCommands: [{ name: "x" }] });
+  const next = makeProvider(CLAUDE_AGENT_DRIVER, { status: "error", slashCommands: [] });
+  assert.deepStrictEqual(preserveProviderCapabilities({ previous, next }).slashCommands, []);
+  assert.deepStrictEqual(preserveProviderCapabilities({ previous: undefined, next }), next);
 });

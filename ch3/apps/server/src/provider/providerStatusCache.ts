@@ -147,13 +147,63 @@ export const readProviderStatusCache = (filePath: string) =>
     );
   });
 
+/**
+ * Keep capabilities a failed probe never measured.
+ *
+ * A probe that times out returns before it can ask the CLI what it supports, so
+ * its snapshot carries an EMPTY `slashCommands` and `skills` — not "this CLI has
+ * none", but "I did not get to look". Persisting that over a good list makes the
+ * emptiness authoritative: on 2026-08-11 a single version-probe timeout wrote
+ * `status: "error", slashCommands: [], skills: []` for claudeAgent, and from then
+ * on CH3 believed the provider advertised nothing. `/clear` silently degraded to
+ * its "runtime does not advertise /clear" fallback (stop the session, keep the
+ * history) and every provider command vanished from the composer menu, for the
+ * rest of the session and every boot that hydrated from that file.
+ *
+ * A successful probe is always authoritative, including when it legitimately
+ * reports zero — only a NON-ready snapshot is barred from erasing what a ready
+ * one established.
+ */
+export const preserveProviderCapabilities = (input: {
+  readonly previous: ServerProvider | undefined;
+  readonly next: ServerProvider;
+}): ServerProvider => {
+  const { previous, next } = input;
+  if (previous === undefined) return next;
+  if (next.status === "ready") return next;
+  if (!isCachedProviderCorrelated({ cachedProvider: previous, fallbackProvider: next })) {
+    return next;
+  }
+  const keepCommands = next.slashCommands.length === 0 && previous.slashCommands.length > 0;
+  const keepSkills = next.skills.length === 0 && previous.skills.length > 0;
+  if (!keepCommands && !keepSkills) return next;
+  return {
+    ...next,
+    ...(keepCommands ? { slashCommands: previous.slashCommands } : {}),
+    ...(keepSkills ? { skills: previous.skills } : {}),
+  };
+};
+
+/** The cache payload: everything but the volatile `updateState`. */
+const serializeCacheableProvider = (provider: ServerProvider): string => {
+  const { updateState: _updateState, ...cacheableProvider } = provider;
+  return `${JSON.stringify(cacheableProvider, null, 2)}\n`;
+};
+
 export const writeProviderStatusCache = (input: {
   readonly filePath: string;
   readonly provider: ServerProvider;
-}) => {
-  const { updateState: _updateState, ...cacheableProvider } = input.provider;
-  return writeFileStringAtomically({
-    filePath: input.filePath,
-    contents: `${JSON.stringify(cacheableProvider, null, 2)}\n`,
+}) =>
+  Effect.gen(function* () {
+    // Read-before-write so a degraded probe cannot erase capabilities the last
+    // good one recorded. The read is best-effort: no cache, or an unreadable
+    // one, simply means there is nothing to preserve.
+    const previous = yield* readProviderStatusCache(input.filePath).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    const provider = preserveProviderCapabilities({ previous, next: input.provider });
+    return yield* writeFileStringAtomically({
+      filePath: input.filePath,
+      contents: serializeCacheableProvider(provider),
+    });
   });
-};
