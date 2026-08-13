@@ -55,6 +55,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate } from "@tanstack/react-router";
@@ -69,6 +70,8 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { isElectron } from "../env";
+import { writeSelectionToClipboard } from "../hooks/useCopyToClipboard";
+import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 import { readLocalApi } from "../localApi";
 import { useImportClaudeSession } from "../lib/useImportClaudeSession";
 import { useDiffPanelStore } from "../diffPanelStore";
@@ -225,6 +228,11 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import {
+  composerTextForQuotedSelection,
+  quotableSelectionText,
+  runQuotedSelectionContextMenu,
+} from "./chat/quotedSelection";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -1330,6 +1338,12 @@ function ChatViewContent(props: ChatViewProps) {
     LastInvokedScriptByProjectSchema,
   );
   const legendListRef = useRef<LegendListRef | null>(null);
+  const transcriptRegionRef = useRef<HTMLDivElement | null>(null);
+  // Which thread is on screen *now*, readable from a callback that was built in
+  // an earlier render. Comparing against the closed-over `routeThreadKey`
+  // instead compares a render's value with itself, which is never not equal.
+  const liveRouteThreadKeyRef = useRef(routeThreadKey);
+  liveRouteThreadKeyRef.current = routeThreadKey;
   const [composerOverlayElement, setComposerOverlayElement] = useState<HTMLDivElement | null>(null);
   const [composerOverlayHeight, setComposerOverlayHeight] = useState(0);
   const isAtEndRef = useRef(true);
@@ -2752,6 +2766,84 @@ function ChatViewContent(props: ChatViewProps) {
       composerRef.current?.addTerminalContext(selection);
     },
     [composerRef],
+  );
+  const quoteTranscriptFragment = useCallback(
+    (fragment: string, quotedFromThreadKey: string) => {
+      // The menu is modal but not instantaneous, and the composer handle is
+      // shared across threads: a quote taken from one conversation must not
+      // land in whichever one is open by the time the menu closes.
+      if (quotedFromThreadKey !== liveRouteThreadKeyRef.current) return;
+      const composer = composerRef.current;
+      if (!composer) return;
+      const text = composerTextForQuotedSelection(fragment);
+      // Guards the toast below, not the insert: an empty string is a rejected
+      // insert, and reporting "the composer is busy" for it would be a lie.
+      if (text.length === 0) return;
+      if (!composer.insertTextAtEnd(text, { ensureLeadingBoundary: "line" })) {
+        // A rejected insert means the composer is mid-approval, connecting, or
+        // waiting on plan input. Saying so beats a menu entry that appears to
+        // work and leaves the prompt untouched.
+        toastManager.add({
+          type: "error",
+          title: "Unable to quote into the chat",
+          description: "The composer is busy; try again once it is ready.",
+        });
+      }
+      // No focus call here: the insert already schedules one for the next frame
+      // (`applyPromptReplacement`), and a second would only re-focus what is
+      // about to be focused.
+    },
+    [composerRef, routeThreadKey],
+  );
+  const onTranscriptContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      // Images and links carry platform menu entries of their own — Copy Image,
+      // Copy Link — that this menu does not replace, so they keep theirs.
+      if (event.target instanceof Element && event.target.closest("a, img, video, canvas")) {
+        return;
+      }
+      const selection = window.getSelection();
+      // The transcript's own copy pipeline: the markdown ⌘C would have put on
+      // the clipboard, links and code fences intact. Captured once, here, while
+      // the selection is certain to still exist.
+      const payload = selection ? chatMarkdownClipboardPayload(selection) : null;
+      const fragment = quotableSelectionText(
+        selection,
+        transcriptRegionRef.current,
+        () => payload?.text ?? null,
+      );
+      // Nothing selected in the transcript: leave the platform's own menu
+      // alone, since Quote and Copy would both be dead entries.
+      if (fragment === null) return;
+      const api = readLocalApi();
+      if (!api) return;
+      event.preventDefault();
+      const quotedFromThreadKey = routeThreadKey;
+      void runQuotedSelectionContextMenu({
+        fragment,
+        position: { x: event.clientX, y: event.clientY },
+        showContextMenu: (items, position) => api.contextMenu.show(items, position),
+        quote: (text) => quoteTranscriptFragment(text, quotedFromThreadKey),
+        // Copies what was selected at right-click time, in both flavours the
+        // keyboard copy produces — not whatever the DOM selection has become by
+        // the time the menu closes.
+        copy: (text) =>
+          writeSelectionToClipboard({ text, ...(payload?.html ? { html: payload.html } : {}) }),
+        reportFailure: (operation, cause) => {
+          toastManager.add({
+            type: "error",
+            title:
+              operation === "copy"
+                ? "Could not copy the selection"
+                : operation === "quote"
+                  ? "Could not quote that"
+                  : "Could not open the selection menu",
+            description: cause instanceof Error ? cause.message : String(cause),
+          });
+        },
+      });
+    },
+    [quoteTranscriptFragment, routeThreadKey],
   );
   const setTerminalOpen = useCallback(
     (open: boolean) => {
@@ -6315,8 +6407,12 @@ function ChatViewContent(props: ChatViewProps) {
                 onDismiss={() => setDismissedProviderStatusBannerKey(providerStatusBannerKey)}
               />
             </div>
-            {/* Messages Wrapper */}
-            <div className="relative flex min-h-0 flex-1 flex-col">
+            {/* Messages Wrapper — also the region a selection must sit inside to be quotable */}
+            <div
+              ref={transcriptRegionRef}
+              onContextMenu={onTranscriptContextMenu}
+              className="relative flex min-h-0 flex-1 flex-col"
+            >
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
                 key={activeThread.id}

@@ -48,6 +48,43 @@ export async function writeTextToClipboard(value: string, target = "text") {
   }
 }
 
+/**
+ * Copy a selection the way the transcript's own `copy` handler would: markdown
+ * as `text/plain`, the sanitised fragment as `text/html`.
+ *
+ * Both flavours in one write, from text captured up front. Re-running the
+ * platform's copy at this point instead would depend on the DOM selection still
+ * being there — a menu click can collapse it — and on the user activation that
+ * `execCommand` requires, which a menu left open outlives.
+ */
+export async function writeSelectionToClipboard(payload: {
+  readonly text: string;
+  readonly html?: string | undefined;
+}): Promise<boolean> {
+  const { text, html } = payload;
+  if (!text) return false;
+  const canWriteRich =
+    typeof window !== "undefined" &&
+    typeof ClipboardItem === "function" &&
+    typeof navigator !== "undefined" &&
+    typeof navigator.clipboard?.write === "function";
+  if (html && canWriteRich) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+      return true;
+    } catch {
+      // Fall through: a rejected rich write (permissions, an unsupported
+      // flavour) must not cost the reader the text as well.
+    }
+  }
+  return writeTextToClipboard(text, "selection");
+}
+
 export function useCopyToClipboard<TContext = void>({
   timeout = 2000,
   target = "text",

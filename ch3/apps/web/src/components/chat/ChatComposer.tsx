@@ -54,6 +54,7 @@ import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
 } from "./composerMentionDrag";
+import { composerInsertSeparator, type ComposerInsertBoundary } from "./composerInsert";
 import { composerTextForDroppedPaths, resolveDroppedFilePaths } from "./droppedFilePaths";
 import {
   type ComposerImageAttachment,
@@ -524,7 +525,10 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 export interface ChatComposerHandle {
   focusAtEnd: () => void;
   focusAt: (cursor: number) => void;
-  insertTextAtEnd: (text: string, options?: { ensureLeadingBoundary?: boolean }) => boolean;
+  insertTextAtEnd: (
+    text: string,
+    options?: { ensureLeadingBoundary?: ComposerInsertBoundary },
+  ) => boolean;
   openModelPicker: () => void;
   toggleModelPicker: () => void;
   isModelPickerOpen: () => boolean;
@@ -2751,7 +2755,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
         if (paths.length > 0) {
           const inserted = insertComposerTextAtEnd(composerTextForDroppedPaths(paths), {
-            ensureLeadingBoundary: true,
+            ensureLeadingBoundary: "space",
           });
           // A rejected insert means the composer is mid-approval, connecting, or
           // waiting on plan input. Saying so beats a drop that appears to work
@@ -2803,7 +2807,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const insertComposerTextAtEnd = (
     text: string,
-    options?: { ensureLeadingBoundary?: boolean },
+    options?: { ensureLeadingBoundary?: ComposerInsertBoundary },
   ): boolean => {
     if (
       text.length === 0 ||
@@ -2814,21 +2818,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ) {
       return false;
     }
+    // The boundary is resolved here, against promptRef, because that is the
+    // string the insert lands on. A caller deciding it from a snapshot reads
+    // the editor's last-synced value, which lags a controlled update by a
+    // render — the same staleness that once erased a whole dropped path.
     const prompt = promptRef.current;
-    const needsLeadingSpace =
-      (options?.ensureLeadingBoundary ?? false) && prompt.length > 0 && !/\s$/.test(prompt);
-    return applyPromptReplacement(
-      prompt.length,
-      prompt.length,
-      needsLeadingSpace ? ` ${text}` : text,
-    );
+    const separator = composerInsertSeparator(prompt, options?.ensureLeadingBoundary);
+    return applyPromptReplacement(prompt.length, prompt.length, `${separator}${text}`);
   };
 
   // File-tree drags land as mentions. Handled in the capture phase so the
   // editor never sees the drop; the load-bearing rules (native stop, "move"
   // effect, no eager focus) live in makeComposerMentionDragHandlers.
   const composerMentionDragHandlers = makeComposerMentionDragHandlers({
-    insertMentionAtEnd: (text) => insertComposerTextAtEnd(text, { ensureLeadingBoundary: true }),
+    insertMentionAtEnd: (text) => insertComposerTextAtEnd(text, { ensureLeadingBoundary: "space" }),
     setDragActive: setIsDragOverComposer,
     onInsertRejected: () => {
       toastManager.add({
