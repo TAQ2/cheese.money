@@ -70,7 +70,7 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { isElectron } from "../env";
-import { writeSelectionToClipboard } from "../hooks/useCopyToClipboard";
+import { writeSelectionToClipboard, writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 import { readLocalApi } from "../localApi";
 import { useImportClaudeSession } from "../lib/useImportClaudeSession";
@@ -233,6 +233,7 @@ import {
   quotableSelectionText,
   runQuotedSelectionContextMenu,
 } from "./chat/quotedSelection";
+import { formatConversationTranscript, isSelectAllShortcut } from "./chat/conversationTranscript";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -448,6 +449,21 @@ function eventPathContainsSelector(event: Event, selector: string): boolean {
     path.push(event.target);
   }
   return path.some((target) => target instanceof Element && target.closest(selector));
+}
+
+/**
+ * Whether the conversation is what the keyboard is currently addressing.
+ *
+ * Focus alone does not answer it: clicking a message leaves focus on `body`,
+ * because rendered text is not focusable. The selection is the other half of
+ * the answer — a caret placed by that click sits inside the transcript even
+ * though nothing there is focused.
+ */
+function transcriptRegionAddressed(region: HTMLElement | null): boolean {
+  if (!region) return false;
+  if (region.contains(document.activeElement)) return true;
+  const selection = window.getSelection();
+  return selection !== null && region.contains(selection.anchorNode);
 }
 
 function shouldTypeToFocusComposer(event: KeyboardEvent): boolean {
@@ -2397,6 +2413,10 @@ function ChatViewContent(props: ChatViewProps) {
       deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
     [activeThread?.proposedPlans, timelineMessages, workLogEntries],
   );
+  // Read from callbacks that outlive the render they were built in — a menu
+  // left open, a keystroke — so a conversation copy is never a stale one.
+  const timelineEntriesRef = useRef(timelineEntries);
+  timelineEntriesRef.current = timelineEntries;
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
@@ -2795,6 +2815,25 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [composerRef, routeThreadKey],
   );
+  const copyEntireConversation = useCallback(async () => {
+    const transcript = formatConversationTranscript(timelineEntriesRef.current);
+    if (transcript.length === 0) {
+      toastManager.add({
+        type: "error",
+        title: "Nothing to copy yet",
+        description: "This conversation has no messages.",
+      });
+      return;
+    }
+    await writeTextToClipboard(transcript, "conversation");
+    toastManager.add({
+      type: "success",
+      title: "Conversation copied",
+      // The count is the point: it is what tells the reader this went past the
+      // messages they could see.
+      description: `${timelineEntriesRef.current.length} entries copied to the clipboard.`,
+    });
+  }, [timelineEntriesRef]);
   const onTranscriptContextMenu = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
       // Images and links carry platform menu entries of their own — Copy Image,
@@ -2812,14 +2851,13 @@ function ChatViewContent(props: ChatViewProps) {
         transcriptRegionRef.current,
         () => payload?.text ?? null,
       );
-      // Nothing selected in the transcript: leave the platform's own menu
-      // alone, since Quote and Copy would both be dead entries.
-      if (fragment === null) return;
       const api = readLocalApi();
       if (!api) return;
       event.preventDefault();
       const quotedFromThreadKey = routeThreadKey;
       void runQuotedSelectionContextMenu({
+        // Null is a real state here, not a bail-out: with nothing selected the
+        // menu still offers the whole conversation.
         fragment,
         position: { x: event.clientX, y: event.clientY },
         showContextMenu: (items, position) => api.contextMenu.show(items, position),
@@ -2829,6 +2867,7 @@ function ChatViewContent(props: ChatViewProps) {
         // the time the menu closes.
         copy: (text) =>
           writeSelectionToClipboard({ text, ...(payload?.html ? { html: payload.html } : {}) }),
+        copyConversation: copyEntireConversation,
         reportFailure: (operation, cause) => {
           toastManager.add({
             type: "error",
@@ -2837,13 +2876,15 @@ function ChatViewContent(props: ChatViewProps) {
                 ? "Could not copy the selection"
                 : operation === "quote"
                   ? "Could not quote that"
-                  : "Could not open the selection menu",
+                  : operation === "copy-conversation"
+                    ? "Could not copy the conversation"
+                    : "Could not open the selection menu",
             description: cause instanceof Error ? cause.message : String(cause),
           });
         },
       });
     },
-    [quoteTranscriptFragment, routeThreadKey],
+    [copyEntireConversation, quoteTranscriptFragment, routeThreadKey],
   );
   const setTerminalOpen = useCallback(
     (open: boolean) => {
@@ -4912,6 +4953,26 @@ function ChatViewContent(props: ChatViewProps) {
         terminalOpen: Boolean(terminalUiState.terminalOpen),
         modelPickerOpen: composerRef.current?.isModelPickerOpen() ?? false,
       };
+
+      // Select-all, addressed to the conversation. The browser's own answer
+      // reaches the sidebar and the composer and still misses every message
+      // scrolled out of the virtualised list, so what it was being used for —
+      // getting the conversation out of CH3 — is done directly instead.
+      //
+      // Only when the conversation is what is being addressed: an editable
+      // element, the terminal, or a selection sitting somewhere else all keep
+      // the platform's select-all untouched.
+      if (
+        !shortcutContext.terminalFocus &&
+        isSelectAllShortcut(event) &&
+        !eventPathContainsSelector(event, TYPE_TO_FOCUS_EDITABLE_SELECTOR) &&
+        transcriptRegionAddressed(transcriptRegionRef.current)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        void copyEntireConversation();
+        return;
+      }
 
       if (
         !shortcutContext.terminalFocus &&

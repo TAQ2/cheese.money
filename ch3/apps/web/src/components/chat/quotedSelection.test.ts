@@ -110,9 +110,10 @@ describe("composerTextForQuotedSelection", () => {
 });
 
 describe("runQuotedSelectionContextMenu", () => {
-  const harness = (action: QuotedSelectionAction | null) => {
+  const harness = (action: QuotedSelectionAction | null, fragment: string | null = "a claim") => {
     const quoted: string[] = [];
     const copied: string[] = [];
+    const conversationCopies: number[] = [];
     const failures: string[] = [];
     const shown: Array<{
       items: readonly { id: string; label: string }[];
@@ -121,10 +122,11 @@ describe("runQuotedSelectionContextMenu", () => {
     return {
       quoted,
       copied,
+      conversationCopies,
       failures,
       shown,
       options: {
-        fragment: "a claim",
+        fragment,
         position: { x: 4, y: 8 },
         showContextMenu: async (
           items: readonly { id: string; label: string }[],
@@ -134,13 +136,14 @@ describe("runQuotedSelectionContextMenu", () => {
           return action;
         },
         quote: (fragment: string) => quoted.push(fragment),
-        copy: async (fragment: string) => copied.push(fragment),
+        copy: async (selected: string) => copied.push(selected),
+        copyConversation: async () => conversationCopies.push(1),
         reportFailure: (operation: string) => failures.push(operation),
       },
     };
   };
 
-  it("offers exactly Quote and Copy, at the click", async () => {
+  it("offers Quote, Copy and the whole conversation, at the click", async () => {
     // Without this, an empty item array would still pass every other test here
     // while the native menu returns immediately — a menu that has already
     // suppressed the platform's own and can then do nothing.
@@ -150,8 +153,41 @@ describe("runQuotedSelectionContextMenu", () => {
     expect(h.shown[0]?.items.map((item) => [item.id, item.label])).toEqual([
       ["quote", "Quote"],
       ["copy", "Copy"],
+      ["copy-conversation", "Copy entire conversation"],
     ]);
     expect(h.shown[0]?.position).toEqual({ x: 4, y: 8 });
+  });
+
+  it("offers only the conversation when nothing is selected", async () => {
+    // The entry that needs no selection is the reason the menu opens at all on
+    // a bare right-click; Quote and Copy would have nothing to act on.
+    const h = harness(null, null);
+    await runQuotedSelectionContextMenu(h.options);
+    expect(h.shown[0]?.items.map((item) => item.id)).toEqual(["copy-conversation"]);
+  });
+
+  it("copies the conversation with or without a selection", async () => {
+    const withSelection = harness("copy-conversation");
+    await runQuotedSelectionContextMenu(withSelection.options);
+    expect(withSelection.conversationCopies).toEqual([1]);
+    expect(withSelection.copied).toEqual([]);
+    expect(withSelection.quoted).toEqual([]);
+
+    const withoutSelection = harness("copy-conversation", null);
+    await runQuotedSelectionContextMenu(withoutSelection.options);
+    expect(withoutSelection.conversationCopies).toEqual([1]);
+  });
+
+  it("cannot quote or copy a selection it does not have", async () => {
+    // A menu built without a selection cannot return these, but a stale reply
+    // or a future item id must not reach the handlers with a null fragment.
+    const quoteAttempt = harness("quote", null);
+    await runQuotedSelectionContextMenu(quoteAttempt.options);
+    const copyAttempt = harness("copy", null);
+    await runQuotedSelectionContextMenu(copyAttempt.options);
+    expect(quoteAttempt.quoted).toEqual([]);
+    expect(copyAttempt.copied).toEqual([]);
+    expect([...quoteAttempt.failures, ...copyAttempt.failures]).toEqual([]);
   });
 
   it("quotes the selection when Quote is picked", async () => {

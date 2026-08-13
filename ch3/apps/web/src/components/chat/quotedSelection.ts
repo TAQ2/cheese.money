@@ -12,25 +12,48 @@
 
 import type { ContextMenuItem } from "@ch3tools/contracts";
 
-export type QuotedSelectionAction = "quote" | "copy";
+export type QuotedSelectionAction = "quote" | "copy" | "copy-conversation";
 
-export type QuotedSelectionFailureOperation = "show-selection-context-menu" | "quote" | "copy";
+export type QuotedSelectionFailureOperation =
+  | "show-selection-context-menu"
+  | "quote"
+  | "copy"
+  | "copy-conversation";
 
 const FAILURE_OPERATION_BY_ACTION = {
   quote: "quote",
   copy: "copy",
+  "copy-conversation": "copy-conversation",
 } as const satisfies Record<QuotedSelectionAction, QuotedSelectionFailureOperation>;
 
 /**
  * The transcript is read-only, so the platform menu offers it Cut and Paste
- * permanently disabled, and a Select All that spans a virtualised list most of
- * which is not in the DOM. Quote and Copy are the two entries that can act on
- * what is actually selected.
+ * permanently disabled, and a Select All that reaches the sidebar and the
+ * composer while missing every message scrolled out of the virtualised list.
+ *
+ * "Copy entire conversation" is what that Select All was being used FOR, done
+ * properly and named for its result rather than for the selection it no longer
+ * has to make. It is offered whether or not anything is selected; the two
+ * entries that act on a selection are not.
  */
-const QUOTED_SELECTION_MENU_ITEMS = [
+const COPY_CONVERSATION_MENU_ITEM = {
+  id: "copy-conversation",
+  label: "Copy entire conversation",
+} as const satisfies ContextMenuItem<QuotedSelectionAction>;
+
+const SELECTION_MENU_ITEMS = [
   { id: "quote", label: "Quote" },
   { id: "copy", label: "Copy" },
 ] as const satisfies readonly ContextMenuItem<QuotedSelectionAction>[];
+
+/** The menu for a right-click in the transcript, with or without a selection. */
+export function transcriptContextMenuItems(
+  hasSelection: boolean,
+): readonly ContextMenuItem<QuotedSelectionAction>[] {
+  return hasSelection
+    ? [...SELECTION_MENU_ITEMS, COPY_CONVERSATION_MENU_ITEM]
+    : [COPY_CONVERSATION_MENU_ITEM];
+}
 
 /** The parts of a DOM `Selection` this reads. Structural, so it can be tested without a DOM. */
 export interface QuotableSelection {
@@ -121,7 +144,8 @@ export function composerTextForQuotedSelection(fragment: string): string {
 }
 
 interface RunQuotedSelectionContextMenuOptions {
-  readonly fragment: string;
+  /** The selected passage, or null when the right-click had no selection. */
+  readonly fragment: string | null;
   readonly position: { readonly x: number; readonly y: number };
   readonly showContextMenu: (
     items: readonly ContextMenuItem<QuotedSelectionAction>[],
@@ -129,30 +153,34 @@ interface RunQuotedSelectionContextMenuOptions {
   ) => Promise<QuotedSelectionAction | null>;
   readonly quote: (fragment: string) => void;
   readonly copy: (fragment: string) => Promise<unknown>;
+  readonly copyConversation: () => Promise<unknown>;
   readonly reportFailure: (operation: QuotedSelectionFailureOperation, cause: unknown) => void;
 }
 
-/** Shows the selection menu and runs whatever was picked. */
+/** Shows the transcript menu and runs whatever was picked. */
 export async function runQuotedSelectionContextMenu({
   fragment,
   position,
   showContextMenu,
   quote,
   copy,
+  copyConversation,
   reportFailure,
 }: RunQuotedSelectionContextMenuOptions): Promise<void> {
   let action: QuotedSelectionAction | null;
   try {
-    action = await showContextMenu(QUOTED_SELECTION_MENU_ITEMS, position);
+    action = await showContextMenu(transcriptContextMenuItems(fragment !== null), position);
   } catch (cause) {
     reportFailure("show-selection-context-menu", cause);
     return;
   }
 
   try {
-    if (action === "quote") {
+    if (action === "copy-conversation") {
+      await copyConversation();
+    } else if (fragment !== null && action === "quote") {
       quote(fragment);
-    } else if (action === "copy") {
+    } else if (fragment !== null && action === "copy") {
       await copy(fragment);
     }
   } catch (cause) {
