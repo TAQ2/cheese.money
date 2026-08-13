@@ -32,10 +32,38 @@ const OPENCODE_PRESENTATION = {
 } as const;
 const MINIMUM_OPENCODE_VERSION = "1.14.19";
 
-/** See the timeout note at its use site in `checkOpenCodeProviderStatus`. */
-const OPENCODE_COMMAND_SERVER_START_TIMEOUT_MS = 10_000;
-/** Must stay ABOVE the start timeout — see the note at its use site. */
+/** Guards a hung read against a server that accepted the connection and stalled. */
 const OPENCODE_COMMAND_PROBE_TIMEOUT = Duration.seconds(20);
+
+/**
+ * Slash commands from the last probe that had a server to read them from.
+ *
+ * A probe with no server has not learned that there are no commands — it has
+ * learned nothing. Reporting an empty list instead would publish that nothing
+ * as fact, because a snapshot that is otherwise ready is authoritative, and the
+ * composer would lose every OpenCode command until a session happened to be up
+ * at probe time.
+ */
+export interface OpenCodeCommandCache {
+  readonly read: () => ReadonlyArray<ServerProviderSlashCommand>;
+  readonly write: (commands: ReadonlyArray<ServerProviderSlashCommand>) => void;
+}
+
+/**
+ * One cache per provider instance, owned by the driver and seeded there from
+ * the last persisted snapshot — a restart, or a settings change that rebuilds
+ * the instance, is otherwise indistinguishable from a machine that has no
+ * commands at all.
+ */
+export const makeOpenCodeCommandCache = (): OpenCodeCommandCache => {
+  let commands: ReadonlyArray<ServerProviderSlashCommand> = [];
+  return {
+    read: () => commands,
+    write: (next) => {
+      commands = next;
+    },
+  };
+};
 
 class OpenCodeProbeError extends Data.TaggedError("OpenCodeProbeError")<{
   readonly cause: unknown;
@@ -338,13 +366,28 @@ export const makePendingOpenCodeProvider = (
 export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatus")(function* (
   openCodeSettings: OpenCodeSettings,
   cwd: string,
-  environment?: NodeJS.ProcessEnv,
+  // Explicit `undefined` rather than optional: the capabilities below are
+  // required, and an optional parameter cannot precede a required one.
+  environment: NodeJS.ProcessEnv | undefined,
+  // Required, both of them: defaulting either one turns "report what we know"
+  // back into "publish an empty list as fact", and a caller that forgot would
+  // get no type error and no warning — only a wiped composer menu.
+  capabilities: {
+    /**
+     * The URL of a server that is already running for this instance — the one a
+     * live session owns — or null. Consulted only; never starts anything.
+     */
+    readonly existingServerUrl: () => string | null;
+    readonly commandCache: OpenCodeCommandCache;
+  },
 ): Effect.fn.Return<ServerProviderDraft, never, OpenCodeRuntime> {
   const openCodeRuntime = yield* OpenCodeRuntime;
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const customModels = openCodeSettings.customModels;
-  const isExternalServer = openCodeSettings.serverUrl.trim().length > 0;
+  const configuredServerUrl = openCodeSettings.serverUrl.trim();
+  const isExternalServer = configuredServerUrl.length > 0;
+  const commandCache = capabilities.commandCache;
 
   const fallback = (cause: unknown, version: string | null = null) => {
     const failure = formatOpenCodeProbeError({
@@ -430,24 +473,50 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     }
   }
 
-  const withServerClient = <A, E>(
+  /**
+   * Talks to a server that is ALREADY running, named by its URL. Passing a URL
+   * is what keeps `connectToOpenCodeServer` on its external branch, which
+   * returns the address and spawns nothing.
+   */
+  const withExistingServerClient = <A, E>(
+    serverUrl: string,
     use: (
       client: ReturnType<typeof openCodeRuntime.createOpenCodeSdkClient>,
     ) => Effect.Effect<A, E>,
   ) =>
     Effect.scoped(
       Effect.gen(function* () {
+        // An empty URL is the one input that turns this into a spawn, and a
+        // spawn from here is the bug this function exists to prevent. Neither
+        // call site can produce one, so reaching this means a future edit
+        // reintroduced it. It fails rather than dies: the caller degrades to
+        // the commands it already knows, exactly as it does for a server that
+        // will not answer, while the log names the regression.
+        if (serverUrl.trim().length === 0) {
+          yield* Effect.logError("opencode.probe.missing-server-url", {
+            detail: "Asked for a server client without a URL, which would have started a server.",
+          });
+          return yield* Effect.fail(
+            new OpenCodeProbeError({
+              cause: null,
+              detail: "No OpenCode server to read from.",
+            }),
+          );
+        }
         const server = yield* openCodeRuntime.connectToOpenCodeServer({
           binaryPath: openCodeSettings.binaryPath,
-          serverUrl: openCodeSettings.serverUrl,
+          serverUrl,
           environment: resolvedEnvironment,
-          timeoutMs: OPENCODE_COMMAND_SERVER_START_TIMEOUT_MS,
         });
         return yield* use(
           openCodeRuntime.createOpenCodeSdkClient({
             baseUrl: server.url,
             directory: cwd,
-            ...(openCodeSettings.serverPassword
+            // Only the configured server gets the configured password. A server
+            // a session started is local and unauthenticated — the adapter
+            // withholds it there too — and a password left over from an earlier
+            // external setup would otherwise be sent to it.
+            ...(server.url === configuredServerUrl && openCodeSettings.serverPassword
               ? { serverPassword: openCodeSettings.serverPassword }
               : {}),
           }),
@@ -457,7 +526,9 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
 
   const inventoryExit = yield* Effect.exit(
     (isExternalServer
-      ? withServerClient((client) => openCodeRuntime.loadOpenCodeInventory(client))
+      ? withExistingServerClient(configuredServerUrl, (client) =>
+          openCodeRuntime.loadOpenCodeInventory(client),
+        )
       : openCodeRuntime.loadInventoryFromCli({
           binaryPath: openCodeSettings.binaryPath,
           environment: resolvedEnvironment,
@@ -472,54 +543,59 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     return fallback(Cause.squash(inventoryExit.cause), version);
   }
 
-  // Commands have no CLI equivalent, so the local path pays for a short-lived
-  // server to read them.
+  // Commands have no CLI equivalent: they can only be read over a running
+  // server. This probe is unattended background work on a five-minute timer, so
+  // it reads them only from a server that is ALREADY up — the one configured in
+  // settings, or the one a live session owns — and starts none of its own.
   //
-  // Deliberately sequential, after the inventory, despite the extra ~1.2s.
-  // Run CONCURRENTLY it timed out every single time while the very same spawn
-  // took ~1.2s standing alone: the server announces its URL on stdout, and
-  // `startOpenCodeServerProcess` only learns the URL by catching that line —
-  // it subscribes to the stream several steps after the spawn, so when the
-  // two `opencode` CLI probes are saturating the loop at the same moment, the
-  // subscription can attach after the line has already gone by. The wakeup is
-  // lost, the URL never resolves, and the whole probe waits out the timeout.
-  // Overlapping the spawn saves a second in theory and cost the feature
-  // entirely in practice.
+  // Starting one is not the cheap, invisible act it looks like: it runs the
+  // user's configured binary with `serve`. That binary can be a wrapper, and
+  // the one this was found on treats `serve` as a real session — it starts a
+  // proxy and reads an API key out of Bitwarden behind a Touch ID sudo, while
+  // exempting the read-only subcommands (`--version`, `models`, `agent list`)
+  // this check otherwise uses. So the spawn, alone, put a system prompt on the
+  // operator's screen every time the check ran, for a list that changes only
+  // when they edit a command file — and each prompt sat unanswered long enough
+  // to time the probe out, which is what poisoned the capability cache.
   //
-  // Any failure still means "no commands": a slash-command list is a
-  // convenience, and losing it must never turn a working provider into an
-  // error state.
-  const commands = yield* withServerClient((client) =>
-    openCodeRuntime.loadOpenCodeCommands(client),
-  ).pipe(
-    // Outer guard only. It sits ABOVE the server's own start timeout on
-    // purpose: set below it, this fires first and replaces the inner error —
-    // which is the one carrying the process's stdout/stderr — with a bare
-    // "timed out" that says nothing. That masking is why two rebuilds produced
-    // no usable evidence.
-    Effect.timeoutOption(OPENCODE_COMMAND_PROBE_TIMEOUT),
-    Effect.flatMap((result) =>
-      result._tag === "Some"
-        ? Effect.succeed(result.value)
-        : Effect.fail(
-            new OpenCodeProbeError({
-              cause: null,
-              detail: `Timed out after ${Duration.toSeconds(OPENCODE_COMMAND_PROBE_TIMEOUT)}s reading OpenCode commands.`,
+  // Commands therefore arrive with the session that can read them: starting or
+  // resuming a conversation re-probes (see the driver's `sessionServers`).
+  const commandServerUrl = isExternalServer
+    ? configuredServerUrl
+    : capabilities.existingServerUrl();
+  const slashCommands =
+    commandServerUrl === null
+      ? commandCache.read()
+      : yield* withExistingServerClient(commandServerUrl, (client) =>
+          openCodeRuntime.loadOpenCodeCommands(client),
+        ).pipe(
+          // Guards a server that accepted the request and never answered.
+          Effect.timeoutOption(OPENCODE_COMMAND_PROBE_TIMEOUT),
+          Effect.flatMap((result) =>
+            result._tag === "Some"
+              ? Effect.succeed(result.value)
+              : Effect.fail(
+                  new OpenCodeProbeError({
+                    cause: null,
+                    detail: `Timed out after ${Duration.toSeconds(OPENCODE_COMMAND_PROBE_TIMEOUT)}s reading OpenCode commands.`,
+                  }),
+                ),
+          ),
+          Effect.map(toServerProviderSlashCommands),
+          // A read that succeeded is the authority, including when it finds
+          // none: that is the only way a deleted command ever leaves the list.
+          Effect.tap((loaded) => Effect.sync(() => commandCache.write(loaded))),
+          // Failing is survivable — commands are a convenience — but it must not
+          // be SILENT. A swallowed cause here is indistinguishable from "this
+          // machine has no commands", which is the state that cannot be
+          // diagnosed from the outside.
+          Effect.tapError((cause) =>
+            Effect.logWarning("opencode.commands.unavailable", {
+              detail: openCodeRuntimeErrorDetail(cause),
             }),
           ),
-    ),
-    // Failing is survivable — commands are a convenience — but it must not be
-    // SILENT. A swallowed cause here is indistinguishable from "this machine
-    // has no commands", which is the state that cannot be diagnosed from the
-    // outside.
-    Effect.tapError((cause) =>
-      Effect.logWarning("opencode.commands.unavailable", {
-        detail: openCodeRuntimeErrorDetail(cause),
-      }),
-    ),
-    Effect.orElseSucceed(() => [] as ReadonlyArray<OpenCodeCommand>),
-  );
-  const slashCommands = toServerProviderSlashCommands(commands);
+          Effect.orElseSucceed(() => commandCache.read()),
+        );
 
   const models = providerModelsFromSettings(
     flattenOpenCodeModels(inventoryExit.value),

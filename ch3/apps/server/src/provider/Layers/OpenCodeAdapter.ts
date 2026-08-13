@@ -38,7 +38,10 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
+import {
+  type OpenCodeAdapterShape,
+  type OpenCodeSessionServers,
+} from "../Services/OpenCodeAdapter.ts";
 import {
   buildOpenCodePermissionRules,
   OpenCodeRuntime,
@@ -378,6 +381,8 @@ export interface OpenCodeAdapterLiveOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /** Where this adapter publishes the servers its sessions start. */
+  readonly sessionServers?: OpenCodeSessionServers;
 }
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -676,10 +681,20 @@ function updateProviderSession(
 
 const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
   context: OpenCodeSessionContext,
+  // Required: a teardown that forgets this leaves a dead server published to
+  // the status probe, and an optional parameter is one a future call site
+  // forgets silently.
+  sessionServers: OpenCodeSessionServers | undefined,
 ) {
   // Race-safe one-shot: first caller flips the flag, everyone else no-ops.
   if (yield* Ref.getAndSet(context.stopped, true)) {
     return false;
+  }
+
+  // Retract before the teardown below kills the process: a URL left published
+  // would send the next status probe at a server that is on its way out.
+  if (!context.server.external && sessionServers) {
+    sessionServers.detach(context.server.url);
   }
 
   // Best-effort remote abort. The scope close below tears down the local
@@ -720,8 +735,16 @@ export function makeOpenCodeAdapter(
     // `options.nativeEventLogger`, they own its lifecycle.
     const managedNativeEventLogger =
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
+    // Outlives any one session: work that a session reveals but does not own
+    // (the status re-probe) is forked in here.
+    const adapterScope = yield* Effect.scope;
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, OpenCodeSessionContext>();
+    // The teardown paths that go through `stopped` funnel through here. The one
+    // that does not — `emitUnexpectedExit`, which flips the flag itself —
+    // retracts the URL inline, so both routes unpublish.
+    const stopSessionContext = (context: OpenCodeSessionContext) =>
+      stopOpenCodeContext(context, options?.sessionServers);
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
       Effect.mapError(
         (cause) =>
@@ -772,7 +795,7 @@ export function makeOpenCodeAdapter(
         // the remaining cleanups.
         yield* Effect.forEach(
           contexts,
-          (context) => Effect.ignoreCause(stopOpenCodeContext(context)),
+          (context) => Effect.ignoreCause(stopSessionContext(context)),
           { concurrency: "unbounded", discard: true },
         );
         // Close the logger AFTER session teardown so any final lifecycle
@@ -907,6 +930,11 @@ export function makeOpenCodeAdapter(
       }
       const turnId = context.activeTurnId;
       sessions.delete(context.session.threadId);
+      // The server is gone, so unpublish it here: this path flips `stopped`
+      // itself, which makes the teardown that normally retracts the URL no-op.
+      if (!context.server.external && options?.sessionServers) {
+        options.sessionServers.detach(context.server.url);
+      }
       // Emit lifecycle events BEFORE tearing down the scope. Both call sites
       // run this inside a fiber forked via `Effect.forkIn(context.sessionScope)`;
       // closing that scope triggers the fiber-interrupt finalizer, so any
@@ -1422,7 +1450,7 @@ export function makeOpenCodeAdapter(
         const resumeSessionId = parseOpenCodeResume(input.resumeCursor)?.sessionId;
         const existing = sessions.get(input.threadId);
         if (existing) {
-          yield* stopOpenCodeContext(existing);
+          yield* stopSessionContext(existing);
           sessions.delete(input.threadId);
         }
 
@@ -1620,6 +1648,20 @@ export function makeOpenCodeAdapter(
           sessionScope: started.sessionScope,
         };
         sessions.set(input.threadId, context);
+        // This session started a server, so the questions that need one can be
+        // asked now — and only now. The record is written synchronously, in
+        // program order against the detach in teardown; only the re-probe is
+        // forked, so it cannot delay the turn the user is waiting on.
+        if (!context.server.external && options?.sessionServers) {
+          const isOnlyLiveServer = options.sessionServers.attach(context.server.url);
+          if (isOnlyLiveServer) {
+            // Forked into the ADAPTER's scope, not the session's. A session
+            // that ends mid-probe would otherwise interrupt it — and since
+            // only the first live server asks for a re-probe, a sibling
+            // session that is still up would never trigger another.
+            yield* options.sessionServers.reprobe.pipe(Effect.forkIn(adapterScope));
+          }
+        }
         yield* startEventPump(context);
 
         yield* emit({
@@ -1840,7 +1882,7 @@ export function makeOpenCodeAdapter(
             threadId,
           });
         }
-        const stopped = yield* stopOpenCodeContext(context);
+        const stopped = yield* stopSessionContext(context);
         sessions.delete(threadId);
         if (!stopped) {
           return;
@@ -1924,7 +1966,7 @@ export function makeOpenCodeAdapter(
         // interrupt the sibling fibers. Same pattern as the layer finalizer.
         yield* Effect.forEach(
           contexts,
-          (context) => Effect.ignoreCause(stopOpenCodeContext(context)),
+          (context) => Effect.ignoreCause(stopSessionContext(context)),
           { concurrency: "unbounded", discard: true },
         );
       });

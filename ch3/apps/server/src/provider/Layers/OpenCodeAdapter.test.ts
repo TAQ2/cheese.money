@@ -117,7 +117,11 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
     }),
   connectToOpenCodeServer: ({ serverUrl }) =>
     Effect.gen(function* () {
-      const url = serverUrl ?? "http://127.0.0.1:4301";
+      // Mirrors the real runtime: it TRIMS the configured URL and treats an
+      // empty one as "no server configured", so a `??` here would hand back an
+      // empty address for the local path production actually spawns for.
+      const configuredUrl = serverUrl?.trim() ?? "";
+      const url = configuredUrl.length > 0 ? configuredUrl : "http://127.0.0.1:4301";
       // Always register a finalizer so the closeCalls/closeError probes fire;
       // production attaches none for external servers.
       yield* Effect.addFinalizer(() =>
@@ -131,7 +135,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       return {
         url,
         exitCode: null,
-        external: Boolean(serverUrl),
+        external: configuredUrl.length > 0,
       };
     }),
   runOpenCodeCommand: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
@@ -1488,3 +1492,105 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 });
+
+// ---------------------------------------------------------------------------
+// Publishing a session's server
+// ---------------------------------------------------------------------------
+//
+// The status probe may read the slash-command list only over a server that is
+// already running, because starting one runs the user's binary for real. The
+// adapter is what makes a running server known — and the ORDER matters more
+// than the fact: a session that starts and stops quickly must not leave a dead
+// URL published, which would shadow every later, healthy one.
+
+const localOpenCodeSettings = Schema.decodeSync(OpenCodeSettings)({
+  binaryPath: "fake-opencode",
+  serverUrl: "",
+});
+
+const recordingSessionServers = () => {
+  const calls: string[] = [];
+  const urls = new Set<string>();
+  let reprobes = 0;
+  return {
+    calls,
+    reprobes: () => reprobes,
+    servers: {
+      attach: (url: string) => {
+        calls.push(`attach:${url}`);
+        urls.add(url);
+        return urls.size === 1;
+      },
+      detach: (url: string) => {
+        calls.push(`detach:${url}`);
+        urls.delete(url);
+      },
+      reprobe: Effect.sync(() => {
+        reprobes += 1;
+      }),
+      current: () => {
+        for (const url of urls) return url;
+        return null;
+      },
+    },
+  };
+};
+
+const localAdapterLayer = (sessionServers: ReturnType<typeof recordingSessionServers>["servers"]) =>
+  Layer.effect(
+    OpenCodeAdapter,
+    makeOpenCodeAdapter(localOpenCodeSettings, { sessionServers }),
+  ).pipe(
+    Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+it.effect("publishes the server it started, and retracts it when the session stops", () =>
+  Effect.gen(function* () {
+    const recorder = recordingSessionServers();
+    yield* Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId: asThreadId("thread-session-servers"),
+        runtimeMode: "full-access",
+      });
+      // Published by the time the session is usable, not on some later tick.
+      NodeAssert.deepEqual(recorder.calls, ["attach:http://127.0.0.1:4301"]);
+      NodeAssert.equal(recorder.servers.current(), "http://127.0.0.1:4301");
+
+      yield* adapter.stopSession(asThreadId("thread-session-servers"));
+    }).pipe(Effect.provide(localAdapterLayer(recorder.servers)));
+
+    // Retracted, in order, exactly once: a URL left behind would be handed to
+    // the next status probe as a server it may read from.
+    NodeAssert.deepEqual(recorder.calls, [
+      "attach:http://127.0.0.1:4301",
+      "detach:http://127.0.0.1:4301",
+    ]);
+    NodeAssert.equal(recorder.servers.current(), null);
+  }),
+);
+
+it.effect("retracts a server that dies on its own, which never reaches stopSession", () =>
+  Effect.gen(function* () {
+    const recorder = recordingSessionServers();
+    yield* Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId: asThreadId("thread-session-servers-crash"),
+        runtimeMode: "full-access",
+      });
+      // The adapter's own scope closing stands in for the process going away.
+    }).pipe(Effect.provide(localAdapterLayer(recorder.servers)));
+
+    NodeAssert.deepEqual(recorder.calls, [
+      "attach:http://127.0.0.1:4301",
+      "detach:http://127.0.0.1:4301",
+    ]);
+  }),
+);

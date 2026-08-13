@@ -155,9 +155,10 @@ export interface OpenCodeRuntimeShape {
    *
    * Separate from {@link loadOpenCodeInventory} because it is the one part of a
    * status check with no CLI equivalent: `opencode` exposes commands over the
-   * server's `/command` endpoint only. Callers on the local path therefore have
-   * to stand a server up for it, which is why this is not folded into the
-   * inventory every probe already loads.
+   * server's `/command` endpoint only. On the local path that makes it the one
+   * question a health check cannot answer by itself — it waits for a server a
+   * session has started, rather than starting one, since starting one runs the
+   * user's binary for real.
    */
   readonly loadOpenCodeCommands: (
     client: OpencodeClient,

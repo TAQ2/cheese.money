@@ -29,10 +29,13 @@ import { ProviderDriverError } from "../Errors.ts";
 import { makeOpenCodeAdapter } from "../Layers/OpenCodeAdapter.ts";
 import {
   checkOpenCodeProviderStatus,
+  makeOpenCodeCommandCache,
   makePendingOpenCodeProvider,
 } from "../Layers/OpenCodeProvider.ts";
+import { makeOpenCodeSessionServerRegistry } from "../Layers/openCodeSessionServers.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { readProviderStatusCache, resolveProviderStatusCachePath } from "../providerStatusCache.ts";
 import { OpenCodeRuntime } from "../opencodeRuntime.ts";
 import {
   defaultProviderContinuationIdentity,
@@ -136,9 +139,38 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         env: processEnv,
       });
 
+      // The servers this instance's sessions start, and the commands last read
+      // over one. Together they are why the status probe never has to start a
+      // server of its own — see the comment at the command read in
+      // `checkOpenCodeProviderStatus`.
+      let reprobeSnapshot: Effect.Effect<void> = Effect.void;
+      const sessionServers = makeOpenCodeSessionServerRegistry(() => reprobeSnapshot);
+      // Seeded from the snapshot the last run persisted. Commands are readable
+      // only over a server, and at boot no session has started one — so without
+      // this the first health check would report "no commands" as measured
+      // fact, and that empty list would overwrite the file it came from.
+      const commandCache = makeOpenCodeCommandCache();
+      const cachedProvider = yield* resolveProviderStatusCachePath({
+        cacheDir: serverConfig.providerStatusCacheDir,
+        instanceId,
+      }).pipe(
+        Effect.flatMap(readProviderStatusCache),
+        Effect.orElseSucceed(() => undefined),
+      );
+      // Identity is checked, not assumed from the filename — the same rule the
+      // registry applies when it hydrates from these files.
+      if (
+        cachedProvider?.driver === DRIVER_KIND &&
+        cachedProvider.instanceId === instanceId &&
+        cachedProvider.slashCommands.length > 0
+      ) {
+        commandCache.write(cachedProvider.slashCommands);
+      }
+
       const adapter = yield* makeOpenCodeAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
+        sessionServers,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
       const textGeneration = yield* makeOpenCodeTextGeneration(effectiveConfig, processEnv);
@@ -147,6 +179,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         effectiveConfig,
         serverConfig.cwd,
         processEnv,
+        { existingServerUrl: sessionServers.current, commandCache },
       ).pipe(Effect.map(stampIdentity), Effect.provideService(OpenCodeRuntime, openCodeRuntime));
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
@@ -178,6 +211,13 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
             }),
         ),
       );
+      // Now that a snapshot exists, a session's server is worth re-probing for:
+      // it is the only moment this instance can learn its slash commands
+      // without starting a process nobody asked for. `ignoreCause` rather than
+      // `ignore` because `refresh` is `orDie`: its only reachable failure is a
+      // defect, and `ignore` does not catch those — the fiber would die with
+      // nothing logged, which is the one outcome that cannot be diagnosed.
+      reprobeSnapshot = snapshot.refresh.pipe(Effect.asVoid, Effect.ignoreCause({ log: true }));
 
       return {
         instanceId,
