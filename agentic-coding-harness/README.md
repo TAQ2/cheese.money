@@ -34,7 +34,7 @@ Everything runs inside a disposable **git worktree** branched from the tip of th
 | `doctrine/CAVEMAN_CODE.md` | Operational companion — smallest-diff, read-before-write working mode. | Keep verbatim. |
 | `templates/BRAIN_AGENT.template.md` | Brain Agent (planner/reviewer) instructions. | Fill `{{PLACEHOLDERS}}`. |
 | `templates/CODING_AGENT.template.md` | Coding Agent (implementer) instructions. | Fill `{{PLACEHOLDERS}}`. |
-| `templates/TPM_AGENT.template.md` | TPM Agent — the human-driven bookends around the orchestrator: frames the smallest Product Brief upstream of Brain (Phases 1–3), acts as the stakeholder's proxy when downstream agents return questions (Phase 4), and gates the merge-to-`main` on business outcome (Phase 5). | Fill `{{PLACEHOLDERS}}`. |
+| `templates/TPM_AGENT.template.md` | TPM Agent — the human-driven bookends around the orchestrator: frames the smallest Product Brief upstream of Brain (Phases 1–3), acts as the stakeholder's proxy when downstream agents return questions (Phase 4), and gates the merge-to-`main` on business outcome (Phase 5) — landing, pushing and, once the human confirms the deploy, purging the worktree, all without asking. | Fill `{{PLACEHOLDERS}}`. |
 | `templates/PR_DESCRIPTION_TEMPLATE.md` | Canonical PR body Stage 6 makes the agent fill. | Generic; trim sections you don't use. |
 | `skills/visual-ux-test/` | The visual UX test suite (installer + capture harness + assertion tier + skill). Makes UI changes ship on **seen pixels**, not on CSS reasoning. | Run `install.sh <repo> --origin https://your-domain`, then fill the printed placeholders. |
 | `playbooks/LLM_CODING_AGENT_CREATION.md` | How to generate the three agent docs for a brand-new repo. | Follow it. |
