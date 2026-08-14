@@ -1,6 +1,6 @@
 import type { ClaudeAccountProfile, EnvironmentId } from "@ch3tools/contracts";
 import { squashAtomCommandFailure } from "@ch3tools/client-runtime/state/runtime";
-import { CheckIcon, LoaderIcon, PlusIcon, SparklesIcon, UserRoundIcon } from "lucide-react";
+import { CheckIcon, LoaderIcon, LogOutIcon, PlusIcon, SparklesIcon, UserRoundIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { readLocalApi } from "../../localApi";
@@ -10,6 +10,7 @@ import {
   claudeProfileUsageLabel,
   homePathSettingForProfile,
   isSelectableClaudeProfile,
+  isSignedInClaudeProfile,
   recommendClaudeAccount,
 } from "./ClaudeAccountSwitcher.logic";
 import { claudeAccountEnvironment } from "../../state/claudeAccounts";
@@ -63,8 +64,11 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
     hideIntro,
   } = props;
   const [profiles, setProfiles] = useState<ReadonlyArray<ClaudeAccountProfile> | null>(null);
-  const [busy, setBusy] = useState<"listing" | "signing-in" | null>(null);
+  const [busy, setBusy] = useState<"listing" | "signing-in" | "signing-out" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Which row is awaiting a sign-out confirmation. Clearing a credential is
+  // destructive and irreversible in one click, so it takes two.
+  const [signOutConfirm, setSignOutConfirm] = useState<string | null>(null);
   // Electron's renderer ignores window.prompt() entirely — it returns without
   // showing anything, which is why "Add account…" appeared to do nothing.
   // The folder is collected inline instead.
@@ -79,6 +83,7 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
   });
   const startLogin = useAtomCommand(claudeAccountEnvironment.startLogin, { reportFailure: false });
   const awaitLogin = useAtomCommand(claudeAccountEnvironment.awaitLogin, { reportFailure: false });
+  const signOut = useAtomCommand(claudeAccountEnvironment.signOut, { reportFailure: false });
 
   const refresh = useCallback(async () => {
     setBusy("listing");
@@ -202,6 +207,38 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
     [awaitLogin, environmentId, refresh, startLogin],
   );
 
+  const signOutAccount = useCallback(
+    async (profile: ClaudeAccountProfile) => {
+      setSignOutConfirm(null);
+      setBusy("signing-out");
+      setNotice(null);
+      const result = (await signOut({
+        environmentId,
+        input: { homePath: profile.homePath },
+      })) as
+        | { readonly _tag: "Failure"; readonly cause: unknown }
+        | { readonly _tag: "Success"; readonly value: { profile: ClaudeAccountProfile } };
+      setBusy(null);
+      if (result._tag === "Failure") {
+        const error = squashAtomCommandFailure(result as never) as Partial<{
+          detail: string;
+        }> | null;
+        setNotice(error?.detail?.trim() || "Could not sign this account out.");
+        return;
+      }
+      const signedOut = claudeProfilePrimaryLabel(profile);
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "Signed out",
+          description: `${signedOut} is signed out. Sign back in from the same row whenever you want.`,
+        }),
+      );
+      await refresh();
+    },
+    [environmentId, refresh, signOut],
+  );
+
   // Read on mount AND whenever the selected home path changes: the popover
   // host mounts fresh on each open, but the settings tab stays mounted while
   // a selection rewrites `currentHomePath` — without re-reading, the
@@ -322,6 +359,53 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
                   >
                     Sign in
                   </Button>
+                ) : null}
+                {/* Sign-out is offered for every signed-in row, current one
+                    included, so an account that logged out externally can be
+                    reset by hand. Two clicks: the credential wipe is
+                    irreversible in one. */}
+                {isSignedInClaudeProfile(profile) ? (
+                  signOutConfirm === profile.homePath ? (
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-6 border-destructive/50 px-2 text-[11px] text-destructive-foreground"
+                        disabled={busy !== null}
+                        onClick={() => void signOutAccount(profile)}
+                      >
+                        {busy === "signing-out" ? (
+                          <LoaderIcon className="size-3 animate-spin" />
+                        ) : (
+                          "Sign out"
+                        )}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-1.5 text-[11px]"
+                        disabled={busy !== null}
+                        onClick={() => setSignOutConfirm(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                      className="size-6 shrink-0 text-muted-foreground/70 hover:text-destructive-foreground"
+                      title={`Sign ${claudeProfilePrimaryLabel(profile)} out`}
+                      aria-label={`Sign ${claudeProfilePrimaryLabel(profile)} out`}
+                      disabled={busy !== null}
+                      onClick={() => setSignOutConfirm(profile.homePath)}
+                    >
+                      <LogOutIcon className="size-3.5" />
+                    </Button>
+                  )
                 ) : null}
               </li>
             );

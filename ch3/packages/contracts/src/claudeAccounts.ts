@@ -125,6 +125,23 @@ export const ClaudeAccountLoginAwaitResult = Schema.Struct({
 });
 export type ClaudeAccountLoginAwaitResult = typeof ClaudeAccountLoginAwaitResult.Type;
 
+/**
+ * Sign one account out — clears its credential and `oauthAccount`, scoped to
+ * this config directory so every other account stays signed in. Reversible:
+ * the same row signs back in.
+ */
+export const ClaudeAccountSignOutInput = Schema.Struct({
+  /** Profile to sign out, by its config directory. */
+  homePath: TrimmedNonEmptyString,
+});
+export type ClaudeAccountSignOutInput = typeof ClaudeAccountSignOutInput.Type;
+
+export const ClaudeAccountSignOutResult = Schema.Struct({
+  /** The profile after sign-out, re-probed — now reading as signed out. */
+  profile: ClaudeAccountProfile,
+});
+export type ClaudeAccountSignOutResult = typeof ClaudeAccountSignOutResult.Type;
+
 // Errors
 
 export class ClaudeAccountError extends Schema.TaggedErrorClass<ClaudeAccountError>()(

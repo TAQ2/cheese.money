@@ -148,4 +148,28 @@ it.layer(NodeServices.layer)("Claude profile discovery", (it) => {
       }),
     ),
   );
+
+  it.effect("excludes a `.lock` sidecar so it is not listed as a duplicate account", () =>
+    withFakeHome((fakeHome) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        // The real account directory, and the ephemeral lock a tool holds
+        // beside it. The lock matches the `.claude-` prefix, so without the
+        // `.lock` exclusion it was enumerated as a second account with the
+        // same identity and quota.
+        const account = path.join(fakeHome, ".claude-work");
+        yield* fs.makeDirectory(account, { recursive: true });
+        yield* fs.writeFileString(path.join(account, ".claude.json"), "{}");
+        const lock = path.join(fakeHome, ".claude-work.lock");
+        yield* fs.makeDirectory(lock, { recursive: true });
+        yield* fs.writeFileString(path.join(lock, ".claude.json"), "{}");
+
+        const found = yield* discoverClaudeProfilePaths({ configuredHomePath: "" });
+
+        expect(found).toContain(account);
+        expect(found).not.toContain(lock);
+      }),
+    ),
+  );
 });

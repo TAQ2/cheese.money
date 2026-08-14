@@ -111,6 +111,7 @@ import * as OpenCodeUsageMetrics from "./provider/Drivers/OpenCodeUsageMetrics.t
 import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory.ts";
 import {
   awaitClaudeAccountLogin,
+  signOutClaudeAccount,
   listClaudeAccountProfiles,
   type PendingClaudeLogin,
   probeClaudeProfile,
@@ -2713,6 +2714,20 @@ const makeWsRpcLayer = (
                     }),
                 ),
               );
+              return { profile };
+            }),
+            {
+              "rpc.aggregate": "provider",
+            },
+          ),
+        [WS_METHODS.claudeSignOutAccount]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.claudeSignOutAccount,
+            // signOutClaudeAccount is best-effort and total: clearing a
+            // missing credential is success, and the re-probe falls back to a
+            // bare signed-out profile, so there is no failure to map here.
+            Effect.gen(function* () {
+              const profile = yield* signOutClaudeAccount({ homePath: input.homePath });
               return { profile };
             }),
             {

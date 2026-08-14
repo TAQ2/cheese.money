@@ -16,6 +16,7 @@ import * as NodeOS from "node:os";
 
 import { ClaudeAccountError } from "@ch3tools/contracts";
 import type { ClaudeAccountProfile, ClaudeSettings } from "@ch3tools/contracts";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -29,7 +30,13 @@ import * as Schema from "effect/Schema";
 
 import { buildClaudeCapabilitiesProbeQueryOptions } from "../Layers/ClaudeProvider.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
-import { type ClaudeAccountUsageFetch, fetchClaudeAccountUsage } from "./ClaudeAccountUsage.ts";
+import * as ProcessRunner from "../../processRunner.ts";
+import {
+  claudeCredentialServices,
+  clearClaudeUsageCache,
+  type ClaudeAccountUsageFetch,
+  fetchClaudeAccountUsage,
+} from "./ClaudeAccountUsage.ts";
 
 /**
  * The usage endpoint buckets requests by User-Agent; a wrong or absent version
@@ -69,6 +76,11 @@ const isClaudeProfileDirectory = Effect.fn("isClaudeProfileDirectory")(function*
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   if (!input.entryName.startsWith(".")) return false;
+  // A `.lock` sidecar (`~/.claude-work.lock`) is an ephemeral lock a tool
+  // holds beside the real directory, not an account. It matches the
+  // `.claude-` name prefix below, so without this it is listed as a duplicate
+  // of the account it locks — same email, same organization, same quota.
+  if (input.entryName.endsWith(".lock")) return false;
   const isDirectory = yield* fs.stat(input.candidatePath).pipe(
     Effect.map((stats) => stats.type === "Directory"),
     Effect.orElseSucceed(() => false),
@@ -335,6 +347,113 @@ export const listClaudeAccountProfiles = Effect.fn("listClaudeAccountProfiles")(
         ...(input.includeUsage === true ? { includeUsage: true } : {}),
       }),
     { concurrency: "unbounded" },
+  );
+});
+
+/** How long the Keychain delete may take before it is a stuck prompt, not a lookup. */
+const KEYCHAIN_DELETE_TIMEOUT = Duration.seconds(3);
+
+/**
+ * Removes only the `oauthAccount` object from a CLI config file, preserving
+ * every other key byte-for-byte in value (projects, history, MCP config, …).
+ *
+ * A whole-file rewrite would risk dropping state the CLI keeps in the same
+ * file — `~/.claude.json` in particular holds far more than the account — so
+ * this parses, deletes the single key, and re-serializes. A file that will not
+ * parse is left untouched: corrupting the user's CLI config is worse than a
+ * row that still shows an email.
+ */
+const removeOauthAccountFromConfig = Effect.fn("removeOauthAccountFromConfig")(function* (
+  configPath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const raw = yield* fs.readFileString(configPath).pipe(Effect.orElseSucceed(() => ""));
+  if (raw.trim().length === 0) return;
+  // Plain JSON, deliberately: a Schema struct decode would DROP every key it
+  // does not name, but this must preserve all of the CLI's other state and
+  // remove exactly one key. Unparseable JSON is left untouched rather than
+  // risking corruption of the user's config.
+  let parsed: unknown;
+  try {
+    // @effect-diagnostics-next-line preferSchemaOverJson:off
+    parsed = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+  const config = parsed as Record<string, unknown>;
+  if (!("oauthAccount" in config)) return;
+  delete config.oauthAccount;
+  // @effect-diagnostics-next-line preferSchemaOverJson:off
+  const serialized = JSON.stringify(config, null, 2);
+  yield* fs.writeFileString(configPath, `${serialized}\n`).pipe(Effect.orElseSucceed(() => {}));
+});
+
+/**
+ * Signs an account out: the reverse of `startClaudeAccountLogin`, scoped to
+ * ONE config directory so every other account stays signed in.
+ *
+ * Clears all three places the CLI keeps a session — the Keychain credential
+ * (both the hashed entry and, for the default home, the legacy unsuffixed
+ * one), the on-disk `.credentials.json`, and the `oauthAccount` in the config
+ * — then drops the usage cache so the row cannot keep showing the signed-out
+ * account's last numbers. Every step is best-effort: a missing Keychain entry
+ * or credentials file is success, not failure, because the goal state is
+ * "no session here", which a missing artifact already satisfies.
+ *
+ * Returns the re-probed profile, now reading as signed out, so the caller can
+ * render the "Sign in" affordance on the same row without a second round-trip.
+ */
+export const signOutClaudeAccount = Effect.fn("signOutClaudeAccount")(function* (input: {
+  readonly homePath: string;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const processRunner = yield* ProcessRunner.ProcessRunner;
+  const home = NodeOS.homedir();
+  const homePath = path.resolve(expandHomePath(input.homePath.trim()));
+  const isDefaultHome = homePath === (yield* defaultClaudeConfigDirPath());
+
+  // Keychain first: the credential is what actually authorizes turns, so a
+  // sign-out that left it behind would not be one.
+  for (const service of claudeCredentialServices(homePath)) {
+    yield* processRunner
+      .run({
+        command: "security",
+        args: ["delete-generic-password", "-s", service],
+        timeout: KEYCHAIN_DELETE_TIMEOUT,
+        timeoutBehavior: "timedOutResult",
+      })
+      .pipe(Effect.orElseSucceed(() => ({ stdout: "" }) as { stdout: string }));
+  }
+
+  yield* fs
+    .remove(path.join(homePath, ".credentials.json"))
+    .pipe(Effect.orElseSucceed(() => {}));
+
+  const configPath = isDefaultHome
+    ? path.join(home, ".claude.json")
+    : path.join(homePath, ".claude.json");
+  yield* removeOauthAccountFromConfig(configPath);
+
+  // The row must not keep serving this account's last usage numbers off the
+  // cache after its credential is gone.
+  clearClaudeUsageCache();
+
+  // Total by construction: a re-probe that could not read the just-cleared
+  // directory still describes a signed-out account, so it falls back to the
+  // bare identity-less profile rather than failing the sign-out that already
+  // succeeded.
+  return yield* probeClaudeProfile({ homePath, isCurrent: false, includeUsage: false }).pipe(
+    Effect.orElseSucceed(
+      () =>
+        ({
+          homePath,
+          displayPath: homeRelativeDisplayPath(homePath),
+          isCurrent: false,
+          isDefaultHome,
+        }) satisfies ClaudeAccountProfile,
+    ),
   );
 });
 

@@ -28,5 +28,9 @@ export function createClaudeAccountEnvironmentAtoms<R, E>(
       label: "environment-data:claude:await-account-login",
       tag: WS_METHODS.claudeAwaitAccountLogin,
     }),
+    signOut: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:claude:sign-out-account",
+      tag: WS_METHODS.claudeSignOutAccount,
+    }),
   };
 }
