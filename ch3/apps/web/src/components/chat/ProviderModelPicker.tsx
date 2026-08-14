@@ -151,8 +151,13 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             variant={props.triggerVariant ?? "ghost"}
             data-chat-provider-model-picker="true"
             className={cn(
-              "min-w-0 justify-between whitespace-nowrap",
-              props.compact ? "max-w-42 shrink-0" : "max-w-48 shrink sm:max-w-56",
+              "justify-between whitespace-nowrap",
+              // shrink-0, definitively: the composer's control cluster is an
+              // overflow-x-auto scroller, so nothing needs this button to
+              // shrink — every previous "min-w floor" guess still ellipsized
+              // the model name in crowded running-turn rows. Natural width up
+              // to max-w-56; the row scrolls when genuinely tight.
+              props.compact ? "max-w-42 shrink-0" : "max-w-56 shrink-0",
               props.triggerClassName,
             )}
             disabled={props.disabled}

@@ -149,6 +149,15 @@ export function applyThreadDetailEvent(
         },
       };
 
+    case "thread.kanban-updated":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          kanban: event.payload.kanban,
+        },
+      };
+
     // ── Thread metadata ─────────────────────────────────────────────
     case "thread.meta-updated":
       return {

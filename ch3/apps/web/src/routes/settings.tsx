@@ -107,7 +107,11 @@ function SettingsContentLayout() {
           </div>
         )}
 
-        <div key={restoreSignal} className="min-h-0 flex flex-1 flex-col">
+        <div
+          key={restoreSignal}
+          className="min-h-0 flex flex-1 flex-col"
+          data-testid="settings-panel"
+        >
           <Outlet />
         </div>
       </div>

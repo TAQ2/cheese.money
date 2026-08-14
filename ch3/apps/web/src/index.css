@@ -780,6 +780,282 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(ch3-mobi
       background: var(--popover) !important;
     }
   }
+
+  /* ── Kanban board ──────────────────────────────────────────────────────
+     Two full-width horizontal bands — you on top, agents below — sharing one
+     set of column tracks. A column stays ONE element (one drop target, one
+     accent) that spans every band row and re-publishes those rows to its own
+     children with `grid-template-rows: subgrid`, so the headers and both lane
+     cells of all seven columns stay pixel-aligned whatever they contain. The
+     bands are painted underneath, and the divider on top, so both run the
+     full board width — through the column gaps and the sticky label gutter —
+     instead of restarting per column. */
+  .kanban-grid {
+    --kanban-gutter: 2.25rem;
+    --kanban-col: minmax(10.5rem, 1fr);
+    --kanban-radius: 0.75rem;
+    /* header · you · agents — the lane fractions come from the board state
+       (default an equal split; the divider drags them live). The agent lane
+       is a peer of the human lane, not a footer. */
+    grid-template-rows: auto minmax(0, var(--kanban-user-fr, 1fr)) minmax(0, var(--kanban-agent-fr, 1fr));
+    display: grid;
+    column-gap: 0.5rem;
+    row-gap: 0;
+    width: 100%;
+    height: 100%;
+    padding-right: 0.75rem;
+  }
+
+  .kanban-band-agent {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    z-index: 0;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--foreground) 5%, transparent);
+  }
+
+  /* The one strong separator, and the resize handle for the lane split.
+     Drawn above the columns and above the sticky gutter so it reads as a
+     single continuous line at any scroll offset; the box is a slim hit zone
+     centered on the line, the line itself lives in ::after. */
+  .kanban-divider {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    align-self: start;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    height: 0.875rem;
+    margin-top: -0.4375rem;
+    cursor: row-resize;
+    touch-action: none;
+  }
+
+  .kanban-divider::after {
+    content: "";
+    width: 100%;
+    height: 2px;
+    background: color-mix(in srgb, var(--foreground) 28%, transparent);
+    box-shadow: 0 7px 12px -9px color-mix(in srgb, var(--foreground) 55%, transparent);
+  }
+
+  .kanban-divider:hover::after,
+  .kanban-divider:active::after {
+    background: color-mix(in srgb, var(--primary) 70%, var(--foreground));
+  }
+
+  .kanban-gutter {
+    grid-column: 1;
+    position: sticky;
+    left: 0;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Opaque: cards scroll underneath it. */
+    background-color: var(--background);
+  }
+
+  .kanban-gutter-user {
+    grid-row: 2;
+  }
+
+  /* Repeats the band fill, because the opaque gutter hides the band behind. */
+  .kanban-gutter-agent {
+    grid-row: 3;
+    background-image: linear-gradient(
+      color-mix(in srgb, var(--foreground) 5%, transparent),
+      color-mix(in srgb, var(--foreground) 5%, transparent)
+    );
+  }
+
+  .kanban-gutter-label {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    font-size: 0.5625rem;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  .kanban-column {
+    grid-row: 1 / -1;
+    display: grid;
+    grid-template-rows: subgrid;
+    z-index: 1;
+    min-width: 0;
+    border-radius: var(--kanban-radius);
+    background-color: color-mix(in srgb, var(--kanban-accent) 2%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kanban-accent) 11%, transparent);
+    transition:
+      background-color 180ms ease,
+      box-shadow 180ms ease;
+  }
+
+  .kanban-column:hover {
+    background-color: color-mix(in srgb, var(--kanban-accent) 4%, transparent);
+  }
+
+  .kanban-column-dragover,
+  .kanban-column-dragover:hover {
+    background-color: color-mix(in srgb, var(--primary) 8%, transparent);
+    box-shadow:
+      inset 0 0 0 2px var(--primary),
+      0 0 24px -6px color-mix(in srgb, var(--primary) 55%, transparent);
+  }
+
+  .kanban-column-head {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.125rem;
+    min-width: 0;
+    padding: 0.375rem 0.625rem;
+    border-top: 2px solid color-mix(in srgb, var(--kanban-accent) 72%, transparent);
+    border-radius: var(--kanban-radius) var(--kanban-radius) 0 0;
+    background-image: linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--kanban-accent) 14%, transparent),
+      color-mix(in srgb, var(--kanban-accent) 4%, transparent)
+    );
+  }
+
+  /* Mixing the accent into the theme's own foreground keeps every label
+     legible in both palettes without a second, hand-tuned dark accent set. */
+  .kanban-column-title {
+    color: color-mix(in srgb, var(--kanban-accent) 42%, var(--foreground));
+  }
+
+  .kanban-column-count {
+    background-color: color-mix(in srgb, var(--kanban-accent) 26%, transparent);
+    color: color-mix(in srgb, var(--kanban-accent) 55%, var(--foreground));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kanban-accent) 34%, transparent);
+  }
+
+  .kanban-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-height: 0;
+    min-width: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0.5rem 0.625rem 0.625rem;
+  }
+
+  .kanban-card {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .kanban-cell-agent {
+    /* The recessed half: the neutral band fill with the column's own accent
+       still mixed through it, so the lane reads as one continuous surface
+       without the columns losing their identity below the divider. */
+    background-color: color-mix(
+      in srgb,
+      var(--kanban-accent) 3%,
+      color-mix(in srgb, var(--foreground) 3%, transparent)
+    );
+    border-radius: 0 0 var(--kanban-radius) var(--kanban-radius);
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--foreground) 7%, transparent);
+  }
+
+  .kanban-card {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--kanban-glow) 30%, transparent),
+      0 0 10px -3px color-mix(in srgb, var(--kanban-glow) 16%, transparent);
+    transition:
+      transform 170ms cubic-bezier(0.2, 0.7, 0.3, 1),
+      box-shadow 170ms ease,
+      opacity 170ms ease;
+  }
+
+  .kanban-card:hover {
+    transform: translateY(-2px);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--kanban-glow) 72%, transparent),
+      0 0 20px -1px color-mix(in srgb, var(--kanban-glow) 34%, transparent),
+      0 10px 20px -12px color-mix(in srgb, var(--foreground) 65%, transparent);
+  }
+
+  .kanban-card:active {
+    transform: translateY(0) scale(0.995);
+  }
+
+  /* Cards arrive by transition instead of by cut when the board re-lays out —
+     a move, a rise off the waiting shelf, a dive into the agent lane. CSS
+     only: @starting-style animates the entry; the exit belongs to React,
+     which unmounts the old node, and no stylesheet can hold that open. */
+  @starting-style {
+    .kanban-card {
+      opacity: 0;
+      transform: translateY(6px) scale(0.98);
+    }
+  }
+
+  .kanban-agent-dot {
+    position: relative;
+    animation: kanban-agent-dot 2.4s infinite;
+  }
+
+  .kanban-agent-dot::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 9999px;
+    background-color: color-mix(in srgb, var(--primary) 55%, transparent);
+    animation: kanban-agent-halo 2.4s infinite;
+  }
+
+  /* Duty-cycled and stepped, like the sidebar status indicators: long holds
+     and a handful of discrete frames rather than a repaint every vsync. */
+  @keyframes kanban-agent-dot {
+    0%,
+    45% {
+      opacity: 1;
+      animation-timing-function: steps(6);
+    }
+    58%,
+    92% {
+      opacity: 0.45;
+      animation-timing-function: steps(6);
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+
+  @keyframes kanban-agent-halo {
+    0% {
+      opacity: 0.55;
+      scale: 0.7;
+      animation-timing-function: steps(8);
+    }
+    55%,
+    100% {
+      opacity: 0;
+      scale: 2;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .kanban-card,
+    .kanban-column {
+      transition: none;
+    }
+
+    .kanban-card:hover,
+    .kanban-card:active {
+      transform: none;
+    }
+
+    .kanban-agent-dot,
+    .kanban-agent-dot::after {
+      animation: none;
+    }
+  }
 }
 
 /* Safe-area inset utilities for surfaces that opt into edge-to-edge rendering.
@@ -1619,4 +1895,44 @@ label:has(> select#reasoning-effort) select {
   background-color: Highlight;
   opacity: 0.3;
   pointer-events: none;
+}
+
+/* Urgency outranks place: urgent/deadline cards carry a solid ring and a
+     left edge bar that no column wash can drown (UX F4). */
+.kanban-card-loud {
+  box-shadow:
+    inset 3px 0 0 var(--kanban-glow),
+    0 0 0 2px color-mix(in srgb, var(--kanban-glow) 85%, transparent),
+    0 0 18px -2px color-mix(in srgb, var(--kanban-glow) 40%, transparent);
+}
+
+.kanban-card-loud:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    inset 3px 0 0 var(--kanban-glow),
+    0 0 0 2px var(--kanban-glow),
+    0 0 24px -1px color-mix(in srgb, var(--kanban-glow) 55%, transparent);
+}
+
+/* Holding areas: settled/snoozed cards drop the glow system entirely. */
+.kanban-card-compact {
+  box-shadow: none;
+  border-color: var(--border);
+}
+
+/* Empty columns recede instead of shouting their wash (UX F15). */
+.kanban-column-empty {
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kanban-accent) 8%, transparent);
+}
+
+/* Column-anchored rejection: the refusing column flashes its ring (UX F3). */
+.kanban-column-rejected {
+  box-shadow: inset 0 0 0 2px var(--destructive);
+}
+
+/* A board wider than the window must SAY so (UX F2). */
+.kanban-scrollport {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--foreground) 25%, transparent) transparent;
 }

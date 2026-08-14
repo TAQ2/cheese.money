@@ -142,6 +142,7 @@ export const make = Effect.gen(function* () {
       threadSettlement: true,
       threadSnooze: true,
       threadTitleRegeneration: true,
+      threadKanban: true,
       // Speech synthesis is native to this server, so the capability is
       // simply present — there is no external engine left to probe for.
       speech: true,

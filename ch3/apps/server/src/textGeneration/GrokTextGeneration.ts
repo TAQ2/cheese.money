@@ -16,11 +16,14 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildThreadKanbanPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
   sanitizePrTitle,
+  sanitizeKanbanDescription,
+  sanitizeKanbanKeywords,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
 import {
@@ -52,7 +55,8 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadKanban";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -251,10 +255,32 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateThreadKanban: TextGeneration.TextGeneration["Service"]["generateThreadKanban"] =
+    Effect.fn("GrokTextGeneration.generateThreadKanban")(function* (input) {
+      const { prompt, outputSchema } = buildThreadKanbanPrompt({
+        message: input.message,
+      });
+
+      const generated = yield* runGrokJson({
+        operation: "generateThreadKanban",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+
+      return {
+        stage: generated.stage,
+        description: sanitizeKanbanDescription(generated.description),
+        keywords: sanitizeKanbanKeywords(generated.keywords),
+      } satisfies TextGeneration.ThreadKanbanGenerationResult;
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateThreadKanban,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

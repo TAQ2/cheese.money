@@ -50,6 +50,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands regenerateTitle on thread.meta.update. Absent on
       older servers, so clients hide the action instead of sending it. */
   threadTitleRegeneration: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread.kanban.update. Same version-skew contract as
+      threadSettlement: clients block kanban moves instead of sending them. */
+  threadKanban: Schema.optionalKey(Schema.Boolean),
   /** The server can answer speech.synthesize. Current servers synthesize
       natively and always report it; the flag stays optional because older
       servers, which needed an external engine installed, omit it — clients

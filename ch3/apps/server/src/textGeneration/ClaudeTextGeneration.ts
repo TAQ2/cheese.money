@@ -23,12 +23,15 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildThreadKanbanPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
+  sanitizeKanbanDescription,
+  sanitizeKanbanKeywords,
   sanitizeThreadTitle,
   stripClaudeWorkspaceTrustNotice,
   toJsonSchemaObject,
@@ -94,7 +97,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateThreadKanban",
     value: unknown,
     detail: string,
   ): Effect.Effect<string, TextGenerationError> =>
@@ -124,7 +128,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadKanban";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -181,7 +186,17 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "--mcp-config",
           '{"mcpServers":{}}',
           "--strict-mcp-config",
-          "--dangerously-skip-permissions",
+          // SECURITY: text generation feeds an untrusted conversation tail to
+          // the model as its prompt. It must have ZERO tools — otherwise a
+          // transcript that reads as an instruction ("run …", "delete …") is a
+          // prompt-injection that the model executes against the thread's cwd
+          // and any reachable credentials. `--tools ""` disables the entire
+          // built-in set (Bash/Read/Write/Edit); the empty MCP config above
+          // disables MCP tools. With no tools wired there is nothing to gate,
+          // so `--dangerously-skip-permissions` is deliberately NOT passed:
+          // even if a tool leaked back in, print mode would auto-deny it.
+          "--tools",
+          "",
         ],
         { env: claudeEnvironment },
       );
@@ -371,10 +386,32 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       };
     });
 
+  const generateThreadKanban: TextGeneration.TextGeneration["Service"]["generateThreadKanban"] =
+    Effect.fn("ClaudeTextGeneration.generateThreadKanban")(function* (input) {
+      const { prompt, outputSchema } = buildThreadKanbanPrompt({
+        message: input.message,
+      });
+
+      const generated = yield* runClaudeJson({
+        operation: "generateThreadKanban",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+
+      return {
+        stage: generated.stage,
+        description: sanitizeKanbanDescription(generated.description),
+        keywords: sanitizeKanbanKeywords(generated.keywords),
+      } satisfies TextGeneration.ThreadKanbanGenerationResult;
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateThreadKanban,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

@@ -102,6 +102,40 @@ export const ClientSettingsSchema = Schema.Struct({
       model: TrimmedNonEmptyString,
     }),
   ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  // User-created kanban card types (label + glow color). The id doubles as
+  // the persisted cardType on threads; colors are chosen from hues not
+  // already used by the built-in types or other customs.
+  kanbanCustomCardTypes: Schema.Array(
+    Schema.Struct({
+      id: TrimmedNonEmptyString,
+      label: TrimmedNonEmptyString,
+      glow: TrimmedNonEmptyString,
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  // User-created kanban columns (label + accent). Rendered between the
+  // built-in flow columns and Final review, in creation order. The column id
+  // doubles as the persisted stage id on threads filed into it.
+  kanbanCustomColumns: Schema.Array(
+    Schema.Struct({
+      id: TrimmedNonEmptyString,
+      label: TrimmedNonEmptyString,
+      accent: TrimmedNonEmptyString,
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  // Saved left-to-right kanban column order (all column ids, built-ins
+  // included). Empty = the built-in default order. Ids the board no longer
+  // knows are ignored; new columns absent from the list keep their default
+  // position, so the list never needs a migration.
+  kanbanColumnOrder: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  // Per-kanban-column WIP limits, keyed by column id ("full-attention", …).
+  // null = explicitly unlimited; an absent key falls back to the column's
+  // built-in default. Values are small (1–5) but the schema stays permissive
+  // so adding a column never needs a settings migration.
+  kanbanWipLimits: Schema.Record(TrimmedNonEmptyString, Schema.NullOr(Schema.Int)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   providerModelPreferences: Schema.Record(
     ProviderInstanceId,
     Schema.Struct({
@@ -742,6 +776,28 @@ export const ClientSettingsPatch = Schema.Struct({
         model: TrimmedNonEmptyString,
       }),
     ),
+  ),
+  kanbanCustomCardTypes: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        id: TrimmedNonEmptyString,
+        label: TrimmedNonEmptyString,
+        glow: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
+  kanbanCustomColumns: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        id: TrimmedNonEmptyString,
+        label: TrimmedNonEmptyString,
+        accent: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
+  kanbanColumnOrder: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  kanbanWipLimits: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, Schema.NullOr(Schema.Int)),
   ),
   providerModelPreferences: Schema.optionalKey(
     Schema.Record(

@@ -1,0 +1,3092 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CH3 — Kanban Mode (prototype)</title>
+    <style>
+      /* ————— CH3 dark tokens (mirrors apps/web/src/index.css) ————— */
+      :root {
+        color-scheme: dark;
+        --background: #0a0a0a;
+        --card: #121212;
+        --card-2: #171717;
+        --foreground: #f5f5f5;
+        --muted-foreground: #7f7f7f;
+        --border: rgba(255, 255, 255, 0.06);
+        --border-strong: rgba(255, 255, 255, 0.12);
+        --primary: oklch(0.588 0.217 264);
+        --font-sans:
+          "DM Sans Variable", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+          sans-serif;
+        --font-mono: "SF Mono", "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+
+        /* class-of-service card colors — Anderson's canonical ticket colors (Part 22) */
+        --cos-expedite: #e7e5e4; /* white card, silver star */
+        --cos-fixed: #a78bfa; /* purple */
+        --cos-standard: #d9a821; /* yellow */
+        --cos-intangible: #3fa95c; /* green */
+        --issue-pink: #f26daf; /* pink issue slip (Part 6) */
+
+        /* chart tokens — dataviz reference palette, dark mode (validated) */
+        --chart-surface: #1a1a19;
+        --ink: #ffffff;
+        --ink-2: #c3c2b7;
+        --ink-muted: #898781;
+        --grid: #2c2c2a;
+        --baseline: #383835;
+        --series-blue: #3987e5;
+        --status-good: #0ca30c;
+        --status-warning: #fab219;
+        --status-critical: #d03b3b;
+        --delta-good: #0ca30c;
+        --delta-bad: #e66767;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--background);
+        color: var(--foreground);
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+        overflow: hidden;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        background: none;
+        border: none;
+        cursor: pointer;
+      }
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 3px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+
+      .app {
+        display: flex;
+        height: 100vh;
+      }
+
+      /* ————— sidebar ————— */
+      .sidebar {
+        width: 232px;
+        flex: none;
+        background: var(--card);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        padding: 10px;
+      }
+      .wordmark {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px 12px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .wordmark .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--primary);
+      }
+      .mode-toggle {
+        display: flex;
+        gap: 2px;
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 8px;
+        padding: 2px;
+        margin-bottom: 14px;
+      }
+      .mode-toggle button {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        padding: 5px 0;
+        border-radius: 6px;
+        color: var(--muted-foreground);
+        font-size: 11.5px;
+      }
+      .mode-toggle button.active {
+        background: var(--card-2);
+        color: var(--foreground);
+        box-shadow: 0 0 0 1px var(--border-strong);
+      }
+      .mode-toggle svg {
+        width: 13px;
+        height: 13px;
+      }
+      .side-label {
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted-foreground);
+        padding: 8px 8px 4px;
+      }
+      .proj {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 8px;
+        border-radius: 6px;
+        color: var(--ink-2);
+      }
+      .proj:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .proj .pd {
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+        flex: none;
+      }
+      .proj .n {
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .proj .c {
+        color: var(--muted-foreground);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+      .side-fill {
+        flex: 1;
+      }
+
+      /* account slots — the WIP limit's physical substrate */
+      .accounts {
+        border-top: 1px solid var(--border);
+        padding-top: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .acct {
+        padding: 0 8px;
+      }
+      .acct .row1 {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11.5px;
+        color: var(--ink-2);
+        margin-bottom: 3px;
+      }
+      .acct .row1 .pct {
+        color: var(--muted-foreground);
+        font-variant-numeric: tabular-nums;
+      }
+      .meter {
+        height: 4px;
+        border-radius: 2px;
+        background: #14263e;
+        overflow: hidden;
+      }
+      .meter > div {
+        height: 100%;
+        border-radius: 2px;
+        background: var(--series-blue);
+      }
+      .meter.warn {
+        background: #3a2b06;
+      }
+      .meter.warn > div {
+        background: var(--status-warning);
+      }
+      .meter.crit {
+        background: #3a1414;
+      }
+      .meter.crit > div {
+        background: var(--status-critical);
+      }
+      .acct .note {
+        font-size: 10.5px;
+        color: var(--muted-foreground);
+        margin-top: 2px;
+      }
+      .slots-line {
+        padding: 4px 8px 0;
+        font-size: 11px;
+        color: var(--muted-foreground);
+      }
+      .slots-line b {
+        color: var(--foreground);
+        font-weight: 600;
+      }
+
+      /* ————— main ————— */
+      .main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .topbar {
+        height: 52px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .topbar h1 {
+        font-size: 14px;
+        font-weight: 650;
+        margin: 0 4px 0 0;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 9px;
+        border-radius: 999px;
+        border: 1px solid var(--border-strong);
+        color: var(--ink-2);
+        font-size: 11.5px;
+        white-space: nowrap;
+      }
+      .chip b {
+        font-weight: 600;
+        color: var(--foreground);
+      }
+      .chip .cd {
+        color: var(--muted-foreground);
+      }
+      .topbar .spacer {
+        flex: 1;
+      }
+      .btn {
+        padding: 5px 11px;
+        border-radius: 7px;
+        border: 1px solid var(--border-strong);
+        color: var(--foreground);
+        font-size: 12px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .btn:hover {
+        background: rgba(255, 255, 255, 0.07);
+      }
+      .btn.primary {
+        background: var(--primary);
+        border-color: transparent;
+        color: #fff;
+      }
+      .btn.ghost {
+        border-color: transparent;
+        color: var(--muted-foreground);
+      }
+      .btn.ghost:hover {
+        color: var(--foreground);
+        background: rgba(255, 255, 255, 0.05);
+      }
+
+      /* capacity allocation (Part 21/22): guaranteed service per class */
+      .alloc-strip {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 9px 16px 0;
+      }
+      .alloc-label {
+        font-size: 11px;
+        color: var(--muted-foreground);
+        white-space: nowrap;
+      }
+      .alloc-bar {
+        flex: 1;
+        max-width: 420px;
+        display: flex;
+        gap: 2px;
+        height: 6px;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .alloc-bar > div {
+        height: 100%;
+      }
+      .alloc-key {
+        display: flex;
+        gap: 14px;
+        font-size: 11px;
+        color: var(--muted-foreground);
+        flex-wrap: wrap;
+      }
+      .alloc-key span {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .alloc-key i {
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        display: inline-block;
+      }
+
+      /* ————— expedite lane (Part 22: white card, silver star, limit 1) ————— */
+      .expedite-lane {
+        margin: 10px 16px 0;
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        background: linear-gradient(90deg, rgba(231, 229, 228, 0.05), rgba(231, 229, 228, 0.015));
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 7px 12px;
+        min-height: 46px;
+      }
+      .expedite-lane.over {
+        outline: 2px solid var(--cos-expedite);
+        outline-offset: -2px;
+      }
+      .lane-tag {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 11px;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--ink-2);
+        white-space: nowrap;
+      }
+      .lane-tag .star {
+        color: var(--cos-expedite);
+        font-size: 13px;
+      }
+      .lane-cards {
+        display: flex;
+        gap: 8px;
+        flex: 1;
+        min-width: 0;
+      }
+      .lane-empty {
+        font-size: 11.5px;
+        color: var(--muted-foreground);
+        font-style: italic;
+      }
+      .lane-limit {
+        font-size: 11px;
+        color: var(--muted-foreground);
+        white-space: nowrap;
+      }
+
+      /* ————— board: 2D grid — x = flow (WIP protected), y = ownership (you on top, agents below) ————— */
+      .board {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 12px 16px 10px;
+      }
+      /* the grid lives in an auto-height child: tracks sized against a definite
+     container height (drawer open) collapse to their minimum and cell content
+     overlaps the lane below — indefinite height keeps rows content-sized */
+      .board-grid {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 26px repeat(5, minmax(198px, 1fr));
+        grid-template-rows: auto repeat(4, minmax(72px, max-content));
+      }
+      .colhead {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 0 2px;
+      }
+      .colhead .hrow {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .colhead h2 {
+        font-size: 12px;
+        font-weight: 650;
+        margin: 0;
+        letter-spacing: 0.01em;
+      }
+      .colhead .sub {
+        font-size: 10.5px;
+        color: var(--muted-foreground);
+      }
+      .wip-pill {
+        font-size: 10.5px;
+        font-variant-numeric: tabular-nums;
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted-foreground);
+        cursor: pointer;
+      }
+      .wip-pill.at {
+        background: rgba(250, 178, 25, 0.16);
+        color: var(--status-warning);
+      }
+      .wip-pill.over {
+        background: rgba(208, 59, 59, 0.2);
+        color: #ff8a8a;
+      }
+      .wip-pill.flash {
+        animation: flash 0.5s 2;
+      }
+      @keyframes flash {
+        50% {
+          background: rgba(208, 59, 59, 0.5);
+          color: #fff;
+        }
+      }
+      .colhead .info {
+        margin-left: auto;
+        color: var(--muted-foreground);
+        font-size: 12px;
+        width: 20px;
+        height: 20px;
+        border-radius: 5px;
+      }
+      .colhead .info:hover {
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--foreground);
+      }
+      .lane-label {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        min-width: 0;
+      }
+      .lane-label .lt {
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+        font-size: 10px;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--muted-foreground);
+        white-space: nowrap;
+      }
+      .lane-label.you .lt {
+        color: var(--foreground);
+        font-weight: 700;
+      }
+      .lane-label .wip-pill {
+        padding: 1px 5px;
+        font-size: 9.5px;
+      }
+      .cell {
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.017);
+        padding: 7px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-width: 0;
+      }
+      .cell.you {
+        background: color-mix(in srgb, var(--primary) 5%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 16%, transparent);
+      }
+      .cell.offline {
+        background: rgba(255, 255, 255, 0.008);
+      }
+      .cell.over {
+        outline: 2px dashed var(--border-strong);
+        outline-offset: -3px;
+      }
+      .dim {
+        opacity: 0.25;
+        transition: opacity 0.25s;
+      }
+      .spot {
+        box-shadow: 0 0 0 2px var(--primary);
+        border-radius: 10px;
+      }
+      .cellhint {
+        font-size: 10px;
+        color: var(--muted-foreground);
+        font-style: italic;
+        padding: 1px 2px;
+      }
+      .badge-place {
+        font-size: 9.5px;
+        color: var(--muted-foreground);
+        cursor: pointer;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        padding: 0 3px;
+      }
+      .badge-place:hover {
+        border-color: var(--border-strong);
+        color: var(--foreground);
+      }
+      .cardact {
+        font-size: 10px;
+        color: var(--muted-foreground);
+        opacity: 0;
+      }
+      .card:hover .cardact {
+        opacity: 1;
+      }
+      .cardact:hover {
+        color: var(--foreground);
+      }
+
+      /* ————— card (ticket design, Part 14) ————— */
+      .card {
+        position: relative;
+        border-radius: 8px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        padding: 8px 10px 8px 13px;
+        cursor: grab;
+      }
+      .card:active {
+        cursor: grabbing;
+      }
+      .card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        border-radius: 8px 0 0 8px;
+        background: var(--cos, var(--border-strong));
+      }
+      .card.cos-standard {
+        --cos: var(--cos-standard);
+        background: color-mix(in srgb, var(--cos-standard) 4%, var(--card));
+      }
+      .card.cos-fixed {
+        --cos: var(--cos-fixed);
+        background: color-mix(in srgb, var(--cos-fixed) 5%, var(--card));
+      }
+      .card.cos-intangible {
+        --cos: var(--cos-intangible);
+        background: color-mix(in srgb, var(--cos-intangible) 4%, var(--card));
+      }
+      .card.cos-expedite {
+        --cos: var(--cos-expedite);
+        background: color-mix(in srgb, var(--cos-expedite) 7%, var(--card));
+        border-color: rgba(231, 229, 228, 0.25);
+      }
+      .card.dragging {
+        opacity: 0.45;
+      }
+      .card .r1 {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10.5px;
+        color: var(--muted-foreground);
+        margin-bottom: 3px;
+      }
+      .card .id {
+        font-family: var(--font-mono);
+        font-size: 10px;
+      }
+      .card .star {
+        color: var(--cos-expedite);
+      }
+      .card .due {
+        margin-left: auto;
+        color: var(--cos-fixed);
+        font-weight: 600;
+      }
+      .card .entered {
+        margin-left: auto;
+      }
+      .card .title {
+        font-size: 12.5px;
+        color: var(--foreground);
+      }
+      .card .r3 {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-top: 7px;
+      }
+      .tagp {
+        font-size: 10px;
+        color: var(--muted-foreground);
+        border: 1px solid var(--border);
+        padding: 0 6px;
+        border-radius: 999px;
+      }
+      .dots {
+        display: flex;
+        gap: 3px;
+      }
+      .dots i {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: var(--status-warning);
+        display: block;
+      }
+      .dots.hot i {
+        background: var(--status-critical);
+      }
+      .avatar {
+        margin-left: auto;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.09);
+        color: var(--ink-2);
+        font-size: 8.5px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        letter-spacing: 0.02em;
+        flex: none;
+      }
+      .avatar.run {
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 55%, transparent);
+        animation: pulse 2s infinite;
+      }
+      @keyframes pulse {
+        50% {
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 25%, transparent);
+        }
+      }
+      .blockbtn {
+        font-size: 10px;
+        color: var(--muted-foreground);
+        opacity: 0;
+      }
+      .card:hover .blockbtn {
+        opacity: 1;
+      }
+      .blockbtn:hover {
+        color: var(--issue-pink);
+      }
+
+      /* pink issue slip — blockers as first-class work items (Part 6) */
+      .issue {
+        margin-top: 7px;
+        background: color-mix(in srgb, var(--issue-pink) 13%, var(--card));
+        border: 1px solid color-mix(in srgb, var(--issue-pink) 35%, transparent);
+        border-radius: 6px;
+        padding: 5px 8px;
+        transform: rotate(-0.6deg);
+        cursor: pointer;
+      }
+      .issue .ih {
+        font-size: 9.5px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--issue-pink);
+        font-weight: 700;
+      }
+      .issue .ib {
+        font-size: 11px;
+        color: var(--ink-2);
+        margin-top: 1px;
+      }
+      .card.blocked {
+        border-color: color-mix(in srgb, var(--issue-pink) 30%, transparent);
+      }
+
+      /* pull affordance — the free slot signals; work is pulled, never pushed (Part 3/14) */
+      .pull-hint {
+        border: 1px dashed color-mix(in srgb, var(--primary) 55%, transparent);
+        border-radius: 8px;
+        padding: 7px 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .pull-hint .t {
+        font-size: 11px;
+        color: var(--muted-foreground);
+        flex: 1;
+      }
+      .pull-hint button {
+        color: var(--primary);
+        font-weight: 650;
+        font-size: 11.5px;
+      }
+
+      .stale {
+        outline: 1px dashed rgba(208, 59, 59, 0.4);
+      }
+      .stale-tag {
+        font-size: 9.5px;
+        color: #ff8a8a;
+      }
+
+      /* ————— metrics drawer ————— */
+      .drawer-bar {
+        flex: none;
+        border-top: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 7px 16px;
+        background: var(--card);
+        cursor: pointer;
+        user-select: none;
+      }
+      .drawer-bar .mini {
+        font-size: 11.5px;
+        color: var(--muted-foreground);
+      }
+      .drawer-bar .mini b {
+        color: var(--foreground);
+        font-weight: 600;
+      }
+      .drawer-bar .caret {
+        margin-left: auto;
+        color: var(--muted-foreground);
+        transition: transform 0.2s;
+      }
+      .drawer {
+        flex: none;
+        height: 0;
+        overflow: hidden;
+        transition: height 0.25s ease;
+        background: var(--background);
+        border-top: 1px solid transparent;
+      }
+      .drawer.open {
+        height: 332px;
+        border-top-color: var(--border);
+        overflow-y: auto;
+      }
+      .drawer-in {
+        padding: 12px 16px 16px;
+      }
+      .filter-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 12px;
+      }
+      .filter-row .fl {
+        font-size: 11px;
+        color: var(--muted-foreground);
+        margin-right: 4px;
+      }
+      .fbtn {
+        padding: 3px 10px;
+        border-radius: 999px;
+        font-size: 11.5px;
+        color: var(--muted-foreground);
+        border: 1px solid transparent;
+      }
+      .fbtn:hover {
+        color: var(--foreground);
+      }
+      .fbtn.sel {
+        color: var(--foreground);
+        border-color: var(--border-strong);
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .fbtn.sel::before {
+        content: "✓ ";
+        font-weight: 700;
+      }
+      .littles {
+        margin-left: auto;
+        font-size: 11.5px;
+        color: var(--muted-foreground);
+      }
+      .littles b {
+        color: var(--foreground);
+        font-weight: 600;
+      }
+
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+      .tile {
+        background: var(--chart-surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 9px 12px;
+        min-width: 0;
+      }
+      .tile .lb {
+        font-size: 11px;
+        color: var(--ink-muted);
+      }
+      .tile .vl {
+        font-size: 21px;
+        font-weight: 600;
+        color: var(--ink);
+        margin-top: 1px;
+        display: flex;
+        align-items: baseline;
+        gap: 7px;
+      }
+      .tile .vl small {
+        font-size: 11px;
+        font-weight: 500;
+      }
+      .tile .up {
+        color: var(--delta-good);
+      }
+      .tile .dn {
+        color: var(--delta-bad);
+      }
+      .tile svg {
+        display: block;
+        margin-top: 4px;
+      }
+
+      .charts {
+        display: grid;
+        grid-template-columns: 1.7fr 1fr;
+        gap: 10px;
+      }
+      .chart-card {
+        background: var(--chart-surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 11px 13px;
+        min-width: 0;
+      }
+      .chart-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 6px;
+      }
+      .chart-head h3 {
+        font-size: 12px;
+        font-weight: 650;
+        margin: 0;
+        color: var(--ink);
+      }
+      .chart-head .sub {
+        font-size: 10.5px;
+        color: var(--ink-muted);
+      }
+      .chart-head .tbl-toggle {
+        margin-left: auto;
+        font-size: 10.5px;
+        color: var(--ink-muted);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 1px 7px;
+      }
+      .chart-head .tbl-toggle:hover {
+        color: var(--ink);
+      }
+      .legend {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 4px;
+      }
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 10.5px;
+        color: var(--ink-2);
+      }
+      .legend i {
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        display: inline-block;
+      }
+      .chart-wrap {
+        position: relative;
+      }
+      .viz-tip {
+        position: absolute;
+        pointer-events: none;
+        background: #232322;
+        border: 1px solid var(--border-strong);
+        border-radius: 7px;
+        padding: 6px 9px;
+        font-size: 11px;
+        display: none;
+        z-index: 30;
+        min-width: 130px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+      }
+      .viz-tip .tt {
+        color: var(--ink-muted);
+        font-size: 10px;
+        margin-bottom: 3px;
+      }
+      .viz-tip .row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 2px;
+      }
+      .viz-tip .key {
+        width: 10px;
+        height: 2px;
+        border-radius: 1px;
+        flex: none;
+      }
+      .viz-tip .v {
+        font-weight: 650;
+        color: var(--ink);
+        font-variant-numeric: tabular-nums;
+      }
+      .viz-tip .s {
+        color: var(--ink-2);
+      }
+      .datatable {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 6px;
+        font-size: 11px;
+      }
+      .datatable th,
+      .datatable td {
+        text-align: right;
+        padding: 3px 8px;
+        border-bottom: 1px solid var(--grid);
+        font-variant-numeric: tabular-nums;
+        color: var(--ink-2);
+      }
+      .datatable th {
+        color: var(--ink-muted);
+        font-weight: 500;
+      }
+      .datatable th:first-child,
+      .datatable td:first-child {
+        text-align: left;
+      }
+
+      /* ————— overlays ————— */
+      .scrim {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 90;
+        display: none;
+      }
+      .scrim.show {
+        display: block;
+      }
+      .popover {
+        position: fixed;
+        z-index: 100;
+        width: 300px;
+        background: #1d1d1d;
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        padding: 12px 14px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+        display: none;
+      }
+      .popover.show {
+        display: block;
+      }
+      .popover h4 {
+        margin: 0 0 6px;
+        font-size: 12px;
+      }
+      .popover p {
+        margin: 0;
+        font-size: 11.5px;
+        color: var(--ink-2);
+      }
+      .popover .ref {
+        display: block;
+        margin-top: 8px;
+        font-size: 10px;
+        color: var(--muted-foreground);
+        font-style: italic;
+      }
+
+      .modal {
+        position: fixed;
+        z-index: 110;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(560px, 92vw);
+        max-height: 80vh;
+        overflow-y: auto;
+        background: #171717;
+        border: 1px solid var(--border-strong);
+        border-radius: 14px;
+        padding: 18px 20px;
+        display: none;
+      }
+      .modal.show {
+        display: block;
+      }
+      .modal h3 {
+        margin: 0 0 2px;
+        font-size: 15px;
+      }
+      .modal .msub {
+        font-size: 11.5px;
+        color: var(--muted-foreground);
+        margin-bottom: 14px;
+      }
+      .replen-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 4px;
+        border-bottom: 1px solid var(--border);
+      }
+      .replen-row .ct {
+        flex: 1;
+        min-width: 0;
+      }
+      .replen-row .ct .t {
+        font-size: 12.5px;
+      }
+      .replen-row .ct .m {
+        font-size: 10.5px;
+        color: var(--muted-foreground);
+      }
+      .cosdot {
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        flex: none;
+      }
+      .rbtn {
+        font-size: 11px;
+        padding: 3px 10px;
+        border-radius: 6px;
+        border: 1px solid var(--border-strong);
+      }
+      .rbtn:hover {
+        background: rgba(255, 255, 255, 0.07);
+      }
+      .rbtn.del {
+        color: #ff8a8a;
+        border-color: rgba(208, 59, 59, 0.4);
+      }
+      .modal .mfoot {
+        margin-top: 12px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 11px;
+        color: var(--muted-foreground);
+      }
+
+      .help-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .help-item {
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        padding: 9px 11px;
+      }
+      .help-item .hh {
+        font-size: 12px;
+        font-weight: 650;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .help-item .hb {
+        font-size: 11px;
+        color: var(--ink-2);
+        margin-top: 3px;
+      }
+      .help-item .hr {
+        font-size: 10px;
+        color: var(--muted-foreground);
+        font-style: italic;
+        margin-top: 4px;
+      }
+
+      /* standup — walking the board, right to left (Part 15) */
+      .standup-panel {
+        position: fixed;
+        z-index: 100;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(520px, 90vw);
+        background: #1d1d1d;
+        border: 1px solid var(--border-strong);
+        border-radius: 12px;
+        padding: 14px 16px;
+        display: none;
+        box-shadow: 0 16px 50px rgba(0, 0, 0, 0.65);
+      }
+      .standup-panel.show {
+        display: block;
+      }
+      .standup-panel h4 {
+        margin: 0;
+        font-size: 13px;
+      }
+      .standup-panel .sd {
+        font-size: 10.5px;
+        color: var(--muted-foreground);
+        margin-bottom: 8px;
+      }
+      .standup-panel ul {
+        margin: 6px 0 10px;
+        padding-left: 16px;
+        font-size: 12px;
+        color: var(--ink-2);
+      }
+      .standup-panel li {
+        margin: 3px 0;
+      }
+      .standup-panel .snav {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .toast {
+        position: fixed;
+        z-index: 120;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%) translateY(8px);
+        background: #232322;
+        border: 1px solid var(--border-strong);
+        border-radius: 9px;
+        padding: 9px 15px;
+        font-size: 12px;
+        color: var(--ink-2);
+        opacity: 0;
+        transition: all 0.2s;
+        pointer-events: none;
+        max-width: 520px;
+        text-align: center;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+      .toast b {
+        color: var(--foreground);
+      }
+
+      @media (max-width: 1200px) {
+        .tiles {
+          grid-template-columns: repeat(3, 1fr);
+        }
+        .charts {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <!-- ═════════ sidebar ═════════ -->
+      <aside class="sidebar">
+        <div class="wordmark"><span class="dot"></span> CH3</div>
+
+        <div class="mode-toggle" title="Sidebar mode">
+          <button title="Inbox view">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+              <path
+                d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"
+              />
+            </svg>
+          </button>
+          <button title="Projects view">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path
+                d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+              />
+            </svg>
+          </button>
+          <button class="active" title="Kanban view — you are here">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M6 5v11" />
+              <path d="M12 5v6" />
+              <path d="M18 5v14" />
+            </svg>
+            Kanban
+          </button>
+        </div>
+
+        <div class="side-label">Projects</div>
+        <div id="projList"></div>
+
+        <div class="side-fill"></div>
+
+        <div
+          class="side-label"
+          title="The WIP limit's physical substrate: agent slots = account headroom"
+        >
+          Agent slots
+        </div>
+        <div class="accounts" id="accounts"></div>
+        <div class="slots-line" id="slotsLine"></div>
+      </aside>
+
+      <!-- ═════════ main ═════════ -->
+      <div class="main">
+        <div class="topbar">
+          <h1>Kanban</h1>
+          <span
+            class="chip"
+            title="Queue replenishment cadence (Part 15) — prioritization deferred to the last reasonable moment"
+            ><b>Replenish</b> Mon 09:00 <span class="cd">· in 5d</span></span
+          >
+          <span class="chip" title="Delivery cadence (Part 18) — desktop build cut"
+            ><b>Delivery</b> Fri <span class="cd">· in 2d</span></span
+          >
+          <span class="chip" title="Monthly ops review (Part 26) — quantitative, data-driven"
+            ><b>Ops review</b> Sep 1 <span class="cd">· in 20d</span></span
+          >
+          <div class="spacer"></div>
+          <button class="btn ghost" id="helpBtn" title="How this maps to the book">?</button>
+          <button class="btn" id="standupBtn" title="Walk the board, right to left (Part 15)">
+            Walk the board
+          </button>
+          <button class="btn primary" id="replenBtn">Replenish queue</button>
+        </div>
+
+        <div class="alloc-strip">
+          <span class="alloc-label" title="Capacity allocation per class of service (Part 21/22)"
+            >Capacity allocation</span
+          >
+          <div class="alloc-bar" title="Standard 50% · Intangible 30% · Fixed date 20%">
+            <div style="flex: 5; background: var(--cos-standard)"></div>
+            <div style="flex: 3; background: var(--cos-intangible)"></div>
+            <div style="flex: 2; background: var(--cos-fixed)"></div>
+          </div>
+          <div class="alloc-key">
+            <span><i style="background: var(--cos-standard)"></i>Standard 50% · FIFO</span>
+            <span><i style="background: var(--cos-intangible)"></i>Intangible 30% · slack</span>
+            <span><i style="background: var(--cos-fixed)"></i>Fixed date 20%</span>
+            <span><i style="background: var(--cos-expedite)"></i>Expedite ≤ 1 · always</span>
+          </div>
+        </div>
+
+        <!-- expedite lane: the silver bullet track -->
+        <div class="expedite-lane" id="expLane" data-lane="expedite">
+          <span class="lane-tag"><span class="star">★</span> Expedite</span>
+          <div class="lane-cards" id="expCards"></div>
+          <span class="lane-limit" id="expLimit"></span>
+        </div>
+
+        <div class="board"><div class="board-grid" id="board"></div></div>
+
+        <div class="drawer-bar" id="drawerBar">
+          <span class="mini">Flow metrics</span>
+          <span class="mini" id="miniWip"></span>
+          <span class="mini" id="miniLead"></span>
+          <span class="mini" id="miniTp"></span>
+          <span class="caret" id="drawerCaret">▲</span>
+        </div>
+        <div class="drawer" id="drawer">
+          <div class="drawer-in">
+            <div class="filter-row">
+              <span class="fl">Range</span>
+              <button class="fbtn" data-range="7">Last 7 days</button>
+              <button class="fbtn sel" data-range="14">Last 14 days</button>
+              <button class="fbtn" data-range="30">Last 30 days</button>
+              <span class="littles" id="littles"></span>
+            </div>
+            <div class="tiles" id="tiles"></div>
+            <div class="charts">
+              <div class="chart-card">
+                <div class="chart-head">
+                  <h3>Cumulative flow</h3>
+                  <span class="sub"
+                    >conversations per state — band height = WIP, horizontal gap = lead time (Part
+                    8)</span
+                  >
+                  <button class="tbl-toggle" data-table="cfd">Table</button>
+                </div>
+                <div class="legend" id="cfdLegend"></div>
+                <div class="chart-wrap" id="cfdWrap"></div>
+                <div id="cfdTable" style="display: none"></div>
+              </div>
+              <div class="chart-card">
+                <div class="chart-head">
+                  <h3>Lead time</h3>
+                  <span class="sub" id="histSub"></span>
+                  <button class="tbl-toggle" data-table="hist">Table</button>
+                </div>
+                <div class="chart-wrap" id="histWrap"></div>
+                <div id="histTable" style="display: none"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- overlays -->
+    <div class="scrim" id="scrim"></div>
+    <div class="popover" id="popover"></div>
+    <div class="modal" id="replenModal">
+      <h3>Replenish the input queue</h3>
+      <div class="msub">
+        Pull order: fixed-date by due date, standard FIFO, intangible ad hoc (Part 22). Backlog
+        items older than 6 months are flagged for deletion — the XIT rule (Part 16).
+      </div>
+      <div id="replenList"></div>
+      <div class="mfoot">
+        <span id="replenCap"></span><button class="btn" id="replenClose">Done</button>
+      </div>
+    </div>
+    <div class="modal" id="helpModal">
+      <h3>How this maps to the book</h3>
+      <div class="msub">
+        Anderson, <i>Kanban: Successful Evolutionary Change for Your Technology Business</i> — every
+        mechanic on this board is canon.
+      </div>
+      <div class="help-grid" id="helpGrid"></div>
+      <div class="mfoot">
+        <span
+          >Change as little as possible: same conversations, same projects — only the WIP and the
+          interfaces changed (Part 13).</span
+        ><button class="btn" id="helpClose">Close</button>
+      </div>
+    </div>
+    <div class="standup-panel" id="standupPanel"></div>
+    <div class="toast" id="toast"></div>
+
+    <script>
+      "use strict";
+      /* ════════════════════════════════════ data ════════════════════════════════════ */
+      const TODAY = new Date(2026, 7, 12);
+      const PROJECTS = {
+        ch3: { name: "CH3", color: "#5b7ce8" },
+        hark: { name: "Hark", color: "#c96f9b" },
+        vb: { name: "VendeBien", color: "#4fae8d" },
+        lmo: { name: "LMO", color: "#c9a24f" },
+        hrn: { name: "Harness", color: "#8a8a8a" },
+      };
+      const COS = {
+        expedite: { label: "Expedite", color: "var(--cos-expedite)" },
+        fixed: { label: "Fixed date", color: "var(--cos-fixed)" },
+        standard: { label: "Standard", color: "var(--cos-standard)" },
+        intangible: { label: "Intangible", color: "var(--cos-intangible)" },
+      };
+
+      /* conversations — the work items */
+      let cards = [
+        // backlog
+        {
+          id: "CH-233",
+          title: "Hark: invoice PDF encoding mojibake on UTF-8 names",
+          proj: "hark",
+          cos: "standard",
+          col: "backlog",
+          age: 2,
+        },
+        {
+          id: "CH-231",
+          title: "Sidebar: collapse projects with no open conversations",
+          proj: "ch3",
+          cos: "standard",
+          col: "backlog",
+          age: 12,
+        },
+        {
+          id: "CH-227",
+          title: "VB: rotate listing photos by EXIF orientation",
+          proj: "vb",
+          cos: "standard",
+          col: "backlog",
+          age: 6,
+        },
+        {
+          id: "CH-236",
+          title: "LMO: cohort retention report for the Q3 board deck",
+          proj: "lmo",
+          cos: "fixed",
+          due: "Sep 30",
+          col: "backlog",
+          age: 1,
+        },
+        {
+          id: "CH-198",
+          title: "Migrate client settings schema to v3",
+          proj: "ch3",
+          cos: "intangible",
+          col: "backlog",
+          age: 45,
+        },
+        {
+          id: "CH-140",
+          title: "Spike: voice input in the composer",
+          proj: "ch3",
+          cos: "intangible",
+          col: "backlog",
+          age: 210,
+        },
+        {
+          id: "CH-122",
+          title: "Refactor: unify the three toast systems",
+          proj: "ch3",
+          cos: "intangible",
+          col: "backlog",
+          age: 190,
+        },
+        // ready (input queue, limit 5)
+        {
+          id: "CH-238",
+          title: "Honor retry-after on /api/oauth/usage 429s",
+          proj: "ch3",
+          cos: "standard",
+          col: "ready",
+          age: 1,
+        },
+        {
+          id: "CH-235",
+          title: "Quote-reply regression test flake on CI",
+          proj: "ch3",
+          cos: "standard",
+          col: "ready",
+          age: 1,
+        },
+        {
+          id: "CH-229",
+          title: "VB: MX real-estate listing prompt v2",
+          proj: "vb",
+          cos: "fixed",
+          due: "Aug 20",
+          col: "ready",
+          age: 3,
+        },
+        {
+          id: "CH-234",
+          title: "Harness: propagate visual-ux installer fix to all repos",
+          proj: "hrn",
+          cos: "intangible",
+          col: "ready",
+          age: 3,
+        },
+        // working (limit = 2 × healthy account slots = 4) + expedite lane; y = who holds it
+        {
+          id: "CH-240",
+          title: "LMO prod DB unreachable — homepage 500s",
+          proj: "lmo",
+          cos: "expedite",
+          col: "working",
+          lane: "expedite",
+          age: 0,
+          acct: "b1",
+          running: true,
+        },
+        {
+          id: "CH-237",
+          title: "Account rotation freezes when usage is unknown",
+          proj: "ch3",
+          cos: "standard",
+          col: "working",
+          lane: "b2",
+          age: 2,
+          dots: 2,
+          acct: "b2",
+          running: true,
+        },
+        {
+          id: "CH-228",
+          title: "Hark: rsync deploy drops symlinked assets",
+          proj: "hark",
+          cos: "standard",
+          col: "working",
+          lane: "you",
+          age: 3,
+          dots: 3,
+          blocked: { reason: "Waiting on Rumble Cloud ticket #4821", who: "you own the chase" },
+        },
+        {
+          id: "CH-226",
+          title: "Gitea PR webhook for the orchestrator",
+          proj: "hrn",
+          cos: "standard",
+          col: "working",
+          lane: "b1",
+          age: 1,
+          dots: 1,
+          acct: "b1",
+          running: true,
+        },
+        {
+          id: "CH-232",
+          title: "CH3: Kanban mode prototype (this board)",
+          proj: "ch3",
+          cos: "intangible",
+          col: "working",
+          lane: "b1",
+          age: 0,
+          acct: "b1",
+          running: true,
+          pinned: true,
+        },
+        // verify (limit 3) — re-emerged into your lane: proof over report
+        {
+          id: "CH-230",
+          title: "Composer focus must not report un-ingested value",
+          proj: "ch3",
+          cos: "standard",
+          col: "verify",
+          lane: "you",
+          age: 1,
+        },
+        {
+          id: "CH-225",
+          title: "Touch-ID broker: session expiry sweep",
+          proj: "hrn",
+          cos: "fixed",
+          due: "Aug 15",
+          col: "verify",
+          lane: "you",
+          age: 2,
+          dots: 2,
+        },
+        // done (this week)
+        {
+          id: "CH-224",
+          title: "Copy the entire conversation in one action",
+          proj: "ch3",
+          cos: "standard",
+          col: "done",
+          age: 1,
+        },
+        {
+          id: "CH-223",
+          title: "Health check must not start an OpenCode server",
+          proj: "ch3",
+          cos: "standard",
+          col: "done",
+          age: 1,
+        },
+        {
+          id: "CH-222",
+          title: "Quote a transcript passage into the composer",
+          proj: "ch3",
+          cos: "standard",
+          col: "done",
+          age: 2,
+        },
+        {
+          id: "CH-221",
+          title: "Timed-out probe must not erase provider capabilities",
+          proj: "ch3",
+          cos: "standard",
+          col: "done",
+          age: 3,
+        },
+        {
+          id: "CH-220",
+          title: "VB: listing generator — peso budget tables",
+          proj: "vb",
+          cos: "standard",
+          col: "done",
+          age: 4,
+        },
+        {
+          id: "CH-219",
+          title: "Composite keys: \\u0000 separator, not raw NUL",
+          proj: "ch3",
+          cos: "intangible",
+          col: "done",
+          age: 4,
+        },
+      ];
+
+      const ACCOUNTS = [
+        { key: "b1", name: "baubap-1", pct: 62, note: null },
+        { key: "b2", name: "baubap-2", pct: 34, note: null },
+        { key: "me", name: "personal", pct: 9, note: "resets 15:40" },
+      ];
+      const healthySlots = ACCOUNTS.filter((a) => a.pct >= 15).length;
+      const LIMITS = { ready: 5, working: healthySlots * 2, verify: 3, expedite: 1, attention: 3 };
+
+      /* swim lanes, top to bottom: you first — work re-emerges upward when only you can move it */
+      const LANES = [
+        { key: "you", label: "You" },
+        { key: "b1", label: "baubap-1" },
+        { key: "b2", label: "baubap-2" },
+        { key: "me", label: "personal", offline: true },
+      ];
+      const LANED_COLS = ["working", "verify"];
+      const attnCount = (except) =>
+        cards.filter((c) => c !== except && c.lane === "you" && LANED_COLS.includes(c.col)).length;
+      const pickAgentLane = () => {
+        const healthy = ACCOUNTS.filter((a) => a.pct >= 15).sort((a, b) => b.pct - a.pct);
+        return healthy.length ? healthy[0].key : "b1";
+      };
+
+      const COLUMNS = [
+        {
+          key: "backlog",
+          name: "Backlog",
+          sub: "triage monthly · no estimates",
+          policy: {
+            h: "Backlog policy",
+            p: "Un-committed ideas. Triaged monthly: keep or delete, nothing else. Anything older than 6 months is deleted — if it hasn't been selected by then its value is negligible (the Microsoft XIT rule). No ROM estimates, ever: at XIT estimating consumed 33–40% of capacity.",
+            ref: "Parts 10, 16",
+          },
+        },
+        {
+          key: "ready",
+          name: "Ready",
+          sub: "input queue · replenished Mondays",
+          policy: {
+            h: "Ready policy — the input queue",
+            p: "Limit 5 ≈ weekly throughput + buffer. Replenished at the Monday cadence, or on demand when a slot empties. Pull order: expedite bypasses, fixed-date by due date and flow-time, standard FIFO by entry date, intangible ad hoc. Prioritization is deferred to the last reasonable moment.",
+            ref: "Parts 14, 15, 20",
+          },
+        },
+        {
+          key: "working",
+          name: "Agent working",
+          sub: "limit = 2 × healthy account slots",
+          policy: {
+            h: "Working policy",
+            p:
+              "WIP limit is derived, not decreed: 2 conversations per healthy agent slot (an account with ≥15% headroom). Today that is " +
+              healthySlots * 2 +
+              ". Rows are ownership: agents grind in their lanes; a card re-emerges into your top lane the moment only you can move it. Blocked conversations keep wearing their pink issue and still count against the limit — that tension provokes swarming, not bigger limits.",
+            ref: "Parts 5, 19, 25, 28",
+          },
+        },
+        {
+          key: "verify",
+          name: "Verify",
+          sub: "proof over report",
+          policy: {
+            h: "Verify policy",
+            p: "An agent's claim of 'fixed' is not evidence. Done means observed working live — logs, DB, real output. Verification lands in your lane because you are the non-instant-availability resource: limit 3 attention slots, and this buffer protects — never floods — the bottleneck.",
+            ref: "Parts 31–32 · work law 6",
+          },
+        },
+        {
+          key: "done",
+          name: "Done",
+          sub: "delivered this week",
+          policy: {
+            h: "Done policy",
+            p: "Web ships continuously; the desktop build cuts Friday. Celebrate throughput, not busyness. Each delivery recycles a card back into circulation — the Imperial Palace Gardens turnstile.",
+            ref: "Parts 3, 17, 18",
+          },
+        },
+      ];
+
+      /* flow history — 31 daily samples (day 0 = 30 days ago … day 30 = today) */
+      const HIST = {
+        done: [
+          9, 10, 12, 13, 15, 15, 15, 17, 18, 19, 20, 22, 22, 22, 24, 26, 27, 29, 30, 30, 31, 33, 35,
+          36, 38, 40, 40, 41, 43, 45, 47,
+        ],
+        verify: [
+          1, 2, 2, 1, 2, 3, 2, 1, 2, 2, 3, 2, 1, 1, 2, 3, 2, 2, 1, 2, 3, 3, 2, 2, 1, 2, 3, 2, 3, 2,
+          2,
+        ],
+        working: [
+          3, 3, 4, 4, 5, 4, 4, 5, 5, 4, 4, 5, 6, 5, 4, 4, 5, 5, 4, 5, 6, 5, 4, 4, 5, 5, 4, 5, 5, 5,
+          5,
+        ],
+        ready: [
+          3, 4, 4, 5, 4, 3, 4, 5, 4, 4, 5, 4, 3, 4, 5, 4, 4, 3, 4, 5, 4, 3, 4, 5, 5, 4, 4, 5, 4, 4,
+          4,
+        ],
+        backlog: [
+          9, 9, 8, 8, 9, 10, 10, 9, 8, 9, 9, 8, 8, 9, 10, 9, 8, 8, 9, 9, 8, 8, 9, 10, 9, 8, 8, 7, 7,
+          7, 7,
+        ],
+      };
+      /* lead-time spectra per range — 2-day buckets: 1–2, 3–4, … 19–20 (sums equal Δdone) */
+      const LEAD = {
+        7: [0, 1, 2, 2, 1, 1, 1, 0, 1, 0],
+        14: [1, 2, 4, 4, 3, 2, 2, 1, 1, 0],
+        30: [2, 4, 7, 9, 6, 4, 3, 1, 1, 1],
+      };
+      const FLOW_EFF = { 7: 36, 14: 34, 30: 31 }; // assigned time ÷ lead time (Part 23)
+      const FAIL_LOAD = { 7: 22, 14: 18, 30: 21 }; // % of demand that is failure load (Part 34)
+      const SLA_DAYS = 15,
+        SLA_TARGET = 85; // target lead time + due-date performance (Part 22)
+
+      /* CFD stage bands, bottom → top. Ordinal blue ramp (validated --ordinal --mode dark). */
+      const STAGES = [
+        { key: "done", label: "Done", color: "#184f95" },
+        { key: "verify", label: "Verify", color: "#256abf" },
+        { key: "working", label: "Working", color: "#3987e5" },
+        { key: "ready", label: "Ready", color: "#6da7ec" },
+        { key: "backlog", label: "Backlog", color: "#9ec5f4" },
+      ];
+
+      /* ════════════════════════════════════ helpers ════════════════════════════════════ */
+      const $ = (s) => document.querySelector(s);
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined) n.textContent = text;
+        return n;
+      };
+      const fmtDate = (age) => {
+        const d = new Date(TODAY);
+        d.setDate(d.getDate() - age);
+        return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      };
+      let toastTimer;
+      function toast(html) {
+        const t = $("#toast");
+        t.innerHTML = html;
+        t.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => t.classList.remove("show"), 4200);
+      }
+
+      /* ════════════════════════════════════ board render ════════════════════════════════════ */
+      function countIn(col) {
+        return cards.filter((c) => c.col === col && c.lane !== "expedite").length;
+      }
+
+      function makeCard(c) {
+        const d = el(
+          "div",
+          "card cos-" +
+            c.cos +
+            (c.blocked ? " blocked" : "") +
+            (c.age >= 180 && c.col === "backlog" ? " stale" : ""),
+        );
+        d.draggable = true;
+        d.dataset.id = c.id;
+
+        const r1 = el("div", "r1");
+        r1.append(el("span", "id", c.id));
+        if (c.cos === "expedite") r1.append(el("span", "star", "★"));
+        // placement badge — the regenerate-title model task classifies each card into a cell;
+        // dragging pins it, clicking the pin releases it back to the classifier
+        const badge = el("span", "badge-place", c.pinned ? "📌 pinned" : "✦ auto");
+        badge.title = c.pinned
+          ? "Placed by you — the classifier won't move it. Click to release it back to the model."
+          : "Placed by the classifier (same background task that regenerates titles). Drag to override and pin.";
+        badge.onclick = (e) => {
+          e.stopPropagation();
+          c.pinned = !c.pinned;
+          render();
+          toast(
+            c.pinned
+              ? "<b>" + c.id + "</b> pinned — the classifier keeps its hands off."
+              : "<b>" +
+                  c.id +
+                  "</b> released — the title-regeneration model owns its placement again.",
+          );
+        };
+        r1.append(badge);
+        if (c.dots) {
+          const dots = el("span", "dots" + (c.dots >= 3 ? " hot" : ""));
+          dots.title =
+            c.dots +
+            " day" +
+            (c.dots > 1 ? "s" : "") +
+            " without moving — is it flowing? (Part 15)";
+          for (let i = 0; i < c.dots; i++) dots.append(el("i"));
+          r1.append(dots);
+        }
+        if (c.due) {
+          const due = el("span", "due", "◷ " + c.due);
+          due.title = "Fixed delivery date — pulled by due date and flow-time estimate";
+          r1.append(due);
+        } else r1.append(el("span", "entered", fmtDate(c.age)));
+        d.append(r1);
+
+        d.append(el("div", "title", c.title));
+
+        const r3 = el("div", "r3");
+        r3.append(el("span", "tagp", PROJECTS[c.proj].name));
+        if (c.age >= 180 && c.col === "backlog") r3.append(el("span", "stale-tag", "stale >6mo"));
+        if (c.col === "working" || c.col === "verify") {
+          const bb = el("button", "blockbtn", c.blocked ? "unblock" : "⚑ block");
+          bb.onclick = (e) => {
+            e.stopPropagation();
+            toggleBlock(c);
+          };
+          r3.append(bb);
+        }
+        // vertical flow: agents hand up, you hand back down
+        if (c.col === "working" && c.lane && c.lane !== "you" && c.lane !== "expedite") {
+          const up = el("button", "cardact", "↑ needs you");
+          up.title = "Re-emerge into your lane — the agent hit something only you can decide";
+          up.onclick = (e) => {
+            e.stopPropagation();
+            c.lane = "you";
+            c.running = false;
+            c.pinned = false;
+            c.blocked = c.blocked || {
+              reason: "Agent has a question it cannot answer alone",
+              who: "you",
+            };
+            render();
+            toast(
+              "<b>" +
+                c.id +
+                "</b> re-emerged into your lane. Your attention is the constraint — spend it here first. (Part 31)",
+            );
+          };
+          r3.append(up);
+        }
+        if (c.col === "working" && c.lane === "you") {
+          const dn = el("button", "cardact", "↓ hand back");
+          dn.title = "Answer given — sink it back into the healthiest agent lane";
+          dn.onclick = (e) => {
+            e.stopPropagation();
+            const ln = pickAgentLane();
+            c.lane = ln;
+            c.acct = ln;
+            c.running = true;
+            c.blocked = null;
+            c.pinned = false;
+            render();
+            toast(
+              "<b>" + c.id + "</b> handed back to " + ln + " — the agent resumes, your slot frees.",
+            );
+          };
+          r3.append(dn);
+        }
+        if (c.acct) {
+          const av = el("span", "avatar" + (c.running && !c.blocked ? " run" : ""), c.acct);
+          av.title = c.running && !c.blocked ? "Agent running on " + c.acct : c.acct;
+          r3.append(av);
+        }
+        d.append(r3);
+
+        if (c.blocked) {
+          const slip = el("div", "issue");
+          slip.title =
+            "Pink issue slip — the blocker is a first-class work item. Click to resolve. (Part 6)";
+          slip.append(el("div", "ih", "⚑ blocked · issue"));
+          slip.append(el("div", "ib", c.blocked.reason + " — " + c.blocked.who));
+          slip.onclick = (e) => {
+            e.stopPropagation();
+            toggleBlock(c);
+          };
+          d.append(slip);
+        }
+
+        d.addEventListener("dragstart", (e) => {
+          e.dataTransfer.setData("text/plain", c.id);
+          d.classList.add("dragging");
+        });
+        d.addEventListener("dragend", () => d.classList.remove("dragging"));
+        return d;
+      }
+
+      function toggleBlock(c) {
+        if (c.blocked) {
+          c.blocked = null;
+          toast(
+            "Issue resolved — flow restored. Root cause goes in the ops review. <b>(Part 6)</b>",
+          );
+        } else {
+          c.blocked = {
+            reason: "Needs a decision only Conrad can make",
+            who: "swarm or escalate at the next walk",
+          };
+          toast(
+            "Marked blocked with a pink issue slip. It still counts against WIP — that tension provokes the swarm. <b>(Part 5)</b>",
+          );
+        }
+        render();
+      }
+
+      function pullNext() {
+        const order = { fixed: 0, standard: 1, intangible: 2 };
+        const ready = cards
+          .filter((c) => c.col === "ready")
+          .sort((a, b) => order[a.cos] - order[b.cos] || b.age - a.age);
+        return ready[0] || null;
+      }
+
+      function render() {
+        // sidebar projects
+        const pl = $("#projList");
+        pl.textContent = "";
+        for (const [k, p] of Object.entries(PROJECTS)) {
+          const n = cards.filter((c) => c.proj === k && c.col !== "done").length;
+          const row = el("div", "proj");
+          const pd = el("span", "pd");
+          pd.style.background = p.color;
+          row.append(pd, el("span", "n", p.name), el("span", "c", String(n)));
+          pl.append(row);
+        }
+        // accounts
+        const ac = $("#accounts");
+        ac.textContent = "";
+        for (const a of ACCOUNTS) {
+          const w = el("div", "acct");
+          const r1 = el("div", "row1");
+          r1.append(el("span", null, a.name), el("span", "pct", a.pct + "%"));
+          const m = el("div", "meter" + (a.pct < 15 ? " crit" : a.pct < 40 ? " warn" : ""));
+          const f = el("div");
+          f.style.width = a.pct + "%";
+          m.append(f);
+          w.append(r1, m);
+          if (a.note) w.append(el("div", "note", a.note));
+          ac.append(w);
+        }
+        const sl = $("#slotsLine");
+        sl.innerHTML =
+          "<b>" +
+          healthySlots +
+          " healthy slots</b> → working limit " +
+          LIMITS.working +
+          ". The limit is derived, not decreed.";
+
+        // expedite lane
+        const lane = $("#expCards");
+        lane.textContent = "";
+        const exp = cards.filter((c) => c.lane === "expedite");
+        if (exp.length === 0)
+          lane.append(
+            el(
+              "span",
+              "lane-empty",
+              "empty — as it should be. The silver bullet is loaded, not fired.",
+            ),
+          );
+        else exp.forEach((c) => lane.append(makeCard(c)));
+        $("#expLimit").textContent =
+          exp.length +
+          "/1 · one, always — every extra expedite randomizes everyone else's lead time";
+
+        // board — 2D grid: x = flow with WIP protection, y = ownership (you on top, agents below)
+        const board = $("#board");
+        board.textContent = "";
+        board.append(el("div")); // corner over the lane gutter
+
+        const pills = {};
+        const colIndex = { backlog: 2, ready: 3, working: 4, verify: 5, done: 6 };
+        COLUMNS.forEach((col, ci) => {
+          const head = el("div", "colhead");
+          head.dataset.col = col.key;
+          head.style.gridColumn = String(ci + 2);
+          head.style.gridRow = "1";
+          const hrow = el("div", "hrow");
+          hrow.append(el("h2", null, col.name));
+          const n = countIn(col.key);
+          const lim = LIMITS[col.key];
+          const pill = el(
+            "span",
+            "wip-pill" + (lim ? (n > lim ? " over" : n === lim ? " at" : "") : ""),
+            lim ? n + "/" + lim : String(n),
+          );
+          pill.title = "Click for this column's explicit policy (Part 7)";
+          pill.onclick = (e) => showPolicy(col, e.currentTarget);
+          hrow.append(pill);
+          pills[col.key] = pill;
+          const info = el("button", "info", "ⓘ");
+          info.title = "Explicit policy";
+          info.onclick = (e) => showPolicy(col, e.currentTarget);
+          hrow.append(info);
+          head.append(hrow);
+          head.append(el("div", "sub", col.sub));
+          board.append(head);
+        });
+
+        // lane gutter — you first; your attention gets its own WIP pill
+        LANES.forEach((lane, li) => {
+          const ll = el("div", "lane-label" + (lane.key === "you" ? " you" : ""));
+          ll.style.gridColumn = "1";
+          ll.style.gridRow = String(li + 2);
+          ll.append(el("span", "lt", lane.label));
+          if (lane.key === "you") {
+            const a = attnCount();
+            const p = el(
+              "span",
+              "wip-pill" + (a > LIMITS.attention ? " over" : a >= LIMITS.attention ? " at" : ""),
+              a + "/" + LIMITS.attention,
+            );
+            p.title =
+              "Attention WIP — you are the bottleneck resource. Exploit it, never flood it. (Part 31)";
+            ll.append(p);
+          }
+          board.append(ll);
+        });
+
+        const makeCell = (colKey, laneKey) => {
+          const lane = laneKey ? LANES.find((l) => l.key === laneKey) : null;
+          const cell = el(
+            "div",
+            "cell" + (laneKey === "you" ? " you" : "") + (lane && lane.offline ? " offline" : ""),
+          );
+          cell.dataset.col = colKey;
+          if (laneKey) cell.dataset.lane = laneKey;
+          cell.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            cell.classList.add("over");
+          });
+          cell.addEventListener("dragleave", () => cell.classList.remove("over"));
+          cell.addEventListener("drop", (e) => {
+            e.preventDefault();
+            cell.classList.remove("over");
+            onDrop(e.dataTransfer.getData("text/plain"), colKey, laneKey, pills[colKey]);
+          });
+          return cell;
+        };
+
+        // shared queues + delivery span every lane: queues are un-owned until pulled
+        for (const key of ["backlog", "ready", "done"]) {
+          const cell = makeCell(key, null);
+          cell.style.gridColumn = String(colIndex[key]);
+          cell.style.gridRow = "2 / span " + LANES.length;
+          let colCards = cards.filter((c) => c.col === key && c.lane !== "expedite");
+          if (key === "ready") {
+            const order = { fixed: 0, standard: 1, intangible: 2 };
+            colCards = colCards
+              .slice()
+              .sort((a, b) => order[a.cos] - order[b.cos] || b.age - a.age);
+          }
+          colCards.forEach((c, i) => {
+            cell.append(makeCard(c));
+            // pull affordance: free slot downstream + this is the next card by policy
+            if (key === "ready" && i === 0 && countIn("working") < LIMITS.working) {
+              const hint = el("div", "pull-hint");
+              hint.append(el("span", "t", "A slot is free — the system pulls, nobody pushes"));
+              const pb = el("button", null, "Pull ↴");
+              pb.onclick = () => {
+                const ln = pickAgentLane();
+                c.col = "working";
+                c.lane = ln;
+                c.acct = ln;
+                c.running = true;
+                c.pinned = false;
+                render();
+                toast(
+                  "<b>" +
+                    c.id +
+                    "</b> pulled into " +
+                    ln +
+                    "'s free slot. Work enters only when capacity frees. <b>(Part 3)</b>",
+                );
+              };
+              hint.append(pb);
+              cell.append(hint);
+            }
+          });
+          board.append(cell);
+        }
+
+        // laned execution cells: working + verify are owned, cell by cell
+        const inLane = (k) => cards.filter((c) => c.col === "working" && c.lane === k).length;
+        const slackLane =
+          countIn("working") < LIMITS.working
+            ? (
+                LANES.filter((l) => !l.offline && l.key !== "you").find((l) => inLane(l.key) < 2) ||
+                {}
+              ).key
+            : null;
+        for (const colKey of LANED_COLS) {
+          LANES.forEach((lane, li) => {
+            const cell = makeCell(colKey, lane.key);
+            cell.style.gridColumn = String(colIndex[colKey]);
+            cell.style.gridRow = String(li + 2);
+            const cellCards = cards.filter((c) => c.col === colKey && c.lane === lane.key);
+            cellCards.forEach((c) => cell.append(makeCard(c)));
+            if (!cellCards.length) {
+              if (lane.offline && colKey === "working")
+                cell.append(el("div", "cellhint", "resets 15:40 — an offline lane takes no pulls"));
+              else if (lane.key === "you" && colKey === "working")
+                cell.append(
+                  el(
+                    "div",
+                    "cellhint",
+                    "re-emergence zone — cards rise here when only you can move them",
+                  ),
+                );
+            }
+            // slack: the free slot is offered as improvement time, never filled with busywork
+            if (colKey === "working" && lane.key === slackLane) {
+              const slack = el("div", "pull-hint");
+              slack.style.borderColor = "rgba(63,169,92,.4)";
+              slack.append(
+                el(
+                  "span",
+                  "t",
+                  "slack — tools, skills, refactors. Full utilization kills improvement (Part 9)",
+                ),
+              );
+              cell.append(slack);
+            }
+            board.append(cell);
+          });
+        }
+
+        // expedite lane dnd
+        const laneEl = $("#expLane");
+        laneEl.ondragover = (e) => {
+          e.preventDefault();
+          laneEl.classList.add("over");
+        };
+        laneEl.ondragleave = () => laneEl.classList.remove("over");
+        laneEl.ondrop = (e) => {
+          e.preventDefault();
+          laneEl.classList.remove("over");
+          const c = cards.find((x) => x.id === e.dataTransfer.getData("text/plain"));
+          if (!c) return;
+          if (cards.some((x) => x.lane === "expedite" && x !== c)) {
+            toast(
+              "The silver bullet is already fired — <b>expedite limit is 1, always</b>. A second one randomizes every other lead time. (Part 4)",
+            );
+            return;
+          }
+          c.lane = "expedite";
+          c.cos = "expedite";
+          c.col = "working";
+          c.running = true;
+          c.acct = c.acct || "b1";
+          c.blocked = null;
+          c.pinned = true;
+          render();
+          toast(
+            "<b>" +
+              c.id +
+              "</b> expedited — white card, silver star. It bypasses every queue, and everyone else's lead time pays for it. (Part 22)",
+          );
+        };
+
+        updateMini();
+      }
+
+      function onDrop(id, target, laneKey, pill) {
+        const c = cards.find((x) => x.id === id);
+        if (!c) return;
+        const laned = LANED_COLS.includes(target);
+        const sameCol = c.col === target;
+        if (sameCol && (c.lane || null) === (laneKey || null)) return;
+        if (c.lane === "expedite" && target !== "verify" && target !== "done") {
+          toast("Expedite rides its own lane until it lands.");
+          return;
+        }
+
+        const targetLane = laned ? LANES.find((l) => l.key === laneKey) : null;
+        if (targetLane && targetLane.offline) {
+          toast(
+            "<b>" +
+              targetLane.label +
+              "</b> is out of headroom — an offline lane takes no pulls until it resets. (Part 32: non-instant availability)",
+          );
+          return;
+        }
+        if (laned && laneKey === "you" && c.lane !== "you" && attnCount(c) >= LIMITS.attention) {
+          toast(
+            "Your lane is full — <b>" +
+              LIMITS.attention +
+              " attention slots</b>, always. You are the bottleneck; flood it and every lane silts up. (Part 31)",
+          );
+          return;
+        }
+        if (target === "working" && !sameCol && countIn("working") >= LIMITS.working) {
+          pill.classList.add("flash");
+          setTimeout(() => pill.classList.remove("flash"), 1100);
+          toast(
+            "WIP limit <b>" +
+              LIMITS.working +
+              "</b> reached. <b>Which current item would you drop to start this one?</b> You agreed to this limit — that consensus is what keeps this a pull system. (Part 29)",
+          );
+          return;
+        }
+        if (target === "done" && c.col === "working") {
+          toast(
+            "<b>Verify first — proof over report.</b> An agent's claim of fixed is not evidence; done means observed working live. (law 6)",
+          );
+          return;
+        }
+        if (target === "verify" && !sameCol && countIn("verify") >= LIMITS.verify) {
+          toast(
+            "Verify is full (" +
+              LIMITS.verify +
+              ") — protect the bottleneck; don't flood it. (Part 32)",
+          );
+          return;
+        }
+        if (target === "ready" && countIn("ready") >= LIMITS.ready) {
+          toast(
+            "The input queue is full — replenishment happens at the cadence, not by push. (Part 15)",
+          );
+          return;
+        }
+
+        c.col = target;
+        c.lane = laned ? laneKey : null;
+        c.pinned = true; // a manual move pins — the classifier keeps its hands off until released
+        c.running = target === "working" && !!laneKey && laneKey !== "you";
+        if (laned && laneKey !== "you") c.acct = laneKey;
+        if (target === "done") {
+          c.blocked = null;
+          c.dots = 0;
+          c.acct = null;
+        }
+        render();
+        if (target === "done")
+          toast(
+            "<b>" +
+              c.id +
+              "</b> delivered. The card recycles — a new visitor may enter the garden. (Part 3)",
+          );
+        else
+          toast(
+            "<b>" +
+              c.id +
+              "</b> pinned to " +
+              target +
+              (targetLane ? " · " + targetLane.label : "") +
+              ". Release the pin to let the classifier place it again.",
+          );
+      }
+
+      /* explicit policies (Part 7: make process policies explicit) */
+      function showPolicy(col, anchor) {
+        const pop = $("#popover");
+        pop.textContent = "";
+        pop.append(el("h4", null, col.policy.h));
+        pop.append(el("p", null, col.policy.p));
+        pop.append(el("span", "ref", "— " + col.policy.ref));
+        const r = anchor.getBoundingClientRect();
+        pop.style.left = Math.min(r.left, innerWidth - 320) + "px";
+        pop.style.top = r.bottom + 8 + "px";
+        pop.classList.add("show");
+        const close = (e) => {
+          if (!pop.contains(e.target)) {
+            pop.classList.remove("show");
+            document.removeEventListener("mousedown", close);
+          }
+        };
+        setTimeout(() => document.addEventListener("mousedown", close), 0);
+      }
+
+      /* ════════════════════════════════════ metrics ════════════════════════════════════ */
+      let range = 14;
+      const sum = (a) => a.reduce((x, y) => x + y, 0);
+      const last = (a) => a[a.length - 1];
+
+      function metrics(r) {
+        const n = HIST.done.length;
+        const from = n - 1 - r;
+        const dDone = last(HIST.done) - HIST.done[from];
+        const tpDay = dDone / r;
+        const wipNow = last(HIST.ready) + last(HIST.working) + last(HIST.verify);
+        const lead = LEAD[r];
+        const totalLead = sum(lead);
+        const meanLead = totalLead
+          ? lead.reduce((acc, c, i) => acc + c * (i * 2 + 1.5), 0) / totalLead
+          : 0;
+        const withinSla = totalLead
+          ? Math.round(
+              (100 * lead.slice(0, Math.ceil(SLA_DAYS / 2)).reduce((a, b) => a + b, 0)) / totalLead,
+            )
+          : 0;
+        return { dDone, tpDay, wipNow, meanLead, withinSla, predicted: wipNow / tpDay };
+      }
+
+      function updateMini() {
+        const m = metrics(range);
+        $("#miniWip").innerHTML = "WIP <b>" + m.wipNow + "</b>";
+        $("#miniLead").innerHTML = "mean lead <b>" + m.meanLead.toFixed(1) + "d</b>";
+        $("#miniTp").innerHTML =
+          "throughput <b>" +
+          (m.tpDay * 7).toFixed(1) +
+          "/wk</b> · due-date perf <b>" +
+          m.withinSla +
+          "%</b> vs " +
+          SLA_TARGET +
+          "% target";
+      }
+
+      function tile(label, value, unit, delta, goodWhenDown, spark) {
+        const t = el("div", "tile");
+        t.append(el("div", "lb", label));
+        const v = el("div", "vl");
+        v.append(document.createTextNode(value));
+        if (unit) v.append(el("small", null, unit));
+        if (delta) {
+          const up = delta > 0;
+          const good = goodWhenDown ? !up : up;
+          v.append(
+            el(
+              "small",
+              good ? "up" : "dn",
+              (up ? "▲" : "▼") + " " + Math.abs(delta) + (unit === "%" ? "pp" : "%"),
+            ),
+          );
+        }
+        t.append(v);
+        if (spark) t.append(spark);
+        return t;
+      }
+
+      function sparkline(data) {
+        const w = 120,
+          h = 26,
+          max = Math.max(...data),
+          min = Math.min(...data);
+        const pt = (v, i) => [
+          (i / (data.length - 1)) * (w - 8) + 4,
+          h - 4 - ((v - min) / (max - min || 1)) * (h - 10),
+        ];
+        const dPath = data
+          .map(
+            (v, i) =>
+              (i ? "L" : "M") +
+              pt(v, i)
+                .map((x) => x.toFixed(1))
+                .join(","),
+          )
+          .join(" ");
+        const [ex, ey] = pt(last(data), data.length - 1);
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("width", w);
+        svg.setAttribute("height", h);
+        svg.innerHTML =
+          '<path d="' +
+          dPath +
+          '" fill="none" stroke="#898781" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
+          '<circle cx="' +
+          ex +
+          '" cy="' +
+          ey +
+          '" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>';
+        return svg;
+      }
+
+      function renderTiles() {
+        const m = metrics(range);
+        const weeks = Math.max(2, Math.round(range / 7));
+        // weekly throughput series for the sparkline (over the full 30d window)
+        const tp = [];
+        for (let i = 6; i >= 0; i--) {
+          const a = HIST.done.length - 1 - (i + 1) * 4,
+            b = HIST.done.length - 1 - i * 4;
+          tp.push(HIST.done[b] - HIST.done[Math.max(a, 0)]);
+        }
+        const tiles = $("#tiles");
+        tiles.textContent = "";
+        tiles.append(
+          tile("WIP now (committed)", String(m.wipNow), "", null, false, null),
+          tile("Mean lead time", m.meanLead.toFixed(1), "days", -12, true, null),
+          tile("Throughput", (m.tpDay * 7).toFixed(1), "/week", 9, false, sparkline(tp)),
+          tile("Flow efficiency", String(FLOW_EFF[range]), "%", 3, false, null),
+          tile("Due-date performance", String(m.withinSla), "%", 4, false, null),
+          tile("Failure load", String(FAIL_LOAD[range]), "%", -3, true, null),
+        );
+        const l = $("#littles");
+        l.innerHTML =
+          "Little's Law: WIP <b>" +
+          m.wipNow +
+          "</b> ÷ throughput <b>" +
+          m.tpDay.toFixed(2) +
+          "/day</b> → predicted lead <b>" +
+          m.predicted.toFixed(1) +
+          "d</b> · measured <b>" +
+          m.meanLead.toFixed(1) +
+          "d</b> — the system is honest";
+      }
+
+      /* ————— CFD: stacked area, ordinal blue ramp, crosshair tooltip ————— */
+      const CFD = { w: 660, h: 218, m: { t: 8, r: 10, b: 24, l: 34 } };
+      function renderCFD() {
+        const wrap = $("#cfdWrap");
+        wrap.textContent = "";
+        const n = HIST.done.length,
+          from = n - 1 - range;
+        const days = [];
+        for (let i = from; i < n; i++) days.push(i);
+        const { w, h, m } = CFD;
+        const pw = w - m.l - m.r,
+          ph = h - m.t - m.b;
+        const stacks = days.map((i) => {
+          let acc = 0;
+          return STAGES.map((s) => {
+            const y0 = acc;
+            acc += HIST[s.key][i];
+            return [y0, acc];
+          });
+        });
+        const maxY = Math.max(...stacks.map((s) => s[s.length - 1][1]));
+        const yMax = Math.ceil(maxY / 20) * 20;
+        const X = (k) => m.l + (k / (days.length - 1)) * pw;
+        const Y = (v) => m.t + ph - (v / yMax) * ph;
+
+        let g = "";
+        for (let v = 0; v <= yMax; v += 20)
+          g +=
+            '<line x1="' +
+            m.l +
+            '" x2="' +
+            (w - m.r) +
+            '" y1="' +
+            Y(v) +
+            '" y2="' +
+            Y(v) +
+            '" stroke="' +
+            (v === 0 ? "var(--baseline)" : "var(--grid)") +
+            '" stroke-width="1"/>' +
+            '<text x="' +
+            (m.l - 6) +
+            '" y="' +
+            (Y(v) + 3.5) +
+            '" text-anchor="end" font-size="9.5" fill="var(--ink-muted)" font-variant-numeric="tabular-nums">' +
+            v +
+            "</text>";
+        // bands + 2px surface gap on each band's top edge
+        STAGES.forEach((s, si) => {
+          const top = stacks.map((st, k) => X(k).toFixed(1) + "," + Y(st[si][1]).toFixed(1));
+          const bot = stacks
+            .map((st, k) => X(k).toFixed(1) + "," + Y(st[si][0]).toFixed(1))
+            .reverse();
+          g +=
+            '<polygon points="' +
+            top.join(" ") +
+            " " +
+            bot.join(" ") +
+            '" fill="' +
+            s.color +
+            '"/>';
+          g +=
+            '<polyline points="' +
+            top.join(" ") +
+            '" fill="none" stroke="var(--chart-surface)" stroke-width="2"/>';
+        });
+        // x labels
+        const lblEvery = range > 14 ? 6 : range > 7 ? 3 : 1;
+        days.forEach((d, k) => {
+          if ((days.length - 1 - k) % lblEvery) return;
+          const date = new Date(TODAY);
+          date.setDate(date.getDate() - (n - 1 - d));
+          g +=
+            '<text x="' +
+            X(k) +
+            '" y="' +
+            (h - 8) +
+            '" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">' +
+            date.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
+            "</text>";
+        });
+        g +=
+          '<line id="cfdXhair" y1="' +
+          m.t +
+          '" y2="' +
+          (m.t + ph) +
+          '" stroke="var(--ink-muted)" stroke-width="1" visibility="hidden"/>';
+
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+        svg.setAttribute("width", "100%");
+        svg.style.display = "block";
+        svg.innerHTML = g;
+        wrap.append(svg);
+
+        const tip = el("div", "viz-tip");
+        wrap.append(tip);
+        const xhair = () => svg.querySelector("#cfdXhair");
+        const show = (evt) => {
+          const r = svg.getBoundingClientRect();
+          const sx = (evt.clientX - r.left) * (w / r.width);
+          const k = Math.max(
+            0,
+            Math.min(days.length - 1, Math.round(((sx - m.l) / pw) * (days.length - 1))),
+          );
+          const xh = xhair();
+          xh.setAttribute("x1", X(k));
+          xh.setAttribute("x2", X(k));
+          xh.setAttribute("visibility", "visible");
+          tip.textContent = "";
+          const date = new Date(TODAY);
+          date.setDate(date.getDate() - (n - 1 - days[k]));
+          tip.append(
+            el(
+              "div",
+              "tt",
+              date.toLocaleDateString("en-US", {
+                weekday: "short",
+                month: "short",
+                day: "numeric",
+              }),
+            ),
+          );
+          for (let si = STAGES.length - 1; si >= 0; si--) {
+            const row = el("div", "row");
+            const key = el("span", "key");
+            key.style.background = STAGES[si].color;
+            row.append(
+              key,
+              el("span", "v", String(HIST[STAGES[si].key][days[k]])),
+              el("span", "s", STAGES[si].label),
+            );
+            tip.append(row);
+          }
+          tip.style.display = "block";
+          const px = (X(k) / w) * r.width;
+          tip.style.left = Math.min(px + 14, r.width - 150) + "px";
+          tip.style.top = "12px";
+        };
+        svg.addEventListener("pointermove", show);
+        svg.addEventListener("pointerleave", () => {
+          tip.style.display = "none";
+          xhair().setAttribute("visibility", "hidden");
+        });
+
+        // legend (5 series → legend required)
+        const lg = $("#cfdLegend");
+        lg.textContent = "";
+        for (let si = STAGES.length - 1; si >= 0; si--) {
+          const s = el("span");
+          const i = el("i");
+          i.style.background = STAGES[si].color;
+          s.append(i, document.createTextNode(STAGES[si].label));
+          lg.append(s);
+        }
+        // table view twin
+        const tb = $("#cfdTable");
+        tb.textContent = "";
+        const table = el("table", "datatable");
+        const thr = el("tr");
+        thr.append(el("th", null, "Day"));
+        STAGES.slice()
+          .reverse()
+          .forEach((s) => thr.append(el("th", null, s.label)));
+        table.append(thr);
+        days.forEach((d) => {
+          const tr = el("tr");
+          const date = new Date(TODAY);
+          date.setDate(date.getDate() - (n - 1 - d));
+          tr.append(
+            el("td", null, date.toLocaleDateString("en-US", { month: "short", day: "numeric" })),
+          );
+          STAGES.slice()
+            .reverse()
+            .forEach((s) => tr.append(el("td", null, String(HIST[s.key][d]))));
+          table.append(tr);
+        });
+        tb.append(table);
+      }
+
+      /* ————— lead-time histogram: single series, SLA marker, per-bar hover ————— */
+      const HG = { w: 360, h: 218, m: { t: 8, r: 10, b: 24, l: 26 } };
+      function renderHist() {
+        const wrap = $("#histWrap");
+        wrap.textContent = "";
+        const data = LEAD[range];
+        const m = metrics(range);
+        $("#histSub").textContent =
+          "spectral analysis · SLA ≤ " +
+          SLA_DAYS +
+          "d at " +
+          SLA_TARGET +
+          "% — actual " +
+          m.withinSla +
+          "%";
+        const { w, h, m: mg } = HG;
+        const pw = w - mg.l - mg.r,
+          ph = h - mg.t - mg.b;
+        const maxV = Math.max(...data, 1);
+        const yMax = Math.ceil(maxV / 3) * 3;
+        const band = pw / data.length;
+        const bw = Math.min(24, band - 6);
+        const Y = (v) => mg.t + ph - (v / yMax) * ph;
+
+        let g = "";
+        for (let v = 0; v <= yMax; v += 3)
+          g +=
+            '<line x1="' +
+            mg.l +
+            '" x2="' +
+            (w - mg.r) +
+            '" y1="' +
+            Y(v) +
+            '" y2="' +
+            Y(v) +
+            '" stroke="' +
+            (v === 0 ? "var(--baseline)" : "var(--grid)") +
+            '"/>' +
+            '<text x="' +
+            (mg.l - 5) +
+            '" y="' +
+            (Y(v) + 3.5) +
+            '" text-anchor="end" font-size="9.5" fill="var(--ink-muted)" font-variant-numeric="tabular-nums">' +
+            v +
+            "</text>";
+        data.forEach((v, i) => {
+          const x = mg.l + i * band + (band - bw) / 2;
+          const y = Y(v),
+            bh = mg.t + ph - y;
+          if (v > 0) {
+            const rr = Math.min(4, bh);
+            g +=
+              '<path class="hbar" data-i="' +
+              i +
+              '" d="M' +
+              x +
+              "," +
+              (y + bh) +
+              " L" +
+              x +
+              "," +
+              (y + rr) +
+              " Q" +
+              x +
+              "," +
+              y +
+              " " +
+              (x + rr) +
+              "," +
+              y +
+              " L" +
+              (x + bw - rr) +
+              "," +
+              y +
+              " Q" +
+              (x + bw) +
+              "," +
+              y +
+              " " +
+              (x + bw) +
+              "," +
+              (y + rr) +
+              " L" +
+              (x + bw) +
+              "," +
+              (y + bh) +
+              ' Z" fill="var(--series-blue)"/>';
+          }
+          g +=
+            '<rect class="hhit" data-i="' +
+            i +
+            '" x="' +
+            (mg.l + i * band) +
+            '" y="' +
+            mg.t +
+            '" width="' +
+            band +
+            '" height="' +
+            ph +
+            '" fill="transparent"/>';
+          g +=
+            '<text x="' +
+            (x + bw / 2) +
+            '" y="' +
+            (h - 8) +
+            '" text-anchor="middle" font-size="9" fill="var(--ink-muted)">' +
+            (i * 2 + 1) +
+            "–" +
+            (i * 2 + 2) +
+            "</text>";
+        });
+        // SLA threshold — status color + label (never color alone)
+        const slaX = mg.l + (SLA_DAYS / 2) * band;
+        g +=
+          '<line x1="' +
+          slaX +
+          '" x2="' +
+          slaX +
+          '" y1="' +
+          mg.t +
+          '" y2="' +
+          (mg.t + ph) +
+          '" stroke="var(--status-warning)" stroke-width="1"/>' +
+          '<text x="' +
+          (slaX - 4) +
+          '" y="' +
+          (mg.t + 10) +
+          '" text-anchor="end" font-size="9.5" fill="var(--ink-2)">SLA ' +
+          SLA_DAYS +
+          "d</text>";
+
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+        svg.setAttribute("width", "100%");
+        svg.style.display = "block";
+        svg.innerHTML = g;
+        wrap.append(svg);
+
+        const tip = el("div", "viz-tip");
+        wrap.append(tip);
+        svg.querySelectorAll(".hhit").forEach((hit) => {
+          hit.addEventListener("pointermove", (evt) => {
+            const i = +hit.dataset.i;
+            svg
+              .querySelectorAll(".hbar")
+              .forEach((b) => (b.style.opacity = +b.dataset.i === i ? "1" : ".55"));
+            tip.textContent = "";
+            const row = el("div", "row");
+            row.append(
+              el("span", "v", String(data[i])),
+              el(
+                "span",
+                "s",
+                "conversation" +
+                  (data[i] === 1 ? "" : "s") +
+                  " · " +
+                  (i * 2 + 1) +
+                  "–" +
+                  (i * 2 + 2) +
+                  " days",
+              ),
+            );
+            tip.append(row);
+            const r = svg.getBoundingClientRect();
+            tip.style.display = "block";
+            tip.style.left = Math.min(evt.clientX - r.left + 12, r.width - 150) + "px";
+            tip.style.top = "10px";
+          });
+          hit.addEventListener("pointerleave", () => {
+            tip.style.display = "none";
+            svg.querySelectorAll(".hbar").forEach((b) => (b.style.opacity = "1"));
+          });
+        });
+
+        const tb = $("#histTable");
+        tb.textContent = "";
+        const table = el("table", "datatable");
+        const thr = el("tr");
+        thr.append(el("th", null, "Lead time"), el("th", null, "Conversations"));
+        table.append(thr);
+        data.forEach((v, i) => {
+          const tr = el("tr");
+          tr.append(
+            el("td", null, i * 2 + 1 + "–" + (i * 2 + 2) + " days"),
+            el("td", null, String(v)),
+          );
+          table.append(tr);
+        });
+        tb.append(table);
+      }
+
+      function renderMetrics() {
+        renderTiles();
+        renderCFD();
+        renderHist();
+        updateMini();
+      }
+
+      /* ════════════════════════════════════ standup: walk the board ════════════════════════════════════ */
+      const WALK = ["verify", "working", "ready"];
+      let walkIdx = -1;
+      function startWalk() {
+        walkIdx = 0;
+        stepWalk();
+      }
+      function stopWalk() {
+        walkIdx = -1;
+        document.querySelectorAll("#board > *").forEach((c) => c.classList.remove("dim", "spot"));
+        $("#standupPanel").classList.remove("show");
+      }
+      function stepWalk() {
+        if (walkIdx < 0 || walkIdx >= WALK.length) {
+          stopWalk();
+          toast(
+            "Board walked. After-meeting huddles are where the kaizen happens. <b>(Part 15)</b>",
+          );
+          return;
+        }
+        const key = WALK[walkIdx];
+        document.querySelectorAll("#board > *").forEach((c) => {
+          c.classList.toggle("spot", c.dataset.col === key);
+          c.classList.toggle("dim", c.dataset.col !== key);
+        });
+        const colCards = cards.filter((c) => c.col === key && c.lane !== "expedite");
+        const notes = [];
+        for (const c of colCards) {
+          const where = c.lane === "you" ? " (your lane)" : c.lane ? " (" + c.lane + ")" : "";
+          if (c.blocked)
+            notes.push(
+              "⚑ " +
+                c.id +
+                where +
+                " blocked " +
+                (c.dots || "?") +
+                "d — " +
+                c.blocked.reason +
+                ". Who is on it? Swarm before starting anything new.",
+            );
+          else if ((c.dots || 0) >= 2)
+            notes.push(
+              "● " +
+                c.id +
+                where +
+                " has sat " +
+                c.dots +
+                " days without moving — is it actually flowing?",
+            );
+        }
+        if (key === "verify" && colCards.length)
+          notes.push(
+            "Verification sits in your lane — you are the bottleneck; clear these before pulling new work.",
+          );
+        if (!notes.length) notes.push("Flows clean. Nothing to say — next column.");
+
+        const p = $("#standupPanel");
+        p.textContent = "";
+        p.append(el("h4", null, "Walking the board — " + COLUMNS.find((c) => c.key === key).name));
+        p.append(
+          el(
+            "div",
+            "sd",
+            "Right to left, in the direction of pull. We manage the work, not the workers. (Part 15) · " +
+              (walkIdx + 1) +
+              "/" +
+              WALK.length,
+          ),
+        );
+        const ul = el("ul");
+        notes.forEach((t) => ul.append(el("li", null, t)));
+        p.append(ul);
+        const nav = el("div", "snav");
+        const prev = el("button", "btn", "← Prev");
+        prev.onclick = () => {
+          walkIdx = Math.max(0, walkIdx - 1);
+          stepWalk();
+        };
+        const next = el("button", "btn primary", walkIdx === WALK.length - 1 ? "Finish" : "Next →");
+        next.onclick = () => {
+          walkIdx++;
+          stepWalk();
+        };
+        const exit = el("button", "btn ghost", "Esc");
+        exit.onclick = stopWalk;
+        nav.append(exit, prev, next);
+        p.append(nav);
+        p.classList.add("show");
+      }
+      document.addEventListener("keydown", (e) => {
+        if (walkIdx < 0) return;
+        if (e.key === "Escape") stopWalk();
+        if (e.key === "ArrowRight") {
+          walkIdx++;
+          stepWalk();
+        }
+        if (e.key === "ArrowLeft") {
+          walkIdx = Math.max(0, walkIdx - 1);
+          stepWalk();
+        }
+      });
+
+      /* ════════════════════════════════════ replenishment ════════════════════════════════════ */
+      function openReplen() {
+        const list = $("#replenList");
+        list.textContent = "";
+        const order = { expedite: -1, fixed: 0, standard: 1, intangible: 2 };
+        const backlog = cards
+          .filter((c) => c.col === "backlog")
+          .sort((a, b) => order[a.cos] - order[b.cos] || b.age - a.age);
+        for (const c of backlog) {
+          const row = el("div", "replen-row");
+          const dot = el("span", "cosdot");
+          dot.style.background = COS[c.cos].color;
+          row.append(dot);
+          const ct = el("div", "ct");
+          ct.append(el("div", "t", c.id + " · " + c.title));
+          ct.append(
+            el(
+              "div",
+              "m",
+              COS[c.cos].label +
+                " · " +
+                PROJECTS[c.proj].name +
+                " · entered " +
+                fmtDate(c.age) +
+                (c.age >= 180 ? " · STALE >6mo — the XIT rule says delete" : ""),
+            ),
+          );
+          row.append(ct);
+          if (c.age >= 180) {
+            const del = el("button", "rbtn del", "Delete");
+            del.onclick = () => {
+              cards = cards.filter((x) => x !== c);
+              render();
+              openReplen();
+              toast(
+                "<b>" +
+                  c.id +
+                  "</b> deleted. If it mattered, it would have been pulled by now. (Part 16)",
+              );
+            };
+            row.append(del);
+          }
+          const pr = el("button", "rbtn", "→ Ready");
+          pr.onclick = () => {
+            if (countIn("ready") >= LIMITS.ready) {
+              toast("Queue full — the pull signal hasn't fired. (Part 14)");
+              return;
+            }
+            c.col = "ready";
+            render();
+            openReplen();
+          };
+          row.append(pr);
+          list.append(row);
+        }
+        if (!backlog.length) list.append(el("div", "msub", "Backlog empty — enjoy the silence."));
+        $("#replenCap").textContent =
+          "Ready " +
+          countIn("ready") +
+          "/" +
+          LIMITS.ready +
+          " — " +
+          Math.max(0, LIMITS.ready - countIn("ready")) +
+          " empty slot(s) signalling pull.";
+        $("#scrim").classList.add("show");
+        $("#replenModal").classList.add("show");
+      }
+      function closeModals() {
+        $("#scrim").classList.remove("show");
+        document.querySelectorAll(".modal").forEach((x) => x.classList.remove("show"));
+      }
+
+      /* ════════════════════════════════════ help ════════════════════════════════════ */
+      const HELP = [
+        [
+          "🧭 2D grid: flow × ownership",
+          "Left-right is the flow with WIP protection; top-to-bottom is who holds the work. Agents grind autonomously in their lanes, and a card re-emerges into your top lane the moment only you can move it — answer, and it sinks back down.",
+          "Parts 13, 25",
+        ],
+        [
+          "✦ Auto-status, pin to override",
+          "The same background model task that regenerates conversation titles classifies each card into its cell (column + lane). Drag a card anywhere to pin it against the classifier; click the pin to release it back.",
+          "Part 14 — cards carry enough info for pull decisions",
+        ],
+        [
+          "🎯 Your lane is the bottleneck",
+          "The top lane carries its own attention-WIP limit (3). Most bottleneck management happens away from the bottleneck: agents pre-package proof so your minutes stay value-added.",
+          "Parts 31–32",
+        ],
+        [
+          "🎫 Conversation = work item",
+          "Every ticket is a CH3 conversation: id, title, entry date, class stripe, agent avatar — enough info that anyone can make their own pull decision.",
+          "Part 14",
+        ],
+        [
+          "⬅ Pull, never push",
+          "A conversation starts only when an agent slot frees — the Imperial Palace Gardens turnstile. The Ready column's top card shows the pull affordance when capacity opens.",
+          "Part 3",
+        ],
+        [
+          "🔢 WIP limit = account headroom",
+          "The Working limit is derived from live Claude account slots (2 per healthy account). When usage burns down, the board physically narrows. Rate limits become flow policy.",
+          "Parts 19–20",
+        ],
+        [
+          "🎨 Classes of service",
+          "White expedite (limit 1, silver star), purple fixed-date, yellow standard FIFO, green intangible. Capacity allocated 50/30/20 — risk management without estimates.",
+          "Parts 21–22",
+        ],
+        [
+          "⚑ Pink issue slips",
+          "A blocked conversation stays in place wearing a pink ticket that names the blocker and its owner. It still counts against WIP — the tension that provokes swarming.",
+          "Parts 5–6",
+        ],
+        [
+          "● Day dots",
+          "One dot per day a card sits still. Two dots and the standup asks whether it is actually flowing; three and it burns red.",
+          "Part 15",
+        ],
+        [
+          "🚶 Walk the board",
+          "Standup walks right to left in the direction of pull, dwelling on pink slips and aged cards, not on people reporting status.",
+          "Part 15",
+        ],
+        [
+          "🗑 Backlog triage",
+          "Monthly keep-or-delete. Six months un-pulled means negligible value: auto-flagged for deletion. No ROM estimates anywhere — they consumed 33–40% of XIT's capacity.",
+          "Parts 10, 16",
+        ],
+        [
+          "✅ Verify column",
+          "Proof over report: an agent's 'fixed' is not evidence. The human verifier is the non-instant-availability bottleneck, so the column is buffered and capped.",
+          "Part 32 · law 6",
+        ],
+        [
+          "📈 Flow metrics",
+          "CFD, lead-time spectral analysis, throughput, flow efficiency, failure load, due-date performance — and a live Little's Law audit (lead = WIP ÷ throughput).",
+          "Parts 8, 23",
+        ],
+        [
+          "🌿 Slack is a feature",
+          "When Working sits under its limit the free slot is offered as improvement time, not filled with busywork. Full utilization kills kaizen.",
+          "Part 9",
+        ],
+        [
+          "📅 Decoupled cadences",
+          "Replenishment (Mon), delivery (Fri), ops review (monthly) run on independent clocks — no artificial time-boxes.",
+          "Parts 16–18, 26",
+        ],
+      ];
+      function openHelp() {
+        const gridEl = $("#helpGrid");
+        gridEl.textContent = "";
+        for (const [h, b, r] of HELP) {
+          const it = el("div", "help-item");
+          it.append(el("div", "hh", h), el("div", "hb", b), el("div", "hr", "— " + r));
+          gridEl.append(it);
+        }
+        $("#scrim").classList.add("show");
+        $("#helpModal").classList.add("show");
+      }
+
+      /* ════════════════════════════════════ wiring ════════════════════════════════════ */
+      $("#drawerBar").onclick = () => {
+        const d = $("#drawer");
+        const open = d.classList.toggle("open");
+        $("#drawerCaret").style.transform = open ? "rotate(180deg)" : "";
+        if (open) renderMetrics();
+      };
+      document.querySelectorAll(".fbtn").forEach(
+        (b) =>
+          (b.onclick = () => {
+            document.querySelectorAll(".fbtn").forEach((x) => x.classList.remove("sel"));
+            b.classList.add("sel");
+            range = +b.dataset.range;
+            renderMetrics();
+          }),
+      );
+      document.querySelectorAll(".tbl-toggle").forEach(
+        (b) =>
+          (b.onclick = () => {
+            const key = b.dataset.table;
+            const tb = $("#" + key + "Table"),
+              ch = $("#" + key + "Wrap");
+            const showing = tb.style.display !== "none";
+            tb.style.display = showing ? "none" : "block";
+            ch.style.display = showing ? "block" : "none";
+            if (key === "cfd") $("#cfdLegend").style.display = showing ? "none" : "flex";
+            b.textContent = showing ? "Table" : "Chart";
+          }),
+      );
+      $("#standupBtn").onclick = startWalk;
+      $("#replenBtn").onclick = openReplen;
+      $("#replenClose").onclick = closeModals;
+      $("#helpBtn").onclick = openHelp;
+      $("#helpClose").onclick = closeModals;
+      $("#scrim").onclick = closeModals;
+
+      render();
+      updateMini();
+    </script>
+  </body>
+</html>

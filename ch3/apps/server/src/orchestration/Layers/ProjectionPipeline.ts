@@ -613,6 +613,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             snoozedAt: null,
             titleRegenerationRequestId: null,
             titleRegenerationStartedAt: null,
+            kanban: null,
             latestUserMessageAt: null,
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
@@ -697,6 +698,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             snoozedUntil: event.payload.snoozedUntil,
             snoozedAt: event.payload.snoozedAt,
             updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.kanban-updated": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          // No updatedAt: the row's own timestamp is authoritative and kanban
+          // writes must never reorder the updated_at-sorted inbox.
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            kanban: event.payload.kanban,
           });
           return;
         }

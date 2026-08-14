@@ -349,6 +349,56 @@ export const ThreadTitleRegeneration = Schema.Struct({
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
+// Kanban stages cover only the middle of the board: "snoozed" and "settled"
+// columns are derived from snoozedUntil / settled state, never stored here,
+// so the existing snooze/settle machinery stays the single source of truth.
+/** The stages that ship with the board — and the only targets the background
+    classifier will ever file a card into. */
+export const KANBAN_BUILTIN_STAGE_IDS = [
+  "exploration",
+  "move-along",
+  "full-attention",
+  "decision-needed",
+  "final-review",
+] as const;
+export const KanbanBuiltinStageId = Schema.Literals([...KANBAN_BUILTIN_STAGE_IDS]);
+export type KanbanBuiltinStageId = typeof KanbanBuiltinStageId.Type;
+
+/** Free-form so user-created board columns can persist their own stage ids.
+    The server stores, never interprets, a stage: column semantics (label,
+    accent, WIP default, ordering) live in client settings. */
+export const KanbanStageId = Schema.String;
+export type KanbanStageId = typeof KanbanStageId.Type;
+
+export const KANBAN_BUILTIN_CARD_TYPE_IDS = ["urgent", "deadline", "standard", "platform"] as const;
+export const KanbanBuiltinCardType = Schema.Literals([...KANBAN_BUILTIN_CARD_TYPE_IDS]);
+export type KanbanBuiltinCardType = typeof KanbanBuiltinCardType.Type;
+
+/** Free-form so user-created card types can persist their own ids; semantics
+    (label, color, push rules) live in client settings. */
+export const KanbanCardType = Schema.String;
+export type KanbanCardType = typeof KanbanCardType.Type;
+
+export const ThreadKanbanState = Schema.Struct({
+  stage: Schema.NullOr(KanbanStageId),
+  cardType: Schema.NullOr(KanbanCardType),
+  /** Only meaningful for cardType "deadline". */
+  deadline: Schema.NullOr(IsoDateTime),
+  /** A manual placement pins the card: the classifier may still refresh
+      description/keywords but never moves a pinned card. */
+  pinned: Schema.Boolean,
+  /** Model-generated two-line card summary. */
+  description: Schema.NullOr(Schema.String),
+  /** Model-generated critical keywords (at most three). */
+  keywords: Schema.Array(Schema.String),
+  classifiedAt: Schema.NullOr(IsoDateTime),
+  /** Turn identity of the last classification: the once-per-turn guard keys
+      on this, not wall-clock, because checkpoint capture rewrites a turn's
+      completedAt after the fact. Optional so persisted pre-field rows decode. */
+  classifiedTurnId: Schema.optional(Schema.NullOr(TurnId)),
+});
+export type ThreadKanbanState = typeof ThreadKanbanState.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -376,6 +426,9 @@ export const OrchestrationThread = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  // Kanban placement + model-generated card summary. Optional so payloads
+  // from pre-kanban servers still decode.
+  kanban: Schema.optional(Schema.NullOr(ThreadKanbanState)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -429,6 +482,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  kanban: Schema.optional(Schema.NullOr(ThreadKanbanState)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
@@ -640,6 +694,26 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   ),
 );
 
+const ThreadKanbanUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.kanban.update"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  stage: Schema.optional(Schema.NullOr(KanbanStageId)),
+  cardType: Schema.optional(Schema.NullOr(KanbanCardType)),
+  deadline: Schema.optional(Schema.NullOr(IsoDateTime)),
+  pinned: Schema.optional(Schema.Boolean),
+  description: Schema.optional(Schema.NullOr(Schema.String)),
+  keywords: Schema.optional(Schema.Array(Schema.String)),
+  /** Classifier only: the turn this classification read. */
+  classifiedTurnId: Schema.optional(TurnId),
+  /** User-requested re-run: the classification reactor picks this up from the
+      resulting event and re-reads the conversation on demand. */
+  reclassify: Schema.optional(Schema.Literal(true)),
+  // user: manual board move (wins, may pin). classifier: background model
+  // placement — the decider drops its stage/cardType when the card is pinned.
+  source: Schema.Literals(["user", "classifier"]),
+});
+
 const ThreadRuntimeModeSetCommand = Schema.Struct({
   type: Schema.Literal("thread.runtime-mode.set"),
   commandId: CommandId,
@@ -775,6 +849,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUnsettleCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadKanbanUpdateCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
@@ -800,6 +875,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUnsettleCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadKanbanUpdateCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
@@ -946,6 +1022,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.snoozed",
   "thread.unsnoozed",
   "thread.meta-updated",
+  "thread.kanban-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
   "thread.message-sent",
@@ -1068,6 +1145,19 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: IsoDateTime,
+});
+
+export const ThreadKanbanUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  /** Full resulting state (merged by the decider, the single writer). */
+  kanban: ThreadKanbanState,
+  /** Present when the user asked for an on-demand re-classification; the
+      reactor treats it as a forced run that bypasses the per-turn guard. */
+  reclassifyRequested: Schema.optional(Schema.Literal(true)),
+  // Deliberately NO updatedAt: kanban placement is presentation metadata and
+  // must never touch the thread's updatedAt. Echoing a read-model timestamp
+  // here would clobber the projection row with a divergent fold's value and
+  // reorder the inbox — the exact thing this feature must not do.
 });
 
 export const ThreadRuntimeModeSetPayload = Schema.Struct({
@@ -1263,6 +1353,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.meta-updated"),
     payload: ThreadMetaUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.kanban-updated"),
+    payload: ThreadKanbanUpdatedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

@@ -14,6 +14,7 @@ import {
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadKanbanState,
   ThreadId,
   TurnId,
 } from "@ch3tools/contracts";
@@ -43,6 +44,7 @@ export const ProjectionThread = Schema.Struct({
   snoozedAt: Schema.NullOr(IsoDateTime),
   titleRegenerationRequestId: Schema.optional(Schema.NullOr(CommandId)),
   titleRegenerationStartedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  kanban: Schema.optional(Schema.NullOr(ThreadKanbanState)),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   pendingApprovalCount: NonNegativeInt,
   pendingUserInputCount: NonNegativeInt,

@@ -22,12 +22,15 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildThreadKanbanPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   sanitizeCommitSubject,
   sanitizePrTitle,
+  sanitizeKanbanDescription,
+  sanitizeKanbanKeywords,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
 import * as OpenCodeRuntime from "../provider/opencodeRuntime.ts";
@@ -39,6 +42,7 @@ const OpenCodeTextGenerationOperation = Schema.Literals([
   "generatePrContent",
   "generateBranchName",
   "generateThreadTitle",
+  "generateThreadKanban",
 ]);
 
 type OpenCodeTextGenerationOperation = typeof OpenCodeTextGenerationOperation.Type;
@@ -253,7 +257,8 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadKanban";
   }) =>
     sharedServerMutex.withPermit(
       Effect.gen(function* () {
@@ -615,10 +620,33 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       };
     });
 
+  const generateThreadKanban: TextGeneration.TextGeneration["Service"]["generateThreadKanban"] =
+    Effect.fn("OpenCodeTextGeneration.generateThreadKanban")(function* (input) {
+      const { prompt, outputSchema } = buildThreadKanbanPrompt({
+        message: input.message,
+      });
+
+      const generated = yield* runOpenCodeJson({
+        operation: "generateThreadKanban",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        attachments: undefined,
+        modelSelection: input.modelSelection,
+      });
+
+      return {
+        stage: generated.stage,
+        description: sanitizeKanbanDescription(generated.description),
+        keywords: sanitizeKanbanKeywords(generated.keywords),
+      } satisfies TextGeneration.ThreadKanbanGenerationResult;
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateThreadKanban,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

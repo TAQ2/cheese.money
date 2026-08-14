@@ -15,6 +15,8 @@
     "start:marketing": "vp run --filter @ch3tools/marketing preview",
     "start:mock-update-server": "node scripts/mock-update-server.ts",
     "screenshots:mobile": "node scripts/mobile-showcase.ts",
+    "visual": "node scripts/visual/visual.ts",
+    "visual:update": "node scripts/visual/visual.ts --update",
     "icons:export": "node scripts/export-brand-icons.ts",
     "icons:check": "node scripts/export-brand-icons.ts --check",
     "build": "vp run --filter './apps/*' --filter './packages/*' --filter './oxlint-plugin-ch3' --filter './scripts' build",

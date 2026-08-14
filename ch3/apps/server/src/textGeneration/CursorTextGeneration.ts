@@ -15,11 +15,14 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildThreadKanbanPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
   sanitizePrTitle,
+  sanitizeKanbanDescription,
+  sanitizeKanbanKeywords,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
 import {
@@ -54,7 +57,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadKanban";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -259,10 +263,32 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateThreadKanban: TextGeneration.TextGeneration["Service"]["generateThreadKanban"] =
+    Effect.fn("CursorTextGeneration.generateThreadKanban")(function* (input) {
+      const { prompt, outputSchema } = buildThreadKanbanPrompt({
+        message: input.message,
+      });
+
+      const generated = yield* runCursorJson({
+        operation: "generateThreadKanban",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+
+      return {
+        stage: generated.stage,
+        description: sanitizeKanbanDescription(generated.description),
+        keywords: sanitizeKanbanKeywords(generated.keywords),
+      } satisfies TextGeneration.ThreadKanbanGenerationResult;
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateThreadKanban,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

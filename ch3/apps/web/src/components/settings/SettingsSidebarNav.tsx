@@ -80,7 +80,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
 
   return (
     <>
-      <SidebarContent className="overflow-x-hidden">
+      <SidebarContent className="overflow-x-hidden" data-testid="settings-nav">
         <SidebarGroup className="p-2">
           <SidebarMenu>
             {SETTINGS_NAV_ITEMS.map((item) => {

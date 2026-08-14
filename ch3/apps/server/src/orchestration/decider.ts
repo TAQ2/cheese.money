@@ -677,6 +677,63 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.kanban.update": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const occurredAt = yield* nowIso;
+      const existing = thread.kanban ?? {
+        stage: null,
+        cardType: null,
+        deadline: null,
+        pinned: false,
+        description: null,
+        keywords: [],
+        classifiedAt: null,
+        classifiedTurnId: null,
+      };
+      // A pinned card belongs to the user: the classifier may refresh the
+      // generated summary but must never move it or retype it.
+      const classifierBlockedByPin = command.source === "classifier" && existing.pinned;
+      const kanban = {
+        stage:
+          command.stage !== undefined && !classifierBlockedByPin ? command.stage : existing.stage,
+        cardType:
+          command.cardType !== undefined && !classifierBlockedByPin
+            ? command.cardType
+            : existing.cardType,
+        deadline: command.deadline !== undefined ? command.deadline : existing.deadline,
+        // Only the user pins/unpins; a classifier command never flips it.
+        pinned:
+          command.source === "user" && command.pinned !== undefined
+            ? command.pinned
+            : existing.pinned,
+        description: command.description !== undefined ? command.description : existing.description,
+        keywords: command.keywords !== undefined ? command.keywords.slice(0, 3) : existing.keywords,
+        classifiedAt: command.source === "classifier" ? occurredAt : existing.classifiedAt,
+        classifiedTurnId:
+          command.source === "classifier" && command.classifiedTurnId !== undefined
+            ? command.classifiedTurnId
+            : (existing.classifiedTurnId ?? null),
+      };
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.kanban-updated",
+        payload: {
+          threadId: command.threadId,
+          kanban,
+          ...(command.reclassify === true ? { reclassifyRequested: true as const } : {}),
+        },
+      };
+    }
+
     case "thread.title.regeneration.complete": {
       const thread = yield* requireThread({
         readModel,

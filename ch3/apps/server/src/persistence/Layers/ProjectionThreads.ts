@@ -14,11 +14,12 @@ import {
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
-import { ModelSelection } from "@ch3tools/contracts";
+import { ModelSelection, ThreadKanbanState } from "@ch3tools/contracts";
 
 const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
+    kanban: Schema.NullOr(Schema.fromJsonString(ThreadKanbanState)),
   }),
 );
 type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
@@ -49,6 +50,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           snoozed_at,
           title_regeneration_request_id,
           title_regeneration_started_at,
+          kanban_json,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -74,6 +76,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.snoozedAt},
           ${row.titleRegenerationRequestId ?? null},
           ${row.titleRegenerationStartedAt ?? null},
+          ${row.kanban != null ? JSON.stringify(row.kanban) : null},
           ${row.latestUserMessageAt},
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},
@@ -99,6 +102,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           snoozed_at = excluded.snoozed_at,
           title_regeneration_request_id = excluded.title_regeneration_request_id,
           title_regeneration_started_at = excluded.title_regeneration_started_at,
+          kanban_json = excluded.kanban_json,
           latest_user_message_at = excluded.latest_user_message_at,
           pending_approval_count = excluded.pending_approval_count,
           pending_user_input_count = excluded.pending_user_input_count,
@@ -131,6 +135,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           snoozed_at AS "snoozedAt",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          kanban_json AS "kanban",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -165,6 +170,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           snoozed_at AS "snoozedAt",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          kanban_json AS "kanban",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",

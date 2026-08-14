@@ -8,6 +8,7 @@
  */
 import * as Schema from "effect/Schema";
 import type { ChatAttachment } from "@ch3tools/contracts";
+import { KanbanBuiltinStageId } from "@ch3tools/contracts";
 
 import { limitSection } from "./TextGenerationUtils.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
@@ -268,6 +269,44 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
   });
   const outputSchema = Schema.Struct({
     title: Schema.String,
+  });
+
+  return { prompt, outputSchema };
+}
+
+// ---------------------------------------------------------------------------
+// Thread kanban classification
+// ---------------------------------------------------------------------------
+
+export interface ThreadKanbanPromptInput {
+  message: string;
+}
+
+export function buildThreadKanbanPrompt(input: ThreadKanbanPromptInput) {
+  const prompt = buildPromptFromMessage({
+    instruction: [
+      "You triage coding conversations onto a kanban board after an agent finishes a turn.",
+      "Judge how far along the work is and what the user must do next.",
+    ].join("\n"),
+    responseShape: "Return a JSON object with keys: stage, description, keywords.",
+    rules: [
+      'stage must be exactly one of: "exploration", "move-along", "full-attention", "decision-needed", "final-review".',
+      "exploration: an idea is being fleshed out or investigated; the work is early and open-ended.",
+      "move-along: an intermediary step just finished; the user only needs to give a quick nudge for the agent to continue.",
+      "full-attention: the agent produced a complex proposal or substantial work that needs the user's focused reading.",
+      "decision-needed: progress is blocked on a choice or judgement only the user can make.",
+      "final-review: the work is essentially complete; the user decides whether it is done and can be settled.",
+      "description: at most two short lines (under 180 characters total) describing the current state and what happens next.",
+      "keywords: exactly three critical single words or short compounds a reader can scan.",
+    ],
+    message: input.message,
+    messageLabel: "Conversation tail (latest user message and assistant response)",
+    preserveMessageEnd: true,
+  });
+  const outputSchema = Schema.Struct({
+    stage: KanbanBuiltinStageId,
+    description: Schema.String,
+    keywords: Schema.Array(Schema.String),
   });
 
   return { prompt, outputSchema };

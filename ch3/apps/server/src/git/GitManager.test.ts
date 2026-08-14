@@ -292,6 +292,12 @@ function createTextGeneration(
       Effect.succeed({
         title: "Update workflow",
       }),
+    generateThreadKanban: () =>
+      Effect.succeed({
+        stage: "move-along" as const,
+        description: "Fake classification.",
+        keywords: ["fake"],
+      }),
     ...overrides,
   };
 
@@ -335,6 +341,17 @@ function createTextGeneration(
           (cause) =>
             new TextGenerationError({
               operation: "generateThreadTitle",
+              detail: "fake text generation failed",
+              ...(cause !== undefined ? { cause } : {}),
+            }),
+        ),
+      ),
+    generateThreadKanban: (input) =>
+      implementation.generateThreadKanban(input).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({
+              operation: "generateThreadKanban",
               detail: "fake text generation failed",
               ...(cause !== undefined ? { cause } : {}),
             }),

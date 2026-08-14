@@ -21,12 +21,15 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildThreadKanbanPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
+  sanitizeKanbanDescription,
+  sanitizeKanbanKeywords,
   sanitizeThreadTitle,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
@@ -98,7 +101,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateThreadKanban",
     value: unknown,
   ): Effect.Effect<string, TextGenerationError> =>
     encodeJsonString(value).pipe(
@@ -117,7 +121,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateThreadKanban",
     attachments: TextGeneration.BranchNameGenerationInput["attachments"],
   ): Effect.fn.Return<MaterializedImageAttachments, TextGenerationError> {
     if (!attachments || attachments.length === 0) {
@@ -159,7 +164,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadKanban";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -402,10 +408,33 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateThreadKanban: TextGeneration.TextGeneration["Service"]["generateThreadKanban"] =
+    Effect.fn("CodexTextGeneration.generateThreadKanban")(function* (input) {
+      const { prompt, outputSchema } = buildThreadKanbanPrompt({
+        message: input.message,
+      });
+
+      const generated = yield* runCodexJson({
+        operation: "generateThreadKanban",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        imagePaths: [],
+        modelSelection: input.modelSelection,
+      });
+
+      return {
+        stage: generated.stage,
+        description: sanitizeKanbanDescription(generated.description),
+        keywords: sanitizeKanbanKeywords(generated.keywords),
+      } satisfies TextGeneration.ThreadKanbanGenerationResult;
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateThreadKanban,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

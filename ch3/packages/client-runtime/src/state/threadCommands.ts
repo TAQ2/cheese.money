@@ -24,6 +24,7 @@ import {
   type UnarchiveThreadInput,
   type UnsettleThreadInput,
   type UnsnoozeThreadInput,
+  type UpdateThreadKanbanInput,
   type UpdateThreadMetadataInput,
   archiveThread,
   createThread,
@@ -41,6 +42,7 @@ import {
   unarchiveThread,
   unsettleThread,
   unsnoozeThread,
+  updateThreadKanban,
   updateThreadMetadata,
 } from "../operations/commands.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -62,6 +64,7 @@ export type {
   UnarchiveThreadInput,
   UnsettleThreadInput,
   UnsnoozeThreadInput,
+  UpdateThreadKanbanInput,
   UpdateThreadMetadataInput,
 } from "../operations/commands.ts";
 
@@ -120,6 +123,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     unsnooze: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unsnooze",
       execute: (input: UnsnoozeThreadInput) => unsnoozeThread(input),
+      scheduler,
+      concurrency,
+    }),
+    updateKanban: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:update-kanban",
+      execute: (input: UpdateThreadKanbanInput) => updateThreadKanban(input),
       scheduler,
       concurrency,
     }),

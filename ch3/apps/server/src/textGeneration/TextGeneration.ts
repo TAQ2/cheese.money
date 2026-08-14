@@ -1,7 +1,12 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type { ChatAttachment, ModelSelection, ProviderInstanceId } from "@ch3tools/contracts";
+import type {
+  ChatAttachment,
+  KanbanBuiltinStageId,
+  ModelSelection,
+  ProviderInstanceId,
+} from "@ch3tools/contracts";
 import { TextGenerationError } from "@ch3tools/contracts";
 
 import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
@@ -73,6 +78,20 @@ export interface ThreadTitleGenerationResult {
   title: string;
 }
 
+export interface ThreadKanbanGenerationInput {
+  cwd: string;
+  /** Conversation tail: latest user message and assistant response. */
+  message: string;
+  /** What model and provider to use for generation. */
+  modelSelection: ModelSelection;
+}
+
+export interface ThreadKanbanGenerationResult {
+  stage: KanbanBuiltinStageId;
+  description: string;
+  keywords: ReadonlyArray<string>;
+}
+
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
@@ -80,6 +99,7 @@ export interface TextGenerationService {
   generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
+  generateThreadKanban(input: ThreadKanbanGenerationInput): Promise<ThreadKanbanGenerationResult>;
 }
 
 /**
@@ -113,6 +133,11 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+
+    /** Classify a finished turn onto the kanban board and summarize the card. */
+    readonly generateThreadKanban: (
+      input: ThreadKanbanGenerationInput,
+    ) => Effect.Effect<ThreadKanbanGenerationResult, TextGenerationError>;
   }
 >()("ch3/textGeneration/TextGeneration") {}
 
@@ -123,7 +148,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateThreadKanban";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -162,6 +188,10 @@ export const makeTextGenerationFromRegistry = (
     generateThreadTitle: (input) =>
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+      ),
+    generateThreadKanban: (input) =>
+      resolveInstance(registry, "generateThreadKanban", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => textGeneration.generateThreadKanban(input)),
       ),
   });
 

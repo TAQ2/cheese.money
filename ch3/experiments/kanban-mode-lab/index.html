@@ -1,0 +1,3033 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CH3 — Kanban Mode Lab · 2D</title>
+    <style>
+      /* ============ CH3 dark tokens (mirrored from apps/web/src/index.css) ============ */
+      :root {
+        color-scheme: dark;
+        --background: #0a0a0a; /* neutral-950 */
+        --card: #111111; /* color-mix(bg 97%, white) */
+        --card-2: #161616;
+        --foreground: #f5f5f5; /* neutral-100 */
+        --muted-foreground: #a3a3a3;
+        --faint-foreground: #737373;
+        --border: rgb(255 255 255 / 8%);
+        --border-strong: rgb(255 255 255 / 14%);
+        --primary: oklch(58.8% 0.217 264);
+        --primary-dim: oklch(58.8% 0.217 264 / 18%);
+        --success: #10b981;
+        --warning: #f59e0b;
+        --destructive: #ef4444;
+        --radius: 10px;
+
+        /* Classes of service — the book's canonical card colors (Part 22).
+       Never color-alone: every use pairs an icon + label. */
+        --cos-expedite: #e4e4e7; /* white card — the silver bullet */
+        --cos-fixed: #a78bfa; /* purple card — fixed delivery date */
+        --cos-standard: #fbbf24; /* yellow card — standard, FIFO */
+        --cos-intangible: #34d399; /* green card — intangible, slack */
+        --issue-pink: #f472b6; /* pink Issue ticket on blocked items (Part 6) */
+
+        /* Chart chrome (dataviz tokens, validated for this surface) */
+        --viz-grid: #242424;
+        --viz-axis: #383838;
+        --viz-text-2: #a3a3a3;
+        --viz-text-3: #737373;
+        /* CFD bands — one-hue ordinal blue ramp, validator: ALL PASS on #111111 */
+        --cfd-1: #9ec5f4;
+        --cfd-2: #6da7ec;
+        --cfd-3: #3987e5;
+        --cfd-4: #256abf;
+        --cfd-5: #184f95;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: var(--background);
+        color: var(--foreground);
+        font-family:
+          "DM Sans Variable",
+          "DM Sans",
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          system-ui,
+          sans-serif;
+        font-size: 13px;
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      code,
+      .mono {
+        font-family: "SF Mono", "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+      }
+
+      /* ============ Top bar ============ */
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        height: 52px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--border);
+        background: color-mix(in srgb, var(--background) 80%, transparent);
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        backdrop-filter: blur(16px);
+      }
+      .traffic {
+        display: flex;
+        gap: 7px;
+        margin-right: 2px;
+      }
+      .traffic span {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: #2c2c2c;
+      }
+      .brand {
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        font-size: 13px;
+      }
+      .brand em {
+        font-style: normal;
+        color: var(--muted-foreground);
+        font-weight: 500;
+      }
+      .seg {
+        display: flex;
+        background: rgb(255 255 255 / 5%);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 2px;
+        gap: 2px;
+      }
+      .seg button {
+        border: 0;
+        background: transparent;
+        color: var(--muted-foreground);
+        padding: 3px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .seg button.active {
+        background: var(--primary-dim);
+        color: var(--foreground);
+        box-shadow: inset 0 0 0 1px oklch(58.8% 0.217 264 / 45%);
+      }
+      .topbar .spacer {
+        flex: 1;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 2px 10px;
+        font-size: 11.5px;
+        color: var(--muted-foreground);
+        background: var(--card);
+      }
+      .btn {
+        border: 1px solid var(--border);
+        background: var(--card);
+        border-radius: 8px;
+        padding: 5px 12px;
+        font-size: 12px;
+        color: var(--foreground);
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        position: relative;
+      }
+      .btn:hover {
+        background: var(--card-2);
+        border-color: var(--border-strong);
+      }
+      .btn.primary {
+        background: var(--primary);
+        border-color: transparent;
+        color: #fff;
+      }
+      .btn.primary:hover {
+        filter: brightness(1.1);
+      }
+      .btn .badge {
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        min-width: 16px;
+        height: 16px;
+        background: var(--warning);
+        color: #1a1000;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 4px;
+      }
+      .btn.playing {
+        border-color: var(--success);
+        color: var(--success);
+      }
+
+      /* ============ Framing strip ============ */
+      .framing {
+        padding: 10px 20px;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted-foreground);
+        font-size: 12px;
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .framing b {
+        color: var(--foreground);
+        font-weight: 600;
+      }
+      .framing .q {
+        display: inline-flex;
+        gap: 6px;
+        align-items: baseline;
+      }
+      .framing .q.kan b {
+        color: oklch(75% 0.15 264);
+      }
+      .framing .path {
+        color: var(--faint-foreground);
+        font-size: 11px;
+      }
+      .framing .path b {
+        color: var(--muted-foreground);
+        font-weight: 600;
+      }
+
+      /* ============ Metrics strip ============ */
+      .metrics {
+        display: grid;
+        grid-template-columns: minmax(280px, 340px) 1fr minmax(240px, 300px);
+        gap: 12px;
+        padding: 14px 20px 4px;
+      }
+      .tiles {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        align-content: start;
+      }
+      .tile {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 10px 12px 9px;
+        position: relative;
+        overflow: hidden;
+      }
+      .tile .label {
+        font-size: 10.5px;
+        color: var(--muted-foreground);
+        letter-spacing: 0.02em;
+      }
+      .tile .value {
+        font-size: 22px;
+        font-weight: 650;
+        margin-top: 1px;
+      }
+      .tile .value small {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted-foreground);
+        margin-left: 2px;
+      }
+      .tile .delta {
+        font-size: 10.5px;
+        margin-top: 1px;
+        color: var(--muted-foreground);
+      }
+      .tile .delta.good {
+        color: var(--success);
+      }
+      .tile .delta.bad {
+        color: var(--destructive);
+      }
+      .tile.littles {
+        grid-column: 1 / -1;
+        border-color: oklch(58.8% 0.217 264 / 35%);
+      }
+      .tile.littles .formula {
+        font-size: 10.5px;
+        color: var(--faint-foreground);
+        margin-top: 2px;
+      }
+      .tile.flash {
+        animation: tile-flash 0.9s ease-out;
+      }
+      @keyframes tile-flash {
+        0% {
+          background: var(--primary-dim);
+        }
+        100% {
+          background: var(--card);
+        }
+      }
+
+      .chart-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 10px 12px 8px;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        position: relative;
+      }
+      .chart-card h3 {
+        margin: 0 0 2px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .chart-card .sub {
+        font-size: 10.5px;
+        color: var(--faint-foreground);
+        margin-bottom: 6px;
+      }
+      .chart-card svg {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+      .legend {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+      }
+      .legend .key {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 10.5px;
+        color: var(--viz-text-2);
+      }
+      .legend .sw {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+      }
+      details.tbl {
+        margin-top: 6px;
+      }
+      details.tbl summary {
+        font-size: 10.5px;
+        color: var(--faint-foreground);
+        cursor: pointer;
+      }
+      details.tbl table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 4px;
+        font-size: 10.5px;
+      }
+      details.tbl th,
+      details.tbl td {
+        text-align: right;
+        padding: 2px 6px;
+        border-bottom: 1px solid var(--border);
+        color: var(--viz-text-2);
+        font-variant-numeric: tabular-nums;
+      }
+      details.tbl th:first-child,
+      details.tbl td:first-child {
+        text-align: left;
+      }
+      .viz-tip {
+        position: absolute;
+        pointer-events: none;
+        z-index: 30;
+        display: none;
+        background: #1c1c1c;
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        padding: 7px 10px;
+        font-size: 11px;
+        box-shadow: 0 6px 24px rgb(0 0 0 / 50%);
+        min-width: 130px;
+      }
+      .viz-tip .t-head {
+        color: var(--viz-text-3);
+        font-size: 10px;
+        margin-bottom: 4px;
+      }
+      .viz-tip .row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        justify-content: space-between;
+      }
+      .viz-tip .row .k {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        color: var(--viz-text-2);
+      }
+      .viz-tip .row .k i {
+        display: inline-block;
+        width: 9px;
+        height: 3px;
+        border-radius: 2px;
+      }
+      .viz-tip .row b {
+        font-weight: 650;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ============ 2D grid board ============ */
+      .board-wrap {
+        padding: 12px 20px 8px;
+        overflow-x: auto;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 108px 174px 174px 216px 188px 188px 188px 188px;
+        gap: 8px;
+        min-width: 1470px;
+      }
+      .gh {
+        /* column header */
+        padding: 7px 10px 6px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--card) 55%, transparent);
+      }
+      .gh .row1 {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .gh h2 {
+        margin: 0;
+        font-size: 11.5px;
+        font-weight: 650;
+        flex: 1;
+      }
+      .gh .count {
+        font-size: 10.5px;
+        color: var(--muted-foreground);
+        font-variant-numeric: tabular-nums;
+      }
+      .gh .count.full {
+        color: var(--warning);
+        font-weight: 700;
+      }
+      .gh .count.overflow {
+        color: var(--destructive);
+        font-weight: 700;
+      }
+      .gh .sub {
+        font-size: 9px;
+        color: var(--faint-foreground);
+        margin-top: 1px;
+      }
+      .gh .flow {
+        font-size: 9px;
+        margin-top: 3px;
+        color: oklch(75% 0.15 264 / 75%);
+      }
+      .gh.commit-edge,
+      .cell.commit-edge,
+      .rail.done-edge {
+        position: relative;
+      }
+      .gh.commit-edge::before,
+      .cell.commit-edge::before {
+        content: "";
+        position: absolute;
+        left: -6px;
+        top: 4px;
+        bottom: 4px;
+        border-left: 2px dashed var(--border-strong);
+      }
+      .icon-btn {
+        width: 17px;
+        height: 17px;
+        border-radius: 5px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--faint-foreground);
+        font-size: 10px;
+        line-height: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+      }
+      .icon-btn:hover {
+        border-color: var(--border-strong);
+        color: var(--foreground);
+        background: var(--card-2);
+      }
+      .stepper {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+      }
+      .stepper button {
+        width: 16px;
+        height: 16px;
+        border-radius: 5px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--muted-foreground);
+        font-size: 11px;
+        line-height: 1;
+        padding: 0;
+      }
+      .stepper button:hover {
+        color: var(--foreground);
+        border-color: var(--border-strong);
+      }
+
+      .lane-hd {
+        padding: 9px 10px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--card) 55%, transparent);
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        align-items: flex-start;
+      }
+      .lane-hd.you {
+        border-color: oklch(58.8% 0.217 264 / 40%);
+      }
+      .lane-hd .who {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        font-weight: 650;
+      }
+      .lane-hd .who i {
+        width: 16px;
+        height: 16px;
+        border-radius: 5px;
+        font-style: normal;
+        font-size: 9px;
+        font-weight: 700;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #0a0a0a;
+        flex: none;
+      }
+      .lane-hd .st {
+        font-size: 9px;
+        color: var(--faint-foreground);
+      }
+      .lane-hd .st.busy {
+        color: var(--success);
+      }
+      .lane-hd .lim {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 10px;
+        color: var(--muted-foreground);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .cell {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 7px;
+        background: color-mix(in srgb, var(--card) 45%, transparent);
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        min-height: 74px;
+      }
+      .cell.you-cell {
+        background: color-mix(in srgb, var(--card) 70%, transparent);
+      }
+      .cell.ghost {
+        border-style: dashed;
+        border-color: rgb(255 255 255 / 4%);
+        background: transparent;
+        min-height: 0;
+        align-items: center;
+        justify-content: center;
+        color: rgb(255 255 255 / 14%);
+        font-size: 12px;
+      }
+      .cell.chute {
+        border-style: dashed;
+        align-items: center;
+        justify-content: center;
+        color: var(--faint-foreground);
+        font-size: 9.5px;
+        text-align: center;
+        line-height: 1.6;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .cell.over {
+        border-color: oklch(58.8% 0.217 264 / 60%);
+        background: color-mix(in srgb, var(--primary-dim) 30%, var(--card));
+      }
+      .cell.reject {
+        animation: shake 0.35s;
+        border-color: var(--destructive);
+      }
+      @keyframes shake {
+        0%,
+        100% {
+          transform: translateX(0);
+        }
+        25% {
+          transform: translateX(-4px);
+        }
+        75% {
+          transform: translateX(4px);
+        }
+      }
+      .rail {
+        grid-row: 2 / span 4;
+      }
+      .more-note {
+        font-size: 10px;
+        color: var(--faint-foreground);
+        text-align: center;
+        padding: 4px 0;
+      }
+
+      /* Pull slots — an empty slot IS the kanban signal (Part 3, 14) */
+      .slot {
+        border: 1.5px dashed var(--border-strong);
+        border-radius: 9px;
+        min-height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--faint-foreground);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .slot.signal {
+        border-color: oklch(58.8% 0.217 264 / 55%);
+        color: oklch(75% 0.15 264 / 85%);
+        animation: slot-pulse 2s infinite;
+      }
+      .slot.agent-signal {
+        border-color: color-mix(in srgb, var(--success) 45%, transparent);
+        color: color-mix(in srgb, var(--success) 80%, transparent);
+        animation: slot-pulse 2s infinite;
+      }
+      @keyframes slot-pulse {
+        /* stepped like CH3's status-pulse: compositor-friendly */
+        0%,
+        40% {
+          opacity: 1;
+          animation-timing-function: steps(6);
+        }
+        50%,
+        90% {
+          opacity: 0.45;
+          animation-timing-function: steps(6);
+        }
+        100% {
+          opacity: 1;
+        }
+      }
+
+      /* ============ Cards ============ */
+      .card {
+        background: var(--card-2);
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        padding: 7px 9px 7px 12px;
+        position: relative;
+        cursor: grab;
+        user-select: none;
+      }
+      .card:active {
+        cursor: grabbing;
+      }
+      .card:hover {
+        border-color: var(--border-strong);
+      }
+      .card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 4px;
+        border-radius: 9px 0 0 9px;
+        background: var(--cos, var(--cos-standard));
+      }
+      .card.dragging {
+        opacity: 0.35;
+      }
+      .card .title {
+        font-size: 12px;
+        font-weight: 550;
+        line-height: 1.3;
+        padding-right: 14px;
+      }
+      .card .meta {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 5px;
+        flex-wrap: wrap;
+      }
+      .card .id {
+        font-size: 9.5px;
+        color: var(--faint-foreground);
+      }
+      .pchip {
+        font-size: 9px;
+        padding: 0 5px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        color: var(--muted-foreground);
+        background: rgb(255 255 255 / 3%);
+        line-height: 15px;
+      }
+      .pchip.reemerged {
+        color: oklch(78% 0.14 264);
+        border-color: oklch(58.8% 0.217 264 / 45%);
+      }
+      .pchip.auto {
+        color: var(--muted-foreground);
+      }
+      .pchip.pinned {
+        color: var(--warning);
+        border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+      }
+      .agent {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 9.5px;
+        color: var(--muted-foreground);
+      }
+      .agent i {
+        width: 13px;
+        height: 13px;
+        border-radius: 4px;
+        font-style: normal;
+        font-size: 8px;
+        font-weight: 700;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #0a0a0a;
+      }
+      .cos-tag {
+        font-size: 9px;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        color: var(--muted-foreground);
+      }
+      .cos-tag i {
+        font-style: normal;
+      }
+      .age {
+        display: inline-flex;
+        gap: 2.5px;
+        align-items: center;
+        margin-left: auto;
+      }
+      .age i {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: var(--faint-foreground);
+      }
+      .age i.hot {
+        background: var(--warning);
+      }
+      .age em {
+        font-size: 8.5px;
+        font-style: normal;
+        color: var(--warning);
+      }
+      .card .working-note {
+        margin-top: 4px;
+        font-size: 9.5px;
+        color: var(--success);
+        display: flex;
+        gap: 5px;
+        align-items: center;
+        animation: slot-pulse 3.4s infinite;
+      }
+      .card .working-note::before {
+        content: "";
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: var(--success);
+      }
+      .card.blocked {
+        border-color: color-mix(in srgb, var(--issue-pink) 45%, transparent);
+      }
+      .issue {
+        margin-top: 5px;
+        background: color-mix(in srgb, var(--issue-pink) 14%, var(--card-2));
+        border: 1px solid color-mix(in srgb, var(--issue-pink) 40%, transparent);
+        border-radius: 6px;
+        padding: 4px 7px;
+        font-size: 9.5px;
+        color: var(--issue-pink);
+        transform: rotate(-0.6deg);
+      }
+      .issue b {
+        font-weight: 700;
+      }
+      .star {
+        position: absolute;
+        top: 5px;
+        right: 7px;
+        font-size: 11px;
+        color: var(--cos-expedite);
+        text-shadow: 0 0 6px rgb(255 255 255 / 45%);
+      }
+      .card.expedite {
+        border-color: rgb(255 255 255 / 30%);
+      }
+      .pull-btn {
+        margin-top: 6px;
+        width: 100%;
+        border: 1px solid oklch(58.8% 0.217 264 / 50%);
+        background: var(--primary-dim);
+        color: oklch(80% 0.12 264);
+        border-radius: 6px;
+        font-size: 10px;
+        padding: 3px 0;
+        letter-spacing: 0.06em;
+        font-weight: 600;
+      }
+      .pull-btn:hover {
+        background: oklch(58.8% 0.217 264 / 30%);
+      }
+      .next-tag {
+        position: absolute;
+        top: -6px;
+        right: 8px;
+        font-size: 8.5px;
+        background: var(--background);
+        border: 1px solid var(--border-strong);
+        color: var(--muted-foreground);
+        padding: 0 5px;
+        border-radius: 4px;
+      }
+
+      /* ============ Footer explainer ============ */
+      .explainer {
+        margin: 14px 20px 26px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--card);
+        padding: 14px 16px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 16px;
+      }
+      .explainer h4 {
+        margin: 0 0 4px;
+        font-size: 11.5px;
+      }
+      .explainer p {
+        margin: 0;
+        font-size: 11px;
+        color: var(--muted-foreground);
+      }
+      .explainer .cite {
+        display: block;
+        margin-top: 4px;
+        font-size: 9.5px;
+        color: var(--faint-foreground);
+      }
+      .failload {
+        font-size: 10.5px;
+        color: var(--faint-foreground);
+        padding: 0 22px 20px;
+      }
+      .failload b {
+        color: var(--warning);
+      }
+
+      /* ============ Popovers / modal / toast / walk ============ */
+      .popover {
+        position: fixed;
+        z-index: 60;
+        background: #1a1a1a;
+        border: 1px solid var(--border-strong);
+        border-radius: 12px;
+        box-shadow: 0 12px 40px rgb(0 0 0 / 60%);
+        padding: 12px 14px;
+        width: 280px;
+        display: none;
+        font-size: 12px;
+      }
+      .popover h4 {
+        margin: 0 0 6px;
+        font-size: 12px;
+      }
+      .popover ul {
+        margin: 4px 0 0;
+        padding-left: 16px;
+        color: var(--muted-foreground);
+        font-size: 11px;
+      }
+      .popover li {
+        margin: 3px 0;
+      }
+      .popover .row {
+        display: flex;
+        gap: 6px;
+        margin-top: 8px;
+        flex-wrap: wrap;
+      }
+      .popover .mini {
+        border: 1px solid var(--border);
+        background: var(--card-2);
+        border-radius: 6px;
+        font-size: 10.5px;
+        padding: 3px 8px;
+      }
+      .popover .mini:hover {
+        border-color: var(--border-strong);
+      }
+      .popover .mini.active {
+        border-color: var(--cos, var(--primary));
+        color: var(--foreground);
+      }
+      .popover .meta-line {
+        color: var(--faint-foreground);
+        font-size: 10px;
+        margin-top: 2px;
+      }
+      .backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        background: rgb(0 0 0 / 55%);
+        display: none;
+      }
+      .modal {
+        position: fixed;
+        z-index: 70;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 520px;
+        max-width: calc(100vw - 40px);
+        max-height: 80vh;
+        overflow-y: auto;
+        background: #161616;
+        border: 1px solid var(--border-strong);
+        border-radius: 14px;
+        box-shadow: 0 24px 80px rgb(0 0 0 / 70%);
+        padding: 18px 20px;
+        display: none;
+      }
+      .modal h3 {
+        margin: 0;
+        font-size: 15px;
+      }
+      .modal .sub {
+        color: var(--muted-foreground);
+        font-size: 11.5px;
+        margin: 4px 0 12px;
+      }
+      .alloc {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+      }
+      .alloc .chip b {
+        color: var(--foreground);
+      }
+      .repl-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        margin-bottom: 7px;
+        background: var(--card-2);
+      }
+      .repl-item .stripe {
+        width: 4px;
+        align-self: stretch;
+        border-radius: 3px;
+        flex: none;
+      }
+      .repl-item .t {
+        flex: 1;
+      }
+      .repl-item .t .n {
+        font-size: 12px;
+      }
+      .repl-item .t .m {
+        font-size: 10px;
+        color: var(--faint-foreground);
+      }
+      .toast-wrap {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 90;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        align-items: center;
+      }
+      .toast {
+        background: #1e1e1e;
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        padding: 9px 16px;
+        font-size: 12px;
+        max-width: 560px;
+        box-shadow: 0 10px 30px rgb(0 0 0 / 55%);
+        animation: toast-in 0.18s ease-out;
+      }
+      .toast.warn {
+        border-color: color-mix(in srgb, var(--warning) 50%, transparent);
+      }
+      .toast.err {
+        border-color: color-mix(in srgb, var(--destructive) 55%, transparent);
+      }
+      .toast q {
+        color: var(--muted-foreground);
+        font-style: italic;
+      }
+      @keyframes toast-in {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+      }
+
+      .walk-callout {
+        position: fixed;
+        z-index: 80;
+        width: 300px;
+        background: #1c1c1e;
+        border: 1px solid oklch(58.8% 0.217 264 / 55%);
+        border-radius: 12px;
+        padding: 12px 14px;
+        box-shadow: 0 16px 50px rgb(0 0 0 / 70%);
+        display: none;
+      }
+      .walk-callout h4 {
+        margin: 0 0 4px;
+        font-size: 12px;
+        color: oklch(80% 0.12 264);
+      }
+      .walk-callout p {
+        margin: 0;
+        font-size: 11px;
+        color: var(--muted-foreground);
+      }
+      .walk-callout ul {
+        margin: 6px 0 0;
+        padding-left: 15px;
+        font-size: 11px;
+        color: var(--foreground);
+      }
+      .walk-callout .row {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+        justify-content: flex-end;
+      }
+      .walk-focus {
+        border-color: oklch(58.8% 0.217 264 / 80%) !important;
+        box-shadow: 0 0 0 3px var(--primary-dim);
+        position: relative;
+        z-index: 55;
+        background: var(--card) !important;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ============ Top bar ============ -->
+    <div class="topbar">
+      <div class="traffic"><span></span><span></span><span></span></div>
+      <div class="brand">CH3 <em>· Kanban Mode Lab · 2D</em></div>
+      <div class="seg" role="tablist" aria-label="Sidebar mode">
+        <button title="Prototype — inert">⌾ Inbox</button>
+        <button title="Prototype — inert">⛁ Projects</button>
+        <button class="active" aria-selected="true">⇉ Kanban</button>
+      </div>
+      <div class="spacer"></div>
+      <span class="chip mono" id="day-chip">Day 29</span>
+      <button
+        class="btn"
+        id="btn-autofile"
+        title="Run the status classifier now — the same background task that regenerates titles"
+      >
+        ✨ Auto-file<span class="badge" id="af-badge" hidden>0</span>
+      </button>
+      <button
+        class="btn"
+        id="btn-walk"
+        title="Standup: walk the board right-to-left, in the direction of pull (Part 15)"
+      >
+        🚶 Walk the board
+      </button>
+      <button
+        class="btn"
+        id="btn-replenish"
+        title="Queue replenishment — fill Ready up to its limit (Part 15, 18)"
+      >
+        ⟳ Replenish<span class="badge" id="repl-badge" hidden>0</span>
+      </button>
+      <button class="btn" id="btn-day" title="Advance the simulation one day">+1 day</button>
+      <button
+        class="btn"
+        id="btn-sim"
+        title="Autoplay: agents finish work, you pull promptly, days tick"
+      >
+        ▶ Simulate
+      </button>
+    </div>
+
+    <!-- ============ Framing ============ -->
+    <div class="framing">
+      <span class="q">Inbox answers <b>“what is still open?”</b></span>
+      <span class="q">Projects answers <b>“what is in this project?”</b></span>
+      <span class="q kan"
+        >Kanban answers <b>“what should I pull next — and what should I refuse to start?”</b></span
+      >
+      <span class="path"
+        >flow: Ready <b>→ ↓ dives</b> into an agent lane <b>→ ↑ re-emerges</b> to your lane the
+        moment it needs you <b>→</b> Desk <b>→</b> Proving <b>→</b> Delivered</span
+      >
+    </div>
+
+    <!-- ============ Metrics ============ -->
+    <div class="metrics">
+      <div class="tiles">
+        <div class="tile">
+          <div class="label">WIP (committed)</div>
+          <div class="value" id="m-wip">–</div>
+          <div class="delta" id="m-wip-d"></div>
+        </div>
+        <div class="tile">
+          <div class="label">Throughput</div>
+          <div class="value" id="m-thru">–</div>
+          <div class="delta" id="m-thru-d"></div>
+        </div>
+        <div class="tile">
+          <div class="label">Flow efficiency</div>
+          <div class="value" id="m-eff">–</div>
+          <div class="delta" id="m-eff-d">touch ÷ lead time</div>
+        </div>
+        <div class="tile">
+          <div class="label">Due-date performance</div>
+          <div class="value" id="m-ddp">–</div>
+          <div class="delta" id="m-ddp-d">target ≤ 8 d</div>
+        </div>
+        <div class="tile littles" id="littles-tile">
+          <div class="label">Little’s Law — projected lead time</div>
+          <div class="value" id="m-little">–</div>
+          <div class="formula" id="m-little-f">
+            lead time = WIP ÷ throughput. Shrink WIP and lead time falls with it — that is the whole
+            trick.
+          </div>
+        </div>
+      </div>
+
+      <div class="chart-card" id="cfd-card">
+        <h3>Cumulative flow</h3>
+        <div class="sub">
+          Band height = WIP in that state · horizontal distance ≈ lead time (Part 8)
+        </div>
+        <svg id="cfd" viewBox="0 0 560 168" role="img" aria-label="Cumulative flow diagram"></svg>
+        <div class="legend" id="cfd-legend"></div>
+        <details class="tbl">
+          <summary>View as table</summary>
+          <div id="cfd-table"></div>
+        </details>
+        <div class="viz-tip" id="cfd-tip"></div>
+      </div>
+
+      <div class="chart-card" id="lt-card">
+        <h3>Lead time spectrum</h3>
+        <div class="sub">Delivered conversations, days from commitment (Part 23)</div>
+        <svg id="lt" viewBox="0 0 300 168" role="img" aria-label="Lead time histogram"></svg>
+        <details class="tbl">
+          <summary>View as table</summary>
+          <div id="lt-table"></div>
+        </details>
+        <div class="viz-tip" id="lt-tip"></div>
+      </div>
+    </div>
+
+    <!-- ============ 2D Board ============ -->
+    <div class="board-wrap"><div class="grid" id="grid"></div></div>
+
+    <div class="failload" id="failload-note"></div>
+
+    <!-- ============ Explainer ============ -->
+    <div class="explainer">
+      <div>
+        <h4>⇢ The 2D grid</h4>
+        <p>
+          Left→right is <em>your</em> flow with WIP protection. Top→bottom are swim lanes: your lane
+          on top, one autonomous lane per agent below. Ownership is structural — Working cells exist
+          only in agent lanes; Desk and Proving exist only in yours.
+        </p>
+        <span class="cite"
+          >Parts 21, 25 — capacity allocation via swim lanes with explicit limits</span
+        >
+      </div>
+      <div>
+        <h4>↓↑ Dive &amp; re-emerge</h4>
+        <p>
+          Committing work sends it <em>down</em> into an agent lane; the lane runs autonomously; the
+          card <em>rises back to your lane</em> the moment it needs you — finished, or blocked on
+          something only you can resolve. Needs-me is the buffer that keeps the bottleneck (you) fed
+          but never flooded.
+        </p>
+        <span class="cite">Parts 20, 32 — buffer in front of the bottleneck; issue escalation</span>
+      </div>
+      <div>
+        <h4>✨ Auto-filed, 📌 pinned</h4>
+        <p>
+          The same background task that regenerates conversation titles doubles as the status
+          classifier: it files each conversation into a cell (✨). A manual drag always wins and
+          pins the card (📌) so the classifier won’t second-guess you.
+        </p>
+        <span class="cite">Part 14 — electronic tracking enables what card walls cannot</span>
+      </div>
+      <div>
+        <h4>▦ Classes of service</h4>
+        <p>
+          ⚡ <b>Expedite</b> (white, limit 1 — the silver bullet, bypasses limits) · 📅
+          <b>Fixed date</b> (purple, pulled by due date) · <b>Standard</b> (yellow, FIFO) · 🌱
+          <b>Intangible</b> (green — the slack that absorbs shocks).
+        </p>
+        <span class="cite">Parts 21, 22 — canonical ticket colors</span>
+      </div>
+      <div>
+        <h4>◈ Pink tickets · aging dots</h4>
+        <p>
+          Blockages get a pink Issue ticket and become first-class work; blocks needing you rise to
+          your lane immediately. One aging dot per stationary day — three turn amber and get called
+          out during the walk. Backlog auto-triages at 30 d.
+        </p>
+        <span class="cite">Parts 5, 6, 15, 16</span>
+      </div>
+      <div>
+        <h4>∑ WIP is the dial</h4>
+        <p>
+          Steppers everywhere: per-lane limits cap each agent, column limits protect your desk.
+          Lower <b>Doing</b> and watch Little’s Law project shorter lead times. Raising a limit is a
+          policy change, not a favor.
+        </p>
+        <span class="cite">Parts 8, 20, 29 — Little’s Law; the drop-one conversation</span>
+      </div>
+    </div>
+
+    <!-- ============ Overlays ============ -->
+    <div class="backdrop" id="backdrop"></div>
+    <div class="popover" id="popover"></div>
+    <div class="modal" id="modal"></div>
+    <div class="walk-callout" id="walk-callout"></div>
+    <div class="toast-wrap" id="toasts"></div>
+
+    <script>
+      "use strict";
+      /* =====================================================================
+   CH3 Kanban Mode — 2D grid lab
+   x-axis: Conrad's flow, WIP-protected. y-axis: swim lanes — the user
+   lane on top, autonomous agent lanes below. Work dives into a lane and
+   re-emerges to the top the moment it needs the human.
+   ===================================================================== */
+
+      // ---------- deterministic RNG so the lab is stable between reloads ----------
+      let _seed = 0xc0ffee;
+      function rnd() {
+        _seed |= 0;
+        _seed = (_seed + 0x6d2b79f5) | 0;
+        let t = Math.imul(_seed ^ (_seed >>> 15), 1 | _seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      }
+
+      // ---------- stages, columns, lanes ----------
+      const STAGES = ["backlog", "ready", "working", "needsme", "doing", "proving", "done"];
+      const SIDX = Object.fromEntries(STAGES.map((s, i) => [s, i]));
+      const COLS = {
+        backlog: {
+          name: "Backlog",
+          sub: "options — uncommitted",
+          limit: null,
+          rail: true,
+          policies: [
+            "Options, not commitments — no clock runs here.",
+            "Triage: keep or delete. Stale at 14 d idle.",
+            "Auto-deleted at 30 d — if it hasn’t been pulled by then, its value is negligible (XIT policy, Part 16).",
+          ],
+        },
+        ready: {
+          name: "Ready",
+          sub: "input queue · the clock starts",
+          limit: 4,
+          flow: "→ idle lanes pull ↓",
+          policies: [
+            "Filled only at replenishment, never pushed.",
+            "Crossing the commitment line starts the lead-time clock.",
+            "Idle agent lanes pull from here on their own — you never assign.",
+            "Queue sized from cadence × throughput (Part 20).",
+          ],
+        },
+        working: {
+          name: "Working",
+          sub: "agent lanes · autonomous",
+          limit: null,
+          flow: "↑ re-emerges when it needs you",
+          policies: [
+            "Only agent lanes hold Working cells — ownership is structural.",
+            "Per-lane WIP limits: one conversation per agent is the ideal (Part 19).",
+            "Finished or blocked-on-you → the card rises to Needs me.",
+            "Blocked otherwise → pink Issue ticket, swarm on it (Part 6).",
+          ],
+        },
+        needsme: {
+          name: "Needs me",
+          sub: "buffer · protects your desk",
+          limit: null,
+          flow: "→ you pull",
+          policies: [
+            "The buffer in front of the bottleneck (you) — never starved, never flooded (Part 20, 32).",
+            "Pull order: ⚡ expedite → 📅 fixed by date → standard FIFO → 🌱 intangible.",
+            "The top card is marked NEXT — pull decisions need no manager (Part 14).",
+          ],
+        },
+        doing: {
+          name: "My Desk — Doing",
+          sub: "★ the bottleneck — you pull",
+          limit: 2,
+          policies: [
+            "You pull; nothing is ever pushed onto this column.",
+            "The limit is the dial: it trades lead time for focus and quality.",
+            "Over the limit? “Which one of the current items in progress would you prefer that we drop in order to start your new item?” (Part 29)",
+          ],
+        },
+        proving: {
+          name: "Proving",
+          sub: "proof over report",
+          limit: 2,
+          policies: [
+            "Exit = observed working live: logs, DB, MCP, real output.",
+            "An agent’s claim of fixed is not evidence (house law #6).",
+            "Rework goes back down a lane and is counted as failure load (Part 33).",
+          ],
+        },
+        done: {
+          name: "Delivered",
+          sub: "feeds throughput & lead time",
+          limit: null,
+          rail: true,
+          policies: [
+            "Delivery cadence builds trust — small and often beats big and rare (Part 8, 17).",
+            "Every delivery records lead time, touch time, and due-date performance.",
+          ],
+        },
+      };
+      const LANES = [
+        { id: "you", name: "You", color: "oklch(70% 0.16 264)", limit: null },
+        { id: "fable", name: "fable", color: "#c4b5fd", limit: 2 },
+        { id: "opus", name: "opus", color: "#93c5fd", limit: 1 },
+        { id: "sonnet", name: "sonnet", color: "#86efac", limit: 1 },
+      ];
+      const laneById = Object.fromEntries(LANES.map((l) => [l.id, l]));
+      const COS = {
+        expedite: {
+          label: "Expedite",
+          icon: "⚡",
+          color: "var(--cos-expedite)",
+          hint: "silver bullet · limit 1 · bypasses limits",
+        },
+        fixed: {
+          label: "Fixed date",
+          icon: "📅",
+          color: "var(--cos-fixed)",
+          hint: "pulled by due date",
+        },
+        standard: {
+          label: "Standard",
+          icon: "▮",
+          color: "var(--cos-standard)",
+          hint: "FIFO · target ≤ 8 d",
+        },
+        intangible: {
+          label: "Intangible",
+          icon: "🌱",
+          color: "var(--cos-intangible)",
+          hint: "slack — absorbs shocks",
+        },
+      };
+      const SLA_DAYS = 8,
+        EXPEDITE_LIMIT = 1,
+        STALE_DAYS = 14,
+        TRIAGE_DAYS = 30;
+
+      // ---------- state ----------
+      let day = 29,
+        idSeq = 300,
+        failureLoad = 2,
+        simTimer = null;
+      const items = [];
+      function mk(stage, title, project, cos, opt = {}) {
+        const it = Object.assign(
+          {
+            id: "CH3-" + idSeq++,
+            title,
+            project,
+            cos,
+            stage,
+            lane: "you",
+            arrivedDay: day - 3,
+            committedDay: null,
+            enteredStageDay: day - 1,
+            doneDay: null,
+            blocked: null,
+            dueDay: null,
+            touch: 0,
+            lead: null,
+            maxReached: SIDX[stage] ?? 0,
+            pinned: false,
+            autoFiledDay: null,
+            reemergedDay: null,
+          },
+          opt,
+        );
+        items.push(it);
+        return it;
+      }
+
+      // counters behind the CFD lines (cumulative stage entries)
+      const cum = { committed: 40, started: 36, buffered: 32, desk: 29, delivered: 26 };
+      const history = []; // one row per day: {day, committed, started, buffered, desk, delivered}
+      const leads = []; // delivered {lead, touch, cos, day}
+
+      // ---------- seed ----------
+      (function seed() {
+        const seedLeads = [
+          4, 6, 3, 9, 5, 12, 8, 4, 10, 6, 14, 5, 7, 9, 3, 11, 8, 6, 12, 7, 5, 9, 15, 6, 8, 10,
+        ];
+        for (let i = 0; i < 26; i++) {
+          const lead = seedLeads[i];
+          leads.push({
+            lead,
+            touch: Math.max(1, Math.round(lead * (0.28 + rnd() * 0.2))),
+            cos: "standard",
+            day: Math.min(28, 3 + i),
+          });
+        }
+        const doneTitles = [
+          ["Copy entire conversation, not hand-select", "ch3"],
+          ["Composer ingest guard", "ch3"],
+          ["Probe timeout must not erase capabilities", "ch3"],
+          ["Quote passage into composer", "ch3"],
+          ["Health check must not spawn a server", "ch3"],
+          ["Account rotation failover", "ch3"],
+          ["Usage endpoint backoff", "ch3"],
+          ["Sidebar mode toggle polish", "ch3"],
+          ["NUL-byte composite key fix", "ch3"],
+          ["Worktree cleanup script", "ch3"],
+          ["Oxlint plugin: no-raw-ipc", "ch3"],
+          ["Release notes 0.9", "ch3"],
+          ["Settings write debounce", "ch3"],
+          ["Broker session expiry spec", "hark"],
+          ["sshpass vendoring check", "hark"],
+          ["Rumble deploy rsync guard", "hark"],
+          ["Listing archive sweep", "vendebien"],
+          ["Photo pipeline retry", "vendebien"],
+          ["Loan export checksum", "lmo"],
+          ["Readonly role audit", "lmo"],
+          ["Sidebar perf trace", "ch3"],
+          ["Composer draft autosave", "ch3"],
+          ["Terminal title escapes", "ch3"],
+          ["Usage poll jitter", "ch3"],
+          ["Mobile composer morph fix", "ch3"],
+          ["Preview recording stub", "ch3"],
+        ];
+        doneTitles.forEach(([t, p], i) => {
+          const lead = seedLeads[i];
+          const it = mk("done", t, p, "standard");
+          it.doneDay = 28 - i;
+          it.committedDay = Math.max(1, it.doneDay - lead);
+          it.lead = lead;
+          it.maxReached = 6;
+        });
+
+        // live board — ✨ = filed by the title-task classifier, 📌 = you placed it
+        mk("backlog", "Spec: semantic conversation search", "ch3", "standard", {
+          arrivedDay: 27,
+          autoFiledDay: 27,
+        });
+        mk("backlog", "Refresh visual-UX suite goldens", "hark", "intangible", {
+          arrivedDay: 25,
+          autoFiledDay: 25,
+        });
+        mk("backlog", "Composer: paste-image dedupe", "ch3", "standard", {
+          arrivedDay: 24,
+          autoFiledDay: 24,
+        });
+        mk("backlog", "Quarterly dependency upgrade sweep", "vendebien", "intangible", {
+          arrivedDay: 18,
+          autoFiledDay: 18,
+        });
+        mk("backlog", "Regulatory: CNBV export format", "lmo", "fixed", {
+          arrivedDay: 21,
+          dueDay: 44,
+          autoFiledDay: 21,
+        });
+        mk("backlog", "Kill legacy sidebar V1 flag", "ch3", "intangible", {
+          arrivedDay: 7,
+          autoFiledDay: 7,
+        });
+        mk("backlog", "Retry-after-aware usage poller", "ch3", "standard", {
+          arrivedDay: 28,
+          autoFiledDay: 28,
+        });
+
+        mk("ready", "Rotation freeze on exhausted account", "ch3", "standard", {
+          committedDay: 26,
+          enteredStageDay: 26,
+          maxReached: 1,
+          pinned: true,
+        });
+        mk("ready", "bw-broker CA anchor drift check", "hark", "standard", {
+          committedDay: 27,
+          enteredStageDay: 27,
+          maxReached: 1,
+          autoFiledDay: 27,
+        });
+        mk("ready", "Sidebar unread badge drift", "ch3", "standard", {
+          committedDay: 28,
+          enteredStageDay: 28,
+          maxReached: 1,
+          autoFiledDay: 28,
+        });
+        mk("ready", "LMO homepage 500 — root cause", "lmo", "fixed", {
+          committedDay: 28,
+          enteredStageDay: 28,
+          dueDay: 36,
+          maxReached: 1,
+          autoFiledDay: 28,
+        });
+
+        mk("working", "Quote-reply follow-ups", "ch3", "standard", {
+          committedDay: 24,
+          enteredStageDay: 25,
+          lane: "fable",
+          maxReached: 2,
+          autoFiledDay: 25,
+        });
+        mk("working", "Deploy runbook automation", "hark", "intangible", {
+          committedDay: 23,
+          enteredStageDay: 26,
+          lane: "fable",
+          maxReached: 2,
+          autoFiledDay: 26,
+        });
+        mk("working", "Terminal env binding e2e", "ch3", "standard", {
+          committedDay: 26,
+          enteredStageDay: 27,
+          lane: "sonnet",
+          maxReached: 2,
+          autoFiledDay: 27,
+        });
+
+        mk("needsme", "Health-check regression test", "ch3", "standard", {
+          committedDay: 25,
+          enteredStageDay: 28,
+          lane: "you",
+          maxReached: 3,
+          reemergedDay: 28,
+          autoFiledDay: 28,
+          blocked: { reason: "Needs CI credentials only Conrad holds", day: 28 },
+        });
+        mk("needsme", "Copy-conversation cleanup pass", "ch3", "standard", {
+          committedDay: 22,
+          enteredStageDay: 27,
+          lane: "you",
+          maxReached: 3,
+          autoFiledDay: 27,
+        });
+        mk("needsme", "Probe-capability fix — verify pass", "ch3", "standard", {
+          committedDay: 23,
+          enteredStageDay: 28,
+          lane: "you",
+          maxReached: 3,
+          reemergedDay: 28,
+          autoFiledDay: 28,
+        });
+        mk("needsme", "VendeBien listing dedupe script", "vendebien", "intangible", {
+          committedDay: 24,
+          enteredStageDay: 28,
+          lane: "you",
+          maxReached: 3,
+          autoFiledDay: 28,
+        });
+
+        mk("doing", "Review: five-minute health check PR", "ch3", "standard", {
+          committedDay: 21,
+          enteredStageDay: 28,
+          maxReached: 4,
+          pinned: true,
+        });
+        mk("doing", "MCP stdout-arbiter hardening review", "hark", "standard", {
+          committedDay: 22,
+          enteredStageDay: 28,
+          maxReached: 4,
+          autoFiledDay: 28,
+        });
+
+        mk("proving", "Touch-ID broker cold-start check", "hark", "standard", {
+          committedDay: 20,
+          enteredStageDay: 28,
+          maxReached: 5,
+          autoFiledDay: 28,
+        });
+
+        // two imported conversations the classifier has not filed yet
+        mk("unfiled", "Imported: WhatsApp driver-hiring thread", "hark", "standard", {
+          arrivedDay: 29,
+        });
+        mk("unfiled", "Imported: loan-ops sync notes", "lmo", "fixed", {
+          arrivedDay: 29,
+          dueDay: 41,
+        });
+
+        // synthetic CFD history: each line is the committed line lagged in time,
+        // so horizontal distance between lines reads as lead time (Part 8)
+        const committedLine = [];
+        {
+          let v = 0;
+          const per = cum.committed / 29;
+          for (let d = 0; d <= 29; d++) {
+            if (d > 0) v = Math.min(cum.committed, v + Math.max(0.2, per + (rnd() - 0.45) * 1.4));
+            committedLine.push(d === 29 ? cum.committed : v);
+          }
+        }
+        const interp = (x) => {
+          if (x <= 0) return 0;
+          if (x >= 29) return committedLine[29];
+          const i = Math.floor(x);
+          return committedLine[i] + (committedLine[i + 1] - committedLine[i]) * (x - i);
+        };
+        const LAGS = [
+          ["started", 1.5, cum.started],
+          ["buffered", 4, cum.buffered],
+          ["desk", 5.5, cum.desk],
+          ["delivered", 8, cum.delivered],
+        ];
+        for (let d = 0; d <= 29; d++) {
+          const row = { day: d, committed: committedLine[d] };
+          let prev = row.committed;
+          LAGS.forEach(([k, lag, end]) => {
+            const base = interp(29 - lag) || 1;
+            let val = d === 29 ? end : interp(d - lag) * (end / base);
+            val = Math.min(val, prev);
+            prev = val;
+            row[k] = val;
+          });
+          history.push(row);
+        }
+      })();
+
+      // ---------- helpers ----------
+      const $ = (s) => document.querySelector(s);
+      const inStage = (s) => items.filter((i) => i.stage === s);
+      const inLaneWorking = (laneId) =>
+        items.filter((i) => i.stage === "working" && i.lane === laneId);
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text != null) n.textContent = text;
+        return n;
+      };
+      function toast(msg, kind = "", quote = "") {
+        const t = el("div", "toast" + (kind ? " " + kind : ""));
+        t.append(msg);
+        if (quote) {
+          t.append(document.createElement("br"));
+          const q = document.createElement("q");
+          q.textContent = quote;
+          t.append(q);
+        }
+        $("#toasts").append(t);
+        setTimeout(() => {
+          t.style.opacity = "0";
+          t.style.transition = "opacity .4s";
+          setTimeout(() => t.remove(), 400);
+        }, 5200);
+      }
+      const wipCount = () =>
+        items.filter(
+          (i) => i.committedDay != null && !["done", "backlog", "unfiled"].includes(i.stage),
+        ).length;
+      function throughput7() {
+        const rowNow = history[history.length - 1],
+          rowThen = history[Math.max(0, history.length - 8)];
+        return Math.round(rowNow.delivered - rowThen.delivered);
+      }
+      function pullPriority(a, b) {
+        const rank = { expedite: 0, fixed: 1, standard: 2, intangible: 3 };
+        if (rank[a.cos] !== rank[b.cos]) return rank[a.cos] - rank[b.cos];
+        if (a.cos === "fixed") return (a.dueDay ?? 999) - (b.dueDay ?? 999);
+        return (a.committedDay ?? a.arrivedDay) - (b.committedDay ?? b.arrivedDay);
+      }
+
+      // ---------- transitions ----------
+      function crossInto(it, stage, lane) {
+        const idx = SIDX[stage];
+        // dwell accounting: touch time accrues in working / doing / proving
+        if (["working", "doing", "proving"].includes(it.stage))
+          it.touch += day - it.enteredStageDay;
+        if (idx > it.maxReached) {
+          for (let s = it.maxReached + 1; s <= idx; s++) {
+            if (s === 1) {
+              cum.committed++;
+              if (it.committedDay == null) it.committedDay = day;
+            }
+            if (s === 2) cum.started++;
+            if (s === 3) cum.buffered++;
+            if (s === 4) cum.desk++;
+            if (s === 6) cum.delivered++;
+          }
+          it.maxReached = idx;
+        }
+        if (stage === "done" && it.doneDay == null) {
+          it.doneDay = day;
+          it.lead = day - (it.committedDay ?? day);
+          leads.push({ lead: it.lead, touch: Math.max(1, it.touch), cos: it.cos, day });
+        }
+        if (it.stage === "working" && stage === "needsme") it.reemergedDay = day;
+        it.stage = stage;
+        it.lane = lane ?? "you";
+        it.enteredStageDay = day;
+      }
+
+      function canMove(it, stage, lane) {
+        const from = it.stage;
+        if (from === stage && it.lane === lane) return { ok: false, silent: true };
+        if (from === "done")
+          return { ok: false, reason: "Delivered is delivered — pull new work instead." };
+        if (stage === "done" && from !== "proving")
+          return {
+            ok: false,
+            reason: "Nothing skips Proving — exit is observed working live, not a report (law #6).",
+          };
+        // ownership is structural: Working lives in agent lanes, everything else in yours
+        if (stage === "working" && lane === "you")
+          return {
+            ok: false,
+            reason: "You don't hold Working — drop it into an agent lane below to delegate.",
+          };
+        if (stage !== "working" && lane !== "you")
+          return {
+            ok: false,
+            reason: `${laneById[lane].name} only holds Working — Ready, Needs-me, Desk and Proving are yours.`,
+          };
+        const goingLeft = SIDX[stage] < SIDX[from];
+        const bypass = it.cos === "expedite";
+        if (stage === "working") {
+          const l = laneById[lane];
+          if (inLaneWorking(lane).length >= l.limit && !bypass)
+            return {
+              ok: false,
+              reason: `${l.name} is at its lane limit (${l.limit}) — one conversation per agent is the ideal (Part 19).`,
+            };
+        }
+        const col = COLS[stage];
+        if (!goingLeft && col.limit != null && inStage(stage).length >= col.limit && !bypass) {
+          const q29 =
+            stage === "doing" || stage === "proving"
+              ? "Which one of the current items in progress would you prefer that we drop in order to start your new item?"
+              : "";
+          return {
+            ok: false,
+            reason: `${col.name} is at its WIP limit (${col.limit}). Raising it is a policy change — use the stepper if you mean it.`,
+            quote: q29,
+          };
+        }
+        if (
+          bypass &&
+          ((col.limit != null && inStage(stage).length >= col.limit) ||
+            (stage === "working" && inLaneWorking(lane).length >= laneById[lane].limit))
+        ) {
+          return {
+            ok: true,
+            note: "⚡ Expedite bypasses the limit — that is why there is only one silver bullet.",
+          };
+        }
+        if (goingLeft) return { ok: true, rework: true };
+        return { ok: true };
+      }
+      function move(it, stage, lane, by) {
+        const v = canMove(it, stage, lane);
+        if (!v.ok) {
+          if (!v.silent) {
+            toast(v.reason, "err", v.quote || "");
+          }
+          return false;
+        }
+        if (v.rework && SIDX[it.stage] >= 3 && stage === "working") {
+          failureLoad++;
+          toast(
+            `↩ ${it.title} dives back down for rework — counted as failure load (work that recovers value that should already have been there).`,
+            "warn",
+          );
+        }
+        if (v.note) toast(v.note);
+        crossInto(it, stage, lane);
+        if (by === "you") {
+          it.pinned = true;
+          it.autoFiledDay = null;
+        }
+        renderAll();
+        return true;
+      }
+
+      // ---------- auto-file: the title-task model as status classifier ----------
+      function autoFile(announce) {
+        let n = 0;
+        items
+          .filter((i) => i.stage === "unfiled")
+          .forEach((it) => {
+            it.stage = "backlog";
+            it.enteredStageDay = day;
+            it.autoFiledDay = day;
+            n++;
+            toast(
+              `✨ Title-task model filed “${it.title}” → Backlog · ${COS[it.cos].icon} ${COS[it.cos].label}${it.dueDay ? ` (due d${it.dueDay})` : ""}`,
+            );
+          });
+        if (n === 0 && announce)
+          toast(
+            "✨ Classifier pass: every conversation is already where the model would put it. Pinned cards (📌) are never touched.",
+          );
+        return n;
+      }
+      $("#btn-autofile").addEventListener("click", () => {
+        autoFile(true);
+        renderAll();
+      });
+
+      // ---------- simulation ----------
+      const ARRIVALS = [
+        ["Trace composer focus regression", "ch3", "standard"],
+        ["Prune stale a19f worktrees", "ch3", "intangible"],
+        ["Wire usage-poll backoff everywhere", "ch3", "standard"],
+        ["Settings schema v7 migration", "ch3", "standard"],
+        ["Audit terminal env bindings", "ch3", "intangible"],
+        ["Flaky server test #14 — root cause", "ch3", "standard"],
+        ["MCP broker runbook docs", "hark", "intangible"],
+        ["429 retry-after investigation", "ch3", "standard"],
+        ["Listing photos EXIF scrubber", "vendebien", "standard"],
+        ["Loan-book export: monthly close", "lmo", "fixed"],
+      ];
+      const BLOCK_REASONS_LANE = [
+        "Vault reachable but untrusted — cert check",
+        "Waiting on prod DB (207.5.194.56 timeout)",
+        "Upstream API contract unclear",
+      ];
+      const BLOCK_REASONS_YOU = [
+        "Ambiguous requirement — needs your call",
+        "Needs credentials only Conrad holds",
+      ];
+      function agentAutopull() {
+        LANES.filter((l) => l.id !== "you").forEach((l) => {
+          while (inLaneWorking(l.id).length < l.limit) {
+            const q = inStage("ready").sort(pullPriority)[0];
+            if (!q) return;
+            crossInto(q, "working", l.id);
+            q.autoFiledDay = day;
+          }
+        });
+      }
+      function advanceDay(auto) {
+        day++;
+        autoFile(false);
+        inStage("working").forEach((it) => {
+          if (it.blocked) {
+            if (rnd() < 0.45) {
+              it.blocked = null;
+              toast(`◈ Unblocked: ${it.title}`);
+            }
+            return;
+          }
+          if (rnd() < 0.55) {
+            crossInto(it, "needsme", "you");
+            it.autoFiledDay = day;
+          } else if (rnd() < 0.08) {
+            if (rnd() < 0.5) {
+              // blocked on you → rises immediately, pink ticket attached
+              it.blocked = {
+                reason: BLOCK_REASONS_YOU[Math.floor(rnd() * BLOCK_REASONS_YOU.length)],
+                day,
+              };
+              crossInto(it, "needsme", "you");
+              it.autoFiledDay = day;
+              toast(`◈ “${it.title}” is blocked on you — it re-emerged to Needs me.`, "warn");
+            } else {
+              it.blocked = {
+                reason: BLOCK_REASONS_LANE[Math.floor(rnd() * BLOCK_REASONS_LANE.length)],
+                day,
+              };
+            }
+          }
+        });
+        agentAutopull();
+        if (auto) {
+          // autopilot models you pulling promptly, respecting your own limits
+          inStage("proving").forEach((it) => {
+            if (rnd() < 0.6) crossInto(it, "done", "you");
+          });
+          inStage("doing").forEach((it) => {
+            if (rnd() < 0.5 && inStage("proving").length < COLS.proving.limit)
+              crossInto(it, "proving", "you");
+          });
+          while (inStage("doing").length < COLS.doing.limit) {
+            const q = inStage("needsme").sort(pullPriority)[0];
+            if (!q) break;
+            crossInto(q, "doing", "you");
+          }
+        }
+        // arrivals: 0–2 new conversations; some come in unfiled until the classifier runs
+        const n = rnd() < 0.35 ? 0 : rnd() < 0.75 ? 1 : 2;
+        for (let i = 0; i < n; i++) {
+          const [t, p, c] = ARRIVALS[Math.floor(rnd() * ARRIVALS.length)];
+          const unfiled = rnd() < 0.4;
+          const it = mk(unfiled ? "unfiled" : "backlog", t, p, c, {
+            arrivedDay: day,
+            enteredStageDay: day,
+          });
+          if (!unfiled) it.autoFiledDay = day;
+          if (c === "fixed") it.dueDay = day + 10 + Math.floor(rnd() * 10);
+        }
+        // backlog triage: the XIT policy — auto-delete at 30 d
+        for (let i = items.length - 1; i >= 0; i--) {
+          const it = items[i];
+          if (it.stage === "backlog" && day - it.arrivedDay >= TRIAGE_DAYS) {
+            items.splice(i, 1);
+            toast(
+              `🗑 Triage: “${it.title}” aged out at ${TRIAGE_DAYS} d — deleted (XIT policy).`,
+              "warn",
+            );
+          }
+        }
+        history.push({
+          day,
+          committed: cum.committed,
+          started: cum.started,
+          buffered: cum.buffered,
+          desk: cum.desk,
+          delivered: cum.delivered,
+        });
+        if (history.length > 45) history.shift();
+        renderAll();
+      }
+      $("#btn-day").addEventListener("click", () => advanceDay(false));
+      $("#btn-sim").addEventListener("click", () => {
+        const b = $("#btn-sim");
+        if (simTimer) {
+          clearInterval(simTimer);
+          simTimer = null;
+          b.textContent = "▶ Simulate";
+          b.classList.remove("playing");
+        } else {
+          simTimer = setInterval(() => advanceDay(true), 1300);
+          b.textContent = "⏸ Simulating";
+          b.classList.add("playing");
+          advanceDay(true);
+        }
+      });
+
+      // ---------- cards ----------
+      function cardNode(it, opts = {}) {
+        const n = el("div", "card");
+        n.style.setProperty("--cos", COS[it.cos].color);
+        n.draggable = true;
+        n.tabIndex = 0;
+        n.dataset.id = it.id;
+        if (it.blocked) n.classList.add("blocked");
+        if (it.cos === "expedite") {
+          n.classList.add("expedite");
+          n.append(el("span", "star", "★"));
+        }
+        if (opts.next) n.append(el("span", "next-tag", "NEXT"));
+        n.append(el("div", "title", it.title));
+        const meta = el("div", "meta");
+        meta.append(el("span", "id mono", it.id));
+        meta.append(el("span", "pchip", it.project));
+        const ct = el("span", "cos-tag");
+        ct.append(
+          el("i", null, COS[it.cos].icon),
+          it.cos === "fixed" && it.dueDay != null ? `d${it.dueDay}` : COS[it.cos].label,
+        );
+        ct.title = COS[it.cos].label + " — " + COS[it.cos].hint;
+        meta.append(ct);
+        if (it.reemergedDay === day || it.reemergedDay === day - 1) {
+          const r = el("span", "pchip reemerged", "↑ re-emerged");
+          r.title = "Rose from an agent lane — it needs you now";
+          meta.append(r);
+        }
+        if (it.pinned) {
+          const p = el("span", "pchip pinned", "📌");
+          p.title = "Pinned by you — the classifier won't move it";
+          meta.append(p);
+        } else if (it.autoFiledDay != null) {
+          const a = el("span", "pchip auto", "✨");
+          a.title = `Auto-filed by the title-task model (d${it.autoFiledDay})`;
+          meta.append(a);
+        }
+        // aging dots: one per stationary day (Part 15)
+        const stayed = Math.max(0, day - it.enteredStageDay);
+        if (stayed > 0 && !["done", "backlog", "unfiled"].includes(it.stage)) {
+          const age = el("span", "age");
+          age.title = `${stayed} day(s) without moving`;
+          for (let d = 0; d < Math.min(stayed, 5); d++) {
+            const dot = el("i");
+            if (stayed >= 3) dot.classList.add("hot");
+            age.append(dot);
+          }
+          if (stayed > 5) age.append(el("em", null, "+" + (stayed - 5)));
+          meta.append(age);
+        }
+        if (it.stage === "backlog" && day - it.arrivedDay >= STALE_DAYS) {
+          n.style.opacity = ".55";
+          meta.append(el("span", "pchip", "stale — triage?"));
+        }
+        n.append(meta);
+        if (it.stage === "working" && !it.blocked)
+          n.append(el("div", "working-note", "agent working"));
+        if (it.blocked) {
+          const iss = el("div", "issue");
+          iss.append(el("b", null, "◈ ISSUE · "), it.blocked.reason);
+          n.append(iss);
+        }
+        if (opts.pullTo) {
+          const b = el("button", "pull-btn", "PULL → " + COLS[opts.pullTo].name);
+          b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            move(it, opts.pullTo, "you", "you");
+          });
+          n.append(b);
+        }
+        n.addEventListener("dragstart", (e) => {
+          e.dataTransfer.setData("text/plain", it.id);
+          n.classList.add("dragging");
+        });
+        n.addEventListener("dragend", () => n.classList.remove("dragging"));
+        n.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openCardPopover(it, n);
+        });
+        return n;
+      }
+
+      // ---------- 2D grid rendering ----------
+      const COL_ORDER = ["backlog", "ready", "working", "needsme", "doing", "proving", "done"];
+      const COL_TRACK = Object.fromEntries(COL_ORDER.map((c, i) => [c, i + 2])); // track 1 = lane headers
+      function makeDroppable(node, stage, lane) {
+        node.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          node.classList.add("over");
+        });
+        node.addEventListener("dragleave", () => node.classList.remove("over"));
+        node.addEventListener("drop", (e) => {
+          e.preventDefault();
+          node.classList.remove("over");
+          const it = items.find((i) => i.id === e.dataTransfer.getData("text/plain"));
+          if (it && !move(it, stage, lane, "you")) {
+            node.classList.add("reject");
+            setTimeout(() => node.classList.remove("reject"), 400);
+          }
+        });
+      }
+      function renderGrid() {
+        const grid = $("#grid");
+        grid.textContent = "";
+        // corner + column headers
+        const corner = el("div");
+        corner.style.gridColumn = "1";
+        corner.style.gridRow = "1";
+        grid.append(corner);
+        COL_ORDER.forEach((cid) => {
+          const col = COLS[cid];
+          const list = inStage(cid);
+          const h = el("div", "gh" + (cid === "ready" ? " commit-edge" : ""));
+          h.style.gridColumn = String(COL_TRACK[cid]);
+          h.style.gridRow = "1";
+          const r1 = el("div", "row1");
+          r1.append(el("h2", null, col.name));
+          if (col.limit != null) {
+            const st = el("span", "stepper");
+            const minus = el("button", null, "–"),
+              plus = el("button", null, "+");
+            minus.title = "Lower the WIP limit (policy change)";
+            plus.title = "Raise the WIP limit (policy change)";
+            minus.addEventListener("click", (e) => {
+              e.stopPropagation();
+              if (col.limit > 1) {
+                col.limit--;
+                limitChanged(col.name, col.limit);
+              }
+            });
+            plus.addEventListener("click", (e) => {
+              e.stopPropagation();
+              col.limit++;
+              limitChanged(col.name, col.limit);
+            });
+            st.append(minus, plus);
+            r1.append(st);
+          }
+          let countTxt,
+            isFull = false,
+            isOver = false;
+          if (cid === "working") {
+            const cap = LANES.filter((l) => l.id !== "you").reduce((a, l) => a + l.limit, 0);
+            countTxt = `${list.length}/Σ${cap}`;
+            isFull = list.length >= cap;
+            isOver = list.length > cap;
+          } else if (col.limit != null) {
+            countTxt = `${list.length}/${col.limit}`;
+            isFull = list.length >= col.limit;
+            isOver = list.length > col.limit;
+          } else countTxt = String(list.length);
+          const count = el("span", "count", countTxt);
+          if (isOver) count.classList.add("overflow");
+          else if (isFull) count.classList.add("full");
+          r1.append(count);
+          const pol = el("button", "icon-btn", "ⓘ");
+          pol.title = "Explicit policies (Part 7)";
+          pol.addEventListener("click", (e) => {
+            e.stopPropagation();
+            openPolicyPopover(cid, pol);
+          });
+          r1.append(pol);
+          h.append(r1, el("div", "sub", col.sub + (cid === "ready" ? " ‖" : "")));
+          if (col.flow) h.append(el("div", "flow", col.flow));
+          grid.append(h);
+        });
+
+        // lane headers
+        LANES.forEach((l, li) => {
+          const h = el("div", "lane-hd" + (l.id === "you" ? " you" : ""));
+          h.style.gridColumn = "1";
+          h.style.gridRow = String(li + 2);
+          const who = el("div", "who");
+          const i = el("i", null, l.id === "you" ? "★" : l.name[0].toUpperCase());
+          i.style.background = l.color;
+          who.append(i, l.id === "you" ? "You" : l.name);
+          h.append(who);
+          if (l.id === "you") {
+            h.append(el("div", "st", "the bottleneck — this row is what the limits protect"));
+          } else {
+            const busy = inLaneWorking(l.id).length;
+            const lim = el("div", "lim");
+            lim.append(`${busy}/${l.limit} `);
+            const st = el("span", "stepper");
+            const minus = el("button", null, "–"),
+              plus = el("button", null, "+");
+            minus.title = "Lower this lane's WIP limit";
+            plus.title = "Raise this lane's WIP limit";
+            minus.addEventListener("click", (e) => {
+              e.stopPropagation();
+              if (l.limit > 1) {
+                l.limit--;
+                limitChanged(l.name + " lane", l.limit);
+              }
+            });
+            plus.addEventListener("click", (e) => {
+              e.stopPropagation();
+              l.limit++;
+              limitChanged(l.name + " lane", l.limit);
+            });
+            st.append(minus, plus);
+            lim.append(st);
+            h.append(lim);
+            h.append(
+              el(
+                "div",
+                "st" + (busy ? " busy" : ""),
+                busy ? "working autonomously" : "idle — will pull from Ready",
+              ),
+            );
+          }
+          grid.append(h);
+        });
+
+        // rails: Backlog + Delivered span every lane
+        ["backlog", "done"].forEach((cid) => {
+          const cell = el("div", "cell rail you-cell");
+          cell.style.gridColumn = String(COL_TRACK[cid]);
+          makeDroppable(cell, cid, "you");
+          let list = inStage(cid);
+          if (cid === "done") {
+            list = list.slice().sort((a, b) => (b.doneDay ?? 0) - (a.doneDay ?? 0));
+            const extra = list.length - 6;
+            list = list.slice(0, 6);
+            list.forEach((it) => cell.append(cardNode(it)));
+            if (extra > 0) cell.append(el("div", "more-note", `+ ${extra} more delivered`));
+          } else {
+            list.forEach((it) => cell.append(cardNode(it)));
+          }
+          grid.append(cell);
+        });
+
+        // body cells
+        LANES.forEach((l, li) => {
+          const row = li + 2;
+          ["ready", "working", "needsme", "doing", "proving"].forEach((cid) => {
+            let cell;
+            if (l.id === "you" && cid === "working") {
+              cell = el("div", "cell chute");
+              cell.textContent =
+                "↓ delegated — lives in a lane below · ↑ rises here when it needs you";
+              makeDroppable(cell, "working", "you"); // rejects with the ownership rule
+            } else if (l.id !== "you" && cid !== "working") {
+              cell = el("div", "cell ghost", "·");
+              makeDroppable(cell, cid, l.id); // rejects with the ownership rule
+            } else if (cid === "working") {
+              cell = el("div", "cell");
+              cell.dataset.cell = `working:${l.id}`;
+              makeDroppable(cell, "working", l.id);
+              const list = inLaneWorking(l.id).sort(pullPriority);
+              list.forEach((it) => cell.append(cardNode(it)));
+              for (let s = list.length; s < l.limit; s++) {
+                const slot = el("div", "slot");
+                if (inStage("ready").length > 0) {
+                  slot.classList.add("agent-signal");
+                  slot.textContent = "will pull from ready";
+                } else slot.textContent = "free slot";
+                cell.append(slot);
+              }
+            } else {
+              cell = el("div", "cell you-cell" + (cid === "ready" ? " commit-edge" : ""));
+              cell.dataset.cell = `${cid}:you`;
+              makeDroppable(cell, cid, "you");
+              const col = COLS[cid];
+              let list = inStage(cid);
+              if (cid === "needsme") list = list.slice().sort(pullPriority);
+              list.forEach((it, idx) => {
+                const opts = {};
+                if (cid === "needsme" && idx === 0) {
+                  opts.next = true;
+                  if (inStage("doing").length < COLS.doing.limit) opts.pullTo = "doing";
+                }
+                cell.append(cardNode(it, opts));
+              });
+              if (col.limit != null) {
+                for (let s = list.length; s < col.limit; s++) {
+                  const slot = el("div", "slot", "free slot");
+                  const feeder = { ready: "backlog", doing: "needsme", proving: "doing" }[cid];
+                  if (
+                    (cid === "doing" || cid === "proving") &&
+                    feeder &&
+                    inStage(feeder).length > 0
+                  ) {
+                    slot.classList.add("signal");
+                    slot.textContent = "pull signal";
+                  }
+                  cell.append(slot);
+                }
+              }
+            }
+            cell.style.gridColumn = String(COL_TRACK[cid]);
+            cell.style.gridRow = String(row);
+            grid.append(cell);
+          });
+        });
+
+        const fn = $("#failload-note");
+        fn.textContent = "";
+        const b = el("b", null, String(failureLoad));
+        fn.append(
+          "Failure load this window: ",
+          b,
+          " item(s) sent back down a lane for rework — demand that only recovers value which should already have been there (Part 34).",
+        );
+      }
+
+      function limitChanged(name, limit) {
+        const t = $("#littles-tile");
+        t.classList.remove("flash");
+        void t.offsetWidth;
+        t.classList.add("flash");
+        toast(`Policy change: ${name} WIP limit is now ${limit}. Watch Little’s Law.`);
+        renderAll();
+      }
+
+      // ---------- popovers ----------
+      const pop = $("#popover"),
+        backdrop = $("#backdrop");
+      function openPopover(anchor) {
+        const r = anchor.getBoundingClientRect();
+        pop.style.display = "block";
+        const w = 280,
+          x = Math.min(window.innerWidth - w - 12, Math.max(12, r.left - 20));
+        pop.style.left = x + "px";
+        pop.style.top = Math.min(window.innerHeight - 60, r.bottom + 8) + "px";
+        backdrop.style.display = "block";
+      }
+      function closeOverlays() {
+        pop.style.display = "none";
+        backdrop.style.display = "none";
+        $("#modal").style.display = "none";
+        endWalk(false);
+      }
+      backdrop.addEventListener("click", closeOverlays);
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeOverlays();
+      });
+
+      function openPolicyPopover(cid, anchor) {
+        const col = COLS[cid];
+        pop.textContent = "";
+        pop.append(el("h4", null, col.name + " — explicit policies"));
+        const ul = el("ul");
+        col.policies.forEach((p) => ul.append(el("li", null, p)));
+        pop.append(ul);
+        openPopover(anchor);
+      }
+
+      function openCardPopover(it, anchor) {
+        pop.textContent = "";
+        pop.append(el("h4", null, it.title));
+        pop.append(
+          el(
+            "div",
+            "meta-line",
+            `${it.id} · ${it.project} · lane: ${laneById[it.lane]?.name ?? it.lane} · arrived d${it.arrivedDay}` +
+              (it.committedDay != null ? ` · committed d${it.committedDay}` : " · uncommitted") +
+              (it.dueDay != null ? ` · due d${it.dueDay}` : ""),
+          ),
+        );
+        pop.append(
+          el(
+            "div",
+            "meta-line",
+            it.pinned
+              ? "📌 pinned by you — the classifier won't move it"
+              : it.autoFiledDay != null
+                ? `✨ auto-filed by the title-task model on d${it.autoFiledDay}`
+                : "placement unclassified",
+          ),
+        );
+        // class of service picker
+        const row = el("div", "row");
+        Object.entries(COS).forEach(([k, c]) => {
+          const b = el("button", "mini" + (it.cos === k ? " active" : ""), `${c.icon} ${c.label}`);
+          b.style.setProperty("--cos", c.color);
+          b.title = c.hint;
+          b.addEventListener("click", () => {
+            if (k === "expedite") {
+              const cnt = items.filter(
+                (x) => x.cos === "expedite" && !["done", "backlog", "unfiled"].includes(x.stage),
+              ).length;
+              if (cnt >= EXPEDITE_LIMIT && it.cos !== "expedite") {
+                toast(
+                  `Only ${EXPEDITE_LIMIT} silver bullet in flight — a limit of one forces stakeholders to plan earlier (Part 4).`,
+                  "err",
+                );
+                return;
+              }
+            }
+            if (k === "fixed" && it.dueDay == null) it.dueDay = day + 12;
+            it.cos = k;
+            closeOverlays();
+            renderAll();
+          });
+          row.append(b);
+        });
+        pop.append(row);
+        // actions
+        const act = el("div", "row");
+        const pin = el("button", "mini", it.pinned ? "Release to auto-filing" : "📌 Pin placement");
+        pin.addEventListener("click", () => {
+          it.pinned = !it.pinned;
+          if (it.pinned) it.autoFiledDay = null;
+          closeOverlays();
+          renderAll();
+        });
+        act.append(pin);
+        const blk = el("button", "mini", it.blocked ? "◈ Unblock" : "◈ Block (pink ticket)");
+        blk.addEventListener("click", () => {
+          it.blocked = it.blocked
+            ? null
+            : { reason: BLOCK_REASONS_YOU[Math.floor(rnd() * BLOCK_REASONS_YOU.length)], day };
+          closeOverlays();
+          renderAll();
+        });
+        act.append(blk);
+        const si = SIDX[it.stage];
+        if (it.stage !== "done" && it.stage !== "unfiled") {
+          if (si > 0) {
+            const prev = STAGES[si - 1];
+            const lb = el("button", "mini", "◀ " + COLS[prev].name);
+            lb.addEventListener("click", () => {
+              closeOverlays();
+              move(it, prev, prev === "working" ? pickLane() : "you", "you");
+            });
+            act.append(lb);
+          }
+          if (si < 6) {
+            const nxt = STAGES[si + 1];
+            const rb = el("button", "mini", COLS[nxt].name + " ▶");
+            rb.addEventListener("click", () => {
+              closeOverlays();
+              move(it, nxt, nxt === "working" ? pickLane() : "you", "you");
+            });
+            act.append(rb);
+          }
+        }
+        if (it.stage === "backlog") {
+          const d = el("button", "mini", "🗑 Delete (triage)");
+          d.addEventListener("click", () => {
+            items.splice(items.indexOf(it), 1);
+            closeOverlays();
+            renderAll();
+          });
+          act.append(d);
+        }
+        pop.append(act);
+        openPopover(anchor);
+      }
+      function pickLane() {
+        // least-loaded agent lane for keyboard/button moves; drag lets you choose exactly
+        const lanes = LANES.filter((l) => l.id !== "you");
+        lanes.sort(
+          (a, b) => inLaneWorking(a.id).length / a.limit - inLaneWorking(b.id).length / b.limit,
+        );
+        return lanes[0].id;
+      }
+
+      // ---------- replenishment ----------
+      $("#btn-replenish").addEventListener("click", openReplenish);
+      function openReplenish() {
+        const m = $("#modal");
+        m.textContent = "";
+        m.append(el("h3", null, "Queue replenishment"));
+        m.append(
+          el(
+            "div",
+            "sub",
+            "“Which items would you most like delivered in the next 30 days?” — prioritization deferred to the last reasonable moment (Part 15, 18).",
+          ),
+        );
+        const alloc = el("div", "alloc");
+        const mix = { standard: 0, fixed: 0, intangible: 0, expedite: 0 };
+        items
+          .filter((i) => i.committedDay != null && i.stage !== "done")
+          .forEach((i) => mix[i.cos]++);
+        [
+          ["standard", "50%"],
+          ["fixed", "20%"],
+          ["intangible", "30%"],
+        ].forEach(([k, pct]) => {
+          const c = el("span", "chip");
+          c.append(`${COS[k].icon} ${COS[k].label} `);
+          const b = el("b", null, `${mix[k]} in flight`);
+          c.append(b, ` · target ${pct}`);
+          alloc.append(c);
+        });
+        m.append(alloc);
+        const free = COLS.ready.limit - inStage("ready").length;
+        m.append(
+          el(
+            "div",
+            "sub",
+            free > 0
+              ? `${free} free slot(s) in Ready — pulling an item commits it and starts its clock.`
+              : "Ready is full — the system is telling you not to commit more.",
+          ),
+        );
+        inStage("backlog")
+          .sort(pullPriority)
+          .forEach((it) => {
+            const r = el("div", "repl-item");
+            const s = el("div", "stripe");
+            s.style.background = COS[it.cos].color;
+            r.append(s);
+            const t = el("div", "t");
+            t.append(el("div", "n", it.title));
+            t.append(
+              el(
+                "div",
+                "m",
+                `${it.id} · ${it.project} · ${COS[it.cos].icon} ${COS[it.cos].label}` +
+                  (it.dueDay ? ` · due d${it.dueDay}` : "") +
+                  ` · waiting ${day - it.arrivedDay} d`,
+              ),
+            );
+            r.append(t);
+            const b = el("button", "btn", "Pull in");
+            if (inStage("ready").length >= COLS.ready.limit) {
+              b.disabled = true;
+              b.style.opacity = ".4";
+            }
+            b.addEventListener("click", () => {
+              if (move(it, "ready", "you", "you")) openReplenish();
+            });
+            r.append(b);
+            m.append(r);
+          });
+        const close = el("button", "btn", "Done");
+        close.style.marginTop = "6px";
+        close.addEventListener("click", closeOverlays);
+        m.append(close);
+        m.style.display = "block";
+        backdrop.style.display = "block";
+      }
+
+      // ---------- walk the board ----------
+      let walkStep = -1;
+      const WALK_ORDER = [
+        { cell: "proving:you", name: "Proving" },
+        { cell: "doing:you", name: "My Desk — Doing" },
+        { cell: "needsme:you", name: "Needs me" },
+        ...LANES.filter((l) => l.id !== "you").map((l) => ({
+          cell: `working:${l.id}`,
+          name: `${l.name} — Working`,
+          lane: l.id,
+        })),
+        { cell: "ready:you", name: "Ready" },
+      ];
+      $("#btn-walk").addEventListener("click", () => {
+        walkStep = -1;
+        nextWalk();
+      });
+      function nextWalk() {
+        document.querySelectorAll(".walk-focus").forEach((c) => c.classList.remove("walk-focus"));
+        walkStep++;
+        if (walkStep >= WALK_ORDER.length) {
+          endWalk(true);
+          return;
+        }
+        const step = WALK_ORDER[walkStep];
+        const cellEl = document.querySelector(`[data-cell="${step.cell}"]`);
+        if (!cellEl) {
+          nextWalk();
+          return;
+        }
+        cellEl.classList.add("walk-focus");
+        backdrop.style.display = "block";
+        const c = $("#walk-callout");
+        c.textContent = "";
+        c.append(
+          el("h4", null, `Walking the board ${walkStep + 1}/${WALK_ORDER.length} — ${step.name}`),
+        );
+        const [stage] = step.cell.split(":");
+        const list = step.lane ? inLaneWorking(step.lane) : inStage(stage);
+        const blocked = list.filter((i) => i.blocked);
+        const aging = list.filter((i) => !i.blocked && day - i.enteredStageDay >= 3);
+        if (blocked.length || aging.length) {
+          const ul = el("ul");
+          blocked.forEach((i) =>
+            ul.append(el("li", null, `◈ BLOCKED: ${i.title} — ${i.blocked.reason}. Who is on it?`)),
+          );
+          aging.forEach((i) =>
+            ul.append(
+              el(
+                "li",
+                null,
+                `• ${i.title} has not moved in ${day - i.enteredStageDay} d — is it really flowing?`,
+              ),
+            ),
+          );
+          c.append(
+            el("p", null, "Exceptions first — blocked and stalled items, not status theater:"),
+            ul,
+          );
+        } else {
+          c.append(
+            el(
+              "p",
+              null,
+              list.length
+                ? "Flowing. Nothing blocked, nothing stale — move on."
+                : step.lane
+                  ? "Idle lane. If Ready has work, it will pull next tick; if Ready is empty, that is a replenishment question."
+                  : "Empty. If this is the buffer, that is a starvation warning for the bottleneck.",
+            ),
+          );
+        }
+        const row = el("div", "row");
+        const nxt = el(
+          "button",
+          "btn primary",
+          walkStep === WALK_ORDER.length - 1 ? "Finish" : "Next ←",
+        );
+        nxt.addEventListener("click", nextWalk);
+        const end = el("button", "btn", "End walk");
+        end.addEventListener("click", () => endWalk(true));
+        row.append(end, nxt);
+        c.append(row);
+        const r = cellEl.getBoundingClientRect();
+        c.style.display = "block";
+        c.style.top = Math.max(70, Math.min(window.innerHeight - 220, r.top + 20)) + "px";
+        c.style.left =
+          Math.max(
+            12,
+            Math.min(window.innerWidth - 320, r.left - 310 > 0 ? r.left - 310 : r.right + 10),
+          ) + "px";
+      }
+      function endWalk(showToast) {
+        document.querySelectorAll(".walk-focus").forEach((c) => c.classList.remove("walk-focus"));
+        $("#walk-callout").style.display = "none";
+        if (walkStep >= 0) backdrop.style.display = "none";
+        if (showToast && walkStep >= WALK_ORDER.length)
+          toast("Walk complete — right to left, in the direction of pull.");
+        walkStep = -1;
+      }
+
+      // ---------- metrics ----------
+      function renderMetrics() {
+        $("#day-chip").textContent = "Day " + day;
+        const wip = wipCount();
+        const thru = Math.max(1, throughput7());
+        const lastLeads = leads.slice(-10);
+        const avgLead = lastLeads.length
+          ? lastLeads.reduce((a, l) => a + l.lead, 0) / lastLeads.length
+          : 0;
+        const eff = lastLeads.length
+          ? lastLeads.reduce((a, l) => a + l.touch / l.lead, 0) / lastLeads.length
+          : 0;
+        const ddp = lastLeads.length
+          ? lastLeads.filter((l) => l.lead <= SLA_DAYS).length / lastLeads.length
+          : 0;
+        const withUnit = (id, v, u) => {
+          const n = $(id);
+          n.textContent = v;
+          const s = document.createElement("small");
+          s.textContent = u;
+          n.append(s);
+        };
+        withUnit("#m-wip", String(wip), " conv");
+        withUnit("#m-thru", String(thru), " /wk");
+        withUnit("#m-eff", Math.round(eff * 100) + "", "%");
+        withUnit("#m-ddp", Math.round(ddp * 100) + "", "%");
+        const laneCap = LANES.filter((l) => l.id !== "you").reduce((a, l) => a + l.limit, 0);
+        const slots = COLS.ready.limit + laneCap + COLS.doing.limit + COLS.proving.limit;
+        const proj = wip / (thru / 7);
+        withUnit("#m-little", proj.toFixed(1), " days");
+        const f = $("#m-little-f");
+        f.textContent = `= ${wip} WIP ÷ ${thru}/wk · every slot filled (${slots} + buffer) would mean ~${(slots / (thru / 7)).toFixed(1)} d — the steppers are the lead-time dial`;
+        const wd = $("#m-wip-d");
+        wd.textContent =
+          wip > 14 ? "▲ high — quality risk rises non-linearly" : "● lean — defects stay linear";
+        wd.className = "delta " + (wip > 14 ? "bad" : "good");
+        const td = $("#m-thru-d");
+        td.textContent = `avg lead ${avgLead.toFixed(1)} d (last ${lastLeads.length})`;
+        td.className = "delta";
+        const dd = $("#m-ddp-d");
+        dd.textContent = `target ≤ ${SLA_DAYS} d · promise is aggregate, not per-item`;
+        dd.className = "delta " + (ddp >= 0.8 ? "good" : "bad");
+        const free = COLS.ready.limit - inStage("ready").length;
+        const badge = $("#repl-badge");
+        badge.hidden = free <= 0;
+        badge.textContent = String(free);
+        const unf = inStage("unfiled").length;
+        const ab = $("#af-badge");
+        ab.hidden = unf <= 0;
+        ab.textContent = String(unf);
+      }
+
+      // ---------- CFD (stacked bands from cumulative lines) ----------
+      const CFD_BANDS = [
+        { key: "ready", label: "Ready queue", hex: "#9ec5f4" },
+        { key: "agent", label: "Agent lanes", hex: "#6da7ec" },
+        { key: "buffer", label: "Needs me", hex: "#3987e5" },
+        { key: "desk", label: "My desk", hex: "#256abf" },
+        { key: "deliv", label: "Delivered", hex: "#184f95" },
+      ];
+      function bandsAt(row) {
+        return {
+          ready: row.committed - row.started,
+          agent: row.started - row.buffered,
+          buffer: row.buffered - row.desk,
+          desk: row.desk - row.delivered,
+          deliv: row.delivered,
+        };
+      }
+      function renderCFD() {
+        const svg = $("#cfd");
+        svg.textContent = "";
+        const W = 560,
+          H = 168,
+          padL = 30,
+          padR = 8,
+          padT = 6,
+          padB = 18;
+        const rows = history;
+        const maxY = Math.max(...rows.map((r) => r.committed)) * 1.05;
+        const x = (i) => padL + (i / (rows.length - 1)) * (W - padL - padR);
+        const y = (v) => padT + (1 - v / maxY) * (H - padT - padB);
+        const NS = "http://www.w3.org/2000/svg";
+        const mkel = (t, at) => {
+          const n = document.createElementNS(NS, t);
+          for (const k in at) n.setAttribute(k, at[k]);
+          return n;
+        };
+        const step = Math.max(5, Math.ceil(maxY / 4 / 5) * 5);
+        for (let v = 0; v <= maxY; v += step) {
+          svg.append(
+            mkel("line", {
+              x1: padL,
+              x2: W - padR,
+              y1: y(v),
+              y2: y(v),
+              stroke: "var(--viz-grid)",
+              "stroke-width": 1,
+            }),
+          );
+          const t = mkel("text", {
+            x: padL - 5,
+            y: y(v) + 3,
+            "text-anchor": "end",
+            "font-size": 8.5,
+            fill: "var(--viz-text-3)",
+            style: "font-variant-numeric: tabular-nums",
+          });
+          t.textContent = String(v);
+          svg.append(t);
+        }
+        const lines = ["committed", "started", "buffered", "desk", "delivered"];
+        for (let b = 0; b < 5; b++) {
+          const topKey = lines[b],
+            botKey = lines[b + 1];
+          let d = "M";
+          rows.forEach((r, i) => {
+            d += `${x(i).toFixed(1)},${y(r[topKey]).toFixed(1)} `;
+            if (i < rows.length - 1) d += "L";
+          });
+          for (let i = rows.length - 1; i >= 0; i--)
+            d += `L${x(i).toFixed(1)},${(botKey ? y(rows[i][botKey]) : y(0)).toFixed(1)} `;
+          d += "Z";
+          svg.append(mkel("path", { d, fill: CFD_BANDS[b].hex, "fill-opacity": 0.92 }));
+          if (botKey) {
+            let bd = "M";
+            rows.forEach((r, i) => {
+              bd += `${x(i).toFixed(1)},${y(r[botKey]).toFixed(1)} `;
+              if (i < rows.length - 1) bd += "L";
+            });
+            svg.append(
+              mkel("path", { d: bd, fill: "none", stroke: "var(--card)", "stroke-width": 2 }),
+            );
+          }
+        }
+        svg.append(
+          mkel("line", {
+            x1: padL,
+            x2: W - padR,
+            y1: y(0),
+            y2: y(0),
+            stroke: "var(--viz-axis)",
+            "stroke-width": 1,
+          }),
+        );
+        [0, Math.floor(rows.length / 2), rows.length - 1].forEach((i) => {
+          const t = mkel("text", {
+            x: x(i),
+            y: H - 5,
+            "text-anchor": i === 0 ? "start" : i === rows.length - 1 ? "end" : "middle",
+            "font-size": 8.5,
+            fill: "var(--viz-text-3)",
+          });
+          t.textContent = "d" + rows[i].day;
+          svg.append(t);
+        });
+        const cross = mkel("line", {
+          y1: padT,
+          y2: H - padB,
+          stroke: "var(--viz-text-3)",
+          "stroke-width": 1,
+          opacity: 0,
+        });
+        svg.append(cross);
+        const hit = mkel("rect", {
+          x: padL,
+          y: 0,
+          width: W - padL - padR,
+          height: H,
+          fill: "transparent",
+        });
+        const tip = $("#cfd-tip"),
+          card = $("#cfd-card");
+        hit.addEventListener("pointermove", (e) => {
+          const box = svg.getBoundingClientRect();
+          const fx = ((e.clientX - box.left) / box.width) * W;
+          const i = Math.max(
+            0,
+            Math.min(
+              rows.length - 1,
+              Math.round(((fx - padL) / (W - padL - padR)) * (rows.length - 1)),
+            ),
+          );
+          cross.setAttribute("x1", x(i));
+          cross.setAttribute("x2", x(i));
+          cross.setAttribute("opacity", "1");
+          const b = bandsAt(rows[i]);
+          tip.textContent = "";
+          tip.append(el("div", "t-head", "Day " + rows[i].day));
+          CFD_BANDS.forEach((bd) => {
+            const r = el("div", "row");
+            const k = el("span", "k");
+            const sw = el("i");
+            sw.style.background = bd.hex;
+            k.append(sw, bd.label);
+            r.append(k, el("b", null, String(Math.round(b[bd.key]))));
+            tip.append(r);
+          });
+          const wr = el("div", "row");
+          wr.append(
+            el("span", "k", "WIP total"),
+            el("b", null, String(Math.round(rows[i].committed - rows[i].delivered))),
+          );
+          tip.append(wr);
+          tip.style.display = "block";
+          const cr = card.getBoundingClientRect();
+          tip.style.left = Math.min(cr.width - 160, e.clientX - cr.left + 14) + "px";
+          tip.style.top = Math.max(4, e.clientY - cr.top - 20) + "px";
+        });
+        hit.addEventListener("pointerleave", () => {
+          tip.style.display = "none";
+          cross.setAttribute("opacity", "0");
+        });
+        svg.append(hit);
+        const lg = $("#cfd-legend");
+        lg.textContent = "";
+        CFD_BANDS.forEach((b) => {
+          const k = el("span", "key");
+          const sw = el("i", "sw");
+          sw.style.background = b.hex;
+          k.append(sw, b.label);
+          lg.append(k);
+        });
+        const tw = $("#cfd-table");
+        tw.textContent = "";
+        const tb = el("table");
+        const hr = el("tr");
+        ["Day", ...CFD_BANDS.map((b) => b.label), "WIP"].forEach((h2) =>
+          hr.append(el("th", null, h2)),
+        );
+        tb.append(hr);
+        rows.slice(-8).forEach((r) => {
+          const b = bandsAt(r);
+          const tr = el("tr");
+          tr.append(el("td", null, "d" + r.day));
+          CFD_BANDS.forEach((bd) => tr.append(el("td", null, String(Math.round(b[bd.key])))));
+          tr.append(el("td", null, String(Math.round(r.committed - r.delivered))));
+          tb.append(tr);
+        });
+        tw.append(tb);
+      }
+
+      // ---------- lead-time histogram ----------
+      function renderLead() {
+        const svg = $("#lt");
+        svg.textContent = "";
+        const W = 300,
+          H = 168,
+          padL = 24,
+          padR = 6,
+          padT = 8,
+          padB = 30;
+        const BINS = [
+          [1, 2],
+          [3, 4],
+          [5, 6],
+          [7, 8],
+          [9, 12],
+          [13, 99],
+        ];
+        const labels = ["1–2", "3–4", "5–6", "7–8", "9–12", "13+"];
+        const counts = BINS.map(([a, b]) => leads.filter((l) => l.lead >= a && l.lead <= b).length);
+        const maxC = Math.max(...counts, 1) * 1.15;
+        const NS = "http://www.w3.org/2000/svg";
+        const mkel = (t, at) => {
+          const n = document.createElementNS(NS, t);
+          for (const k in at) n.setAttribute(k, at[k]);
+          return n;
+        };
+        const bw = Math.min(24, (W - padL - padR) / BINS.length - 8);
+        const y = (v) => padT + (1 - v / maxC) * (H - padT - padB);
+        const step = Math.max(2, Math.ceil(maxC / 3 / 2) * 2);
+        for (let v = 0; v <= maxC; v += step) {
+          svg.append(
+            mkel("line", {
+              x1: padL,
+              x2: W - padR,
+              y1: y(v),
+              y2: y(v),
+              stroke: "var(--viz-grid)",
+              "stroke-width": 1,
+            }),
+          );
+          const t = mkel("text", {
+            x: padL - 4,
+            y: y(v) + 3,
+            "text-anchor": "end",
+            "font-size": 8.5,
+            fill: "var(--viz-text-3)",
+            style: "font-variant-numeric: tabular-nums",
+          });
+          t.textContent = String(v);
+          svg.append(t);
+        }
+        const tip = $("#lt-tip"),
+          card = $("#lt-card");
+        counts.forEach((c, i) => {
+          const cx = padL + ((i + 0.5) / BINS.length) * (W - padL - padR);
+          const h = Math.max(0, y(0) - y(c));
+          const bar = mkel("path", {
+            d: `M${(cx - bw / 2).toFixed(1)},${y(0).toFixed(1)} v${(-Math.max(h - 4, 0)).toFixed(1)} q0,-4 4,-4 h${(bw - 8).toFixed(1)} q4,0 4,4 v${Math.max(h - 4, 0).toFixed(1)} Z`,
+            fill: "var(--cfd-3)",
+          });
+          if (c === 0) bar.setAttribute("d", `M${cx - bw / 2},${y(0)} h${bw}`);
+          svg.append(bar);
+          const lb = mkel("text", {
+            x: cx,
+            y: H - 16,
+            "text-anchor": "middle",
+            "font-size": 8.5,
+            fill: "var(--viz-text-2)",
+          });
+          lb.textContent = labels[i];
+          svg.append(lb);
+          const hitW = Math.max(24, bw + 8);
+          const hit = mkel("rect", {
+            x: cx - hitW / 2,
+            y: padT,
+            width: hitW,
+            height: H - padT - padB,
+            fill: "transparent",
+          });
+          hit.addEventListener("pointermove", (e) => {
+            bar.setAttribute("fill", "var(--cfd-2)");
+            tip.textContent = "";
+            tip.append(el("div", "t-head", labels[i] + " days"));
+            const r = el("div", "row");
+            r.append(el("span", "k", "delivered"), el("b", null, String(c)));
+            tip.append(r);
+            tip.style.display = "block";
+            const cr = card.getBoundingClientRect();
+            tip.style.left = Math.min(cr.width - 130, e.clientX - cr.left + 12) + "px";
+            tip.style.top = e.clientY - cr.top - 34 + "px";
+          });
+          hit.addEventListener("pointerleave", () => {
+            bar.setAttribute("fill", "var(--cfd-3)");
+            tip.style.display = "none";
+          });
+          svg.append(hit);
+        });
+        svg.append(
+          mkel("line", {
+            x1: padL,
+            x2: W - padR,
+            y1: y(0),
+            y2: y(0),
+            stroke: "var(--viz-axis)",
+            "stroke-width": 1,
+          }),
+        );
+        const slaX = padL + (3.5 / BINS.length) * (W - padL - padR) + bw / 2 + 4;
+        svg.append(
+          mkel("line", {
+            x1: slaX,
+            x2: slaX,
+            y1: padT,
+            y2: y(0),
+            stroke: "var(--warning)",
+            "stroke-width": 1,
+            "stroke-dasharray": "3 3",
+            opacity: 0.8,
+          }),
+        );
+        const st = mkel("text", {
+          x: slaX + 3,
+          y: padT + 8,
+          "font-size": 8.5,
+          fill: "var(--viz-text-2)",
+        });
+        st.textContent = "SLA 8d";
+        svg.append(st);
+        const cap = mkel("text", {
+          x: padL,
+          y: H - 4,
+          "font-size": 8.5,
+          fill: "var(--viz-text-3)",
+        });
+        cap.textContent = "aggregate promise: ≤8 d at 80% — no per-item estimates";
+        svg.append(cap);
+        const tw = $("#lt-table");
+        tw.textContent = "";
+        const tb = el("table");
+        const hr = el("tr");
+        ["Bin (days)", "Delivered"].forEach((h) => hr.append(el("th", null, h)));
+        tb.append(hr);
+        labels.forEach((l, i) => {
+          const tr = el("tr");
+          tr.append(el("td", null, l), el("td", null, String(counts[i])));
+          tb.append(tr);
+        });
+        tw.append(tb);
+      }
+
+      // ---------- boot ----------
+      function renderAll() {
+        renderGrid();
+        renderMetrics();
+        renderCFD();
+        renderLead();
+      }
+      renderAll();
+      toast(
+        "2D Kanban — your flow runs left→right, agents run in lanes below and re-emerge when they need you. Two imported conversations await the ✨ classifier.",
+      );
+    </script>
+  </body>
+</html>

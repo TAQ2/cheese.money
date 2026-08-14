@@ -220,3 +220,41 @@ export function normalizeCliError(
     cause: error,
   });
 }
+
+const MAX_KANBAN_DESCRIPTION_CHARS = 180;
+const MAX_KANBAN_KEYWORDS = 3;
+const MAX_KANBAN_KEYWORD_CHARS = 24;
+
+/**
+ * Clamp the model-generated kanban card description to a two-line summary.
+ * The prompt asks for it, but a model can ignore prompt limits; capping here
+ * keeps the card layout stable regardless of which provider generated it.
+ */
+export function sanitizeKanbanDescription(description: string): string {
+  const collapsed = description.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= MAX_KANBAN_DESCRIPTION_CHARS) {
+    return collapsed;
+  }
+  return `${collapsed.slice(0, MAX_KANBAN_DESCRIPTION_CHARS - 1).trimEnd()}\u2026`;
+}
+
+/**
+ * Keep at most three short, de-duplicated keywords for the card footer.
+ */
+export function sanitizeKanbanKeywords(keywords: ReadonlyArray<string>): ReadonlyArray<string> {
+  const seen = new Set<string>();
+  const sanitized: string[] = [];
+  for (const keyword of keywords) {
+    const trimmed = keyword.replace(/\s+/g, " ").trim().slice(0, MAX_KANBAN_KEYWORD_CHARS);
+    const key = trimmed.toLowerCase();
+    if (trimmed.length === 0 || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    sanitized.push(trimmed);
+    if (sanitized.length >= MAX_KANBAN_KEYWORDS) {
+      break;
+    }
+  }
+  return sanitized;
+}

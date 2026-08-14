@@ -40,6 +40,7 @@ export type UnsettleThreadInput = CommandInput<"thread.unsettle">;
 export type SnoozeThreadInput = CommandInput<"thread.snooze">;
 export type UnsnoozeThreadInput = CommandInput<"thread.unsnooze">;
 export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
+export type UpdateThreadKanbanInput = CommandInput<"thread.kanban.update">;
 export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
 export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
 export type StartThreadTurnInput = CommandInput<"thread.turn.start">;
@@ -203,6 +204,16 @@ export const updateThreadMetadata: (input: UpdateThreadMetadataInput) => Command
   return yield* dispatch({
     ...input,
     type: "thread.meta.update",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const updateThreadKanban: (input: UpdateThreadKanbanInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.updateThreadKanban",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.kanban.update",
     commandId: yield* commandId(input),
   });
 });

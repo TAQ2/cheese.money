@@ -25,6 +25,7 @@ import {
   ThreadSettledPayload,
   ThreadSnoozedPayload,
   ThreadUnarchivedPayload,
+  ThreadKanbanUpdatedPayload,
   ThreadUnsettledPayload,
   ThreadUnsnoozedPayload,
   ThreadRevertedPayload,
@@ -295,6 +296,7 @@ export function projectEvent(
             settledAt: null,
             snoozedUntil: null,
             snoozedAt: null,
+            kanban: null,
             deletedAt: null,
             messages: [],
             activities: [],
@@ -391,6 +393,16 @@ export function projectEvent(
             snoozedUntil: null,
             snoozedAt: null,
             updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.kanban-updated":
+      return decodeForEvent(ThreadKanbanUpdatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            kanban: payload.kanban,
           }),
         })),
       );

@@ -241,6 +241,15 @@ export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boo
   );
 }
 
+/** Whether the environment's server understands thread.kanban.update.
+    Same version-skew contract as settlement. */
+export function readEnvironmentSupportsKanban(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadKanban === true
+  );
+}
+
 export function readThreadDetail(ref: ScopedThreadRef): EnvironmentThread | null {
   return appAtomRegistry.get(environmentThreadDetails.detailAtom(ref));
 }
