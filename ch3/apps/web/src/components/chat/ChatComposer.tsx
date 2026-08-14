@@ -185,6 +185,7 @@ import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
+  BookmarkIcon,
   BotIcon,
   CircleAlertIcon,
   ListTodoIcon,
@@ -3607,6 +3608,34 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
               >
+                {/* Visible affordance for the ⌘S stash — the shortcut alone is
+                    undiscoverable, so this is its click target. Same handler,
+                    so it behaves identically: with content it stashes, empty it
+                    opens the stash to restore. */}
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="ghost"
+                  data-composer-stash-button="true"
+                  className="size-8 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                  aria-label="Stash prompt"
+                  title={`Stash prompt${
+                    shortcutLabelForCommand(keybindings, "composer.stash")
+                      ? ` · ${shortcutLabelForCommand(keybindings, "composer.stash")}`
+                      : ""
+                  }`}
+                  disabled={
+                    isComposerApprovalState ||
+                    pendingUserInputs.length > 0 ||
+                    projectSelectionRequired ||
+                    activePendingProgress !== null
+                  }
+                  // Keep composer focus so Escape/typing flows stay intact.
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => void stashCurrentPrompt()}
+                >
+                  <BookmarkIcon className="size-4" aria-hidden="true" />
+                </Button>
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
