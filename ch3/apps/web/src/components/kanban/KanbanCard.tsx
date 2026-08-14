@@ -5,6 +5,7 @@ import type { CSSProperties } from "react";
 
 import { cn } from "../../lib/utils";
 import type { SidebarThreadSummary } from "../../types";
+import { ProjectFavicon } from "../ProjectFavicon";
 import { kanbanCardType } from "./Kanban.logic";
 import { KANBAN_CARD_TYPES, kanbanCardTypeConfig, type KanbanCardTypeConfig } from "./kanbanConfig";
 
@@ -15,6 +16,8 @@ export interface KanbanCardProps {
       those columns are holding areas, not flow (F11). */
   readonly compact?: boolean;
   readonly projectTitle: string;
+  /** Project workspace root — source for the favicon (folder-icon fallback). */
+  readonly projectCwd: string;
   readonly canMoveLeft: boolean;
   readonly canMoveRight: boolean;
   readonly onOpen: (thread: SidebarThreadSummary) => void;
@@ -38,6 +41,7 @@ export function KanbanCard({
   lane,
   compact = false,
   projectTitle,
+  projectCwd,
   canMoveLeft,
   canMoveRight,
   onOpen,
@@ -128,15 +132,24 @@ export function KanbanCard({
         ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span
-          aria-label={projectTitle}
-          title={projectTitle}
-          className="size-1.5 flex-none rounded-full bg-muted-foreground/50"
+      <div className="flex items-center gap-1.5">
+        {/* Project identity — the favicon (folder-icon fallback) plus the
+            name, always visible so a card's project reads at a glance instead
+            of hiding in a 1.5px dot's tooltip. The name is the guaranteed
+            marker when no favicon exists; it grows and truncates, pushing the
+            type dot and move controls to the right edge. */}
+        <ProjectFavicon
+          environmentId={thread.environmentId}
+          cwd={projectCwd}
+          className="size-3.5 shrink-0 text-muted-foreground/70"
         />
-        {compact ? (
-          <span className="truncate text-[10px] text-muted-foreground">{projectTitle}</span>
-        ) : (
+        <span
+          className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground"
+          title={projectTitle}
+        >
+          {projectTitle}
+        </span>
+        {!compact ? (
           // The type is a colored dot, not a label: hue carries the class of
           // service, the tooltip carries the words — and clicking opens the
           // FULL type dropdown (an invisible native select over the dot).
@@ -165,7 +178,7 @@ export function KanbanCard({
               )}
             </select>
           </span>
-        )}
+        ) : null}
         {!compact && cardType === "deadline" ? (
           <input
             type="date"
@@ -183,8 +196,6 @@ export function KanbanCard({
             }
           />
         ) : null}
-
-        <span className="flex-1" />
 
         {/* The pin state and both move arrows are one atomic cluster: grouped
             and flex-none so flex-wrap can never orphan the right arrow on its

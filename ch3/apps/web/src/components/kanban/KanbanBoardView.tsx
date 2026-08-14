@@ -336,12 +336,18 @@ export function KanbanBoardView() {
     }
   }, [filterableProjects, filters.projectKey]);
 
-  const projectTitles = useMemo(() => {
-    const titles = new Map<string, string>();
+  // Title + workspace root per project: the card renders a favicon from the
+  // root (folder-icon fallback) plus the name, so a card's project is always
+  // legible instead of a tooltip-only dot.
+  const projectMeta = useMemo(() => {
+    const meta = new Map<string, { readonly title: string; readonly cwd: string }>();
     for (const project of projects) {
-      titles.set(`${project.environmentId}:${project.id}`, project.title);
+      meta.set(`${project.environmentId}:${project.id}`, {
+        title: project.title,
+        cwd: project.workspaceRoot,
+      });
     }
-    return titles;
+    return meta;
   }, [projects]);
 
   const dispatchKanban = useCallback(
@@ -1115,7 +1121,7 @@ export function KanbanBoardView() {
                 editMode={editMode}
                 onDeleteColumn={isBuiltinKanbanColumn(cell.columnId) ? null : deleteColumn}
                 onCardContextMenu={(thread, x, y) => setCardMenu({ thread, x, y })}
-                projectTitles={projectTitles}
+                projectMeta={projectMeta}
                 onDragEnter={() => setDragOverColumn(cell.columnId)}
                 onDragLeaveColumn={() => setDragOverColumn(null)}
                 onDrop={handleDrop}
@@ -1181,7 +1187,7 @@ function KanbanColumn({
   editMode,
   onDeleteColumn,
   onCardContextMenu,
-  projectTitles,
+  projectMeta,
   onDragEnter,
   onDragLeaveColumn,
   onDrop,
@@ -1205,7 +1211,7 @@ function KanbanColumn({
   /** Present only for user-created columns — built-ins cannot be deleted. */
   readonly onDeleteColumn: ((columnId: KanbanColumnId) => void) | null;
   readonly onCardContextMenu: (thread: SidebarThreadSummary, x: number, y: number) => void;
-  readonly projectTitles: ReadonlyMap<string, string>;
+  readonly projectMeta: ReadonlyMap<string, { readonly title: string; readonly cwd: string }>;
   readonly onDragEnter: () => void;
   readonly onDragLeaveColumn: () => void;
   readonly onDrop: (event: DragEvent, target: KanbanColumnId) => void;
@@ -1222,13 +1228,15 @@ function KanbanColumn({
   const isDerived = cell.columnId === "snoozed" || cell.columnId === "settled";
   const isEmpty =
     cell.userCards.length === 0 && cell.waitingCards.length === 0 && cell.agentCards.length === 0;
-  const cardProps = (thread: SidebarThreadSummary, lane: "user" | "agent" | "waiting") => ({
+  const cardProps = (thread: SidebarThreadSummary, lane: "user" | "agent" | "waiting") => {
+    const meta = projectMeta.get(`${thread.environmentId}:${thread.projectId}`);
+    return {
     thread,
     lane,
     compact: isDerived,
     cardTypes,
-    projectTitle:
-      projectTitles.get(`${thread.environmentId}:${thread.projectId}`) ?? "Unknown project",
+    projectTitle: meta?.title ?? "Unknown project",
+    projectCwd: meta?.cwd ?? "",
     canMoveLeft: adjacentKanbanColumn(cell.columnId, -1, columns) !== null,
     canMoveRight: adjacentKanbanColumn(cell.columnId, 1, columns) !== null,
     onContextMenu: onCardContextMenu,
@@ -1237,7 +1245,8 @@ function KanbanColumn({
     onSetType,
     onSetDeadline,
     onTogglePin,
-  });
+    };
+  };
 
   return (
     <section
