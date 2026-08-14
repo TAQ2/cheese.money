@@ -271,6 +271,17 @@ export const clearClaudeUsageCache = (): void => {
   usageRetryAfter.clear();
 };
 
+/**
+ * Drops one account's cached reading and its 429 back-off. Scoped on purpose:
+ * clearing the whole cache on a single account's sign-out would wipe every
+ * OTHER account's `retry-after` too, so the next poll would ask an account
+ * mid-penalty and re-earn the 429 this cache exists to avoid.
+ */
+export const clearClaudeUsageCacheForAccount = (accountKey: string): void => {
+  usageCache.delete(accountKey);
+  usageRetryAfter.delete(accountKey);
+};
+
 const cachedWithin = (key: string, nowMs: number, windowMs: number): CachedUsage | undefined => {
   const cached = usageCache.get(key);
   return cached && nowMs - cached.atMs < windowMs ? cached : undefined;

@@ -234,9 +234,22 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
           description: `${signedOut} is signed out. Sign back in from the same row whenever you want.`,
         }),
       );
-      await refresh();
+      // Update only the signed-out row, in place, from the re-probed profile.
+      // A blanket refresh() would re-list EVERY account with usage — a burst of
+      // reads against the same rate-limited endpoint the whole redesign exists
+      // to spare. Sign-out is directory-scoped, so no other row changes.
+      // `isCurrent` is preserved from the existing row: the re-probe always
+      // reports false, but the instance's selection has not moved.
+      const next = result.value.profile;
+      setProfiles((current) =>
+        current === null
+          ? current
+          : current.map((entry) =>
+              entry.homePath === next.homePath ? { ...next, isCurrent: entry.isCurrent } : entry,
+            ),
+      );
     },
-    [environmentId, refresh, signOut],
+    [environmentId, signOut],
   );
 
   // Read on mount AND whenever the selected home path changes: the popover
@@ -401,7 +414,17 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
                       title={`Sign ${claudeProfilePrimaryLabel(profile)} out`}
                       aria-label={`Sign ${claudeProfilePrimaryLabel(profile)} out`}
                       disabled={busy !== null}
-                      onClick={() => setSignOutConfirm(profile.homePath)}
+                      onClick={() => {
+                        setSignOutConfirm(profile.homePath);
+                        // Signing out the in-use account strands the instance
+                        // on a signed-out directory until failover or a manual
+                        // switch — warn before the confirm, not after.
+                        setNotice(
+                          profile.isCurrent
+                            ? "This is the account in use — after signing out, its threads fail until you switch accounts or sign in again."
+                            : null,
+                        );
+                      }}
                     >
                       <LogOutIcon className="size-3.5" />
                     </Button>

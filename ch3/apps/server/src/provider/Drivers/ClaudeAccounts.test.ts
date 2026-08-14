@@ -4,7 +4,11 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { discoverClaudeProfilePaths, readClaudeAccountIdentity } from "./ClaudeAccounts.ts";
+import {
+  anotherProfileSharesClaudeIdentity,
+  discoverClaudeProfilePaths,
+  readClaudeAccountIdentity,
+} from "./ClaudeAccounts.ts";
 
 // Both payloads are the real shapes on this machine, trimmed to the keys that
 // matter. The personal account writes JSON null for `userRateLimitTier`; the
@@ -169,6 +173,58 @@ it.layer(NodeServices.layer)("Claude profile discovery", (it) => {
 
         expect(found).toContain(account);
         expect(found).not.toContain(lock);
+      }),
+    ),
+  );
+
+  // The M2 decision: sign-out spares the shared legacy Keychain credential
+  // only when another directory is signed into the SAME account + org.
+  it.effect("sees a sibling directory signed into the same account and organization", () =>
+    withFakeHome((fakeHome) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        // Default home and a second directory, both signed into the same
+        // account/org — the borrow topology where the legacy credential is
+        // shared.
+        yield* fs.writeFileString(path.join(fakeHome, ".claude.json"), personalConfig);
+        const sibling = path.join(fakeHome, ".claude-personal-2");
+        yield* fs.makeDirectory(sibling, { recursive: true });
+        yield* fs.writeFileString(path.join(sibling, ".claude.json"), personalConfig);
+        // A work org on the same EMAIL must not count — different organization.
+        const work = path.join(fakeHome, ".claude-work");
+        yield* fs.makeDirectory(work, { recursive: true });
+        yield* fs.writeFileString(path.join(work, ".claude.json"), workConfig);
+
+        const shared = yield* anotherProfileSharesClaudeIdentity({
+          excludeHomePath: path.join(fakeHome, ".claude"),
+          identity: readClaudeAccountIdentity(personalConfig),
+        });
+
+        expect(shared).toBe(true);
+      }),
+    ),
+  );
+
+  it.effect("does not treat a different organization on the same email as a sibling", () =>
+    withFakeHome((fakeHome) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        // Only the default holds the personal identity, and it is excluded; the
+        // work directory shares the email but not the org, so nothing borrows
+        // the personal account's credential — sign-out may delete it.
+        yield* fs.writeFileString(path.join(fakeHome, ".claude.json"), personalConfig);
+        const work = path.join(fakeHome, ".claude-work");
+        yield* fs.makeDirectory(work, { recursive: true });
+        yield* fs.writeFileString(path.join(work, ".claude.json"), workConfig);
+
+        const shared = yield* anotherProfileSharesClaudeIdentity({
+          excludeHomePath: path.join(fakeHome, ".claude"),
+          identity: readClaudeAccountIdentity(personalConfig),
+        });
+
+        expect(shared).toBe(false);
       }),
     ),
   );

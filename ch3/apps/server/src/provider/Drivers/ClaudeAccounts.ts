@@ -33,7 +33,7 @@ import { expandHomePath } from "../../pathExpansion.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import {
   claudeCredentialServices,
-  clearClaudeUsageCache,
+  clearClaudeUsageCacheForAccount,
   type ClaudeAccountUsageFetch,
   fetchClaudeAccountUsage,
 } from "./ClaudeAccountUsage.ts";
@@ -386,23 +386,101 @@ const removeOauthAccountFromConfig = Effect.fn("removeOauthAccountFromConfig")(f
   delete config.oauthAccount;
   // @effect-diagnostics-next-line preferSchemaOverJson:off
   const serialized = JSON.stringify(config, null, 2);
-  yield* fs.writeFileString(configPath, `${serialized}\n`).pipe(Effect.orElseSucceed(() => {}));
+  // Atomic replace: `~/.claude.json` (the default home's config) is the large
+  // file the CLI writes to constantly, so a bare truncate-and-write could be
+  // torn by a crash or clobbered by a concurrent CLI write. Write a sibling
+  // and rename it into place — atomic on the same filesystem — so a reader
+  // (the CLI, or our own next probe) sees either the old file or the new one,
+  // never a half-written one.
+  const path = yield* Path.Path;
+  const tempPath = path.join(
+    path.dirname(configPath),
+    `.${path.basename(configPath)}.ch3-signout-tmp`,
+  );
+  const wrote = yield* fs
+    .writeFileString(tempPath, `${serialized}\n`)
+    .pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+  if (!wrote) return;
+  const renamed = yield* fs
+    .rename(tempPath, configPath)
+    .pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+  if (!renamed) {
+    // Rename failed: drop the temp file rather than leave a stray sibling,
+    // and leave the original config untouched.
+    yield* fs.remove(tempPath).pipe(Effect.orElseSucceed(() => {}));
+  }
 });
+
+/** The account config path for a profile home: beside the default, inside a custom dir. */
+const claudeProfileConfigPath = (input: {
+  readonly homePath: string;
+  readonly home: string;
+  readonly defaultDir: string;
+  readonly join: (a: string, b: string) => string;
+}): string =>
+  input.homePath === input.defaultDir
+    ? input.join(input.home, ".claude.json")
+    : input.join(input.homePath, ".claude.json");
+
+/** Two identities are the same account when email AND organization match, and there is an email. */
+const claudeIdentitiesMatch = (a: ClaudeAccountIdentity, b: ClaudeAccountIdentity): boolean =>
+  (a.email ?? "").length > 0 &&
+  (a.email ?? "") === (b.email ?? "") &&
+  (a.organizationName ?? "") === (b.organizationName ?? "");
+
+/**
+ * Whether a signed-in profile OTHER than `excludeHomePath` is signed into the
+ * same account and organization.
+ *
+ * The CLI keeps ONE credential per account, so a custom directory signed into
+ * the same account as the default home BORROWS the default's legacy Keychain
+ * entry. Sign-out uses this to decide whether that shared entry is still
+ * needed. File reads only — no network, no subprocess.
+ */
+export const anotherProfileSharesClaudeIdentity = Effect.fn("anotherProfileSharesClaudeIdentity")(
+  function* (input: { readonly excludeHomePath: string; readonly identity: ClaudeAccountIdentity }) {
+    if ((input.identity.email ?? "").length === 0) return false;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = NodeOS.homedir();
+    const defaultDir = yield* defaultClaudeConfigDirPath();
+    const candidates = yield* discoverClaudeProfilePaths({ configuredHomePath: "" });
+    for (const candidate of candidates) {
+      if (candidate === input.excludeHomePath) continue;
+      const configPath = claudeProfileConfigPath({
+        homePath: candidate,
+        home,
+        defaultDir,
+        join: (a, b) => path.join(a, b),
+      });
+      const raw = yield* fs.readFileString(configPath).pipe(Effect.orElseSucceed(() => ""));
+      if (claudeIdentitiesMatch(readClaudeAccountIdentity(raw), input.identity)) return true;
+    }
+    return false;
+  },
+);
 
 /**
  * Signs an account out: the reverse of `startClaudeAccountLogin`, scoped to
  * ONE config directory so every other account stays signed in.
  *
- * Clears all three places the CLI keeps a session — the Keychain credential
- * (both the hashed entry and, for the default home, the legacy unsuffixed
- * one), the on-disk `.credentials.json`, and the `oauthAccount` in the config
- * — then drops the usage cache so the row cannot keep showing the signed-out
- * account's last numbers. Every step is best-effort: a missing Keychain entry
- * or credentials file is success, not failure, because the goal state is
- * "no session here", which a missing artifact already satisfies.
+ * Clears the three places the CLI keeps a session — the Keychain credential,
+ * the on-disk `.credentials.json`, and the `oauthAccount` in the config — then
+ * drops ONLY this account's usage cache. Every step is best-effort: a missing
+ * artifact is success, because the goal state is "no session here".
  *
- * Returns the re-probed profile, now reading as signed out, so the caller can
- * render the "Sign in" affordance on the same row without a second round-trip.
+ * The one cross-account subtlety: the legacy unsuffixed Keychain entry is the
+ * account's SHARED credential, borrowed by any other directory signed into the
+ * same account. It is deleted only when nothing else shares this identity, so
+ * signing out the default home cannot silently sign a sibling out too.
+ *
+ * Returns the re-probed profile, now reading as signed out.
  */
 export const signOutClaudeAccount = Effect.fn("signOutClaudeAccount")(function* (input: {
   readonly homePath: string;
@@ -412,11 +490,33 @@ export const signOutClaudeAccount = Effect.fn("signOutClaudeAccount")(function* 
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const home = NodeOS.homedir();
   const homePath = path.resolve(expandHomePath(input.homePath.trim()));
-  const isDefaultHome = homePath === (yield* defaultClaudeConfigDirPath());
+  const defaultDir = yield* defaultClaudeConfigDirPath();
+  const isDefaultHome = homePath === defaultDir;
+  const configPath = claudeProfileConfigPath({
+    homePath,
+    home,
+    defaultDir,
+    join: (a, b) => path.join(a, b),
+  });
+
+  // Identity of the directory being signed out, read BEFORE it is stripped: it
+  // keys the cache eviction and decides whether the shared legacy credential
+  // is still borrowed by a sibling.
+  const identity = readClaudeAccountIdentity(
+    yield* fs.readFileString(configPath).pipe(Effect.orElseSucceed(() => "")),
+  );
+  // On the safe side of an unreadable sibling: default to SPARING the shared
+  // credential, never deleting one another directory might still borrow.
+  const sharedByAnother = yield* anotherProfileSharesClaudeIdentity({
+    excludeHomePath: homePath,
+    identity,
+  }).pipe(Effect.orElseSucceed(() => true));
 
   // Keychain first: the credential is what actually authorizes turns, so a
-  // sign-out that left it behind would not be one.
+  // sign-out that left it behind would not be one. The legacy shared entry is
+  // spared when a sibling still borrows it.
   for (const service of claudeCredentialServices(homePath)) {
+    if (service === "Claude Code-credentials" && sharedByAnother) continue;
     yield* processRunner
       .run({
         command: "security",
@@ -431,14 +531,12 @@ export const signOutClaudeAccount = Effect.fn("signOutClaudeAccount")(function* 
     .remove(path.join(homePath, ".credentials.json"))
     .pipe(Effect.orElseSucceed(() => {}));
 
-  const configPath = isDefaultHome
-    ? path.join(home, ".claude.json")
-    : path.join(homePath, ".claude.json");
   yield* removeOauthAccountFromConfig(configPath);
 
-  // The row must not keep serving this account's last usage numbers off the
-  // cache after its credential is gone.
-  clearClaudeUsageCache();
+  // Evict ONLY this account's reading and 429 back-off — clearing the whole
+  // cache would re-arm every other account's rate-limit penalty.
+  const accountKey = claudeAccountKey(identity);
+  clearClaudeUsageCacheForAccount(accountKey.trim().length > 0 ? accountKey : homePath);
 
   // Total by construction: a re-probe that could not read the just-cleared
   // directory still describes a signed-out account, so it falls back to the
