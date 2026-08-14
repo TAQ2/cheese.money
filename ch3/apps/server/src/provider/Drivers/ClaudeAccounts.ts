@@ -393,9 +393,11 @@ const removeOauthAccountFromConfig = Effect.fn("removeOauthAccountFromConfig")(f
   // (the CLI, or our own next probe) sees either the old file or the new one,
   // never a half-written one.
   const path = yield* Path.Path;
+  // The config basename already starts with a dot (`.claude.json`), so the
+  // temp sibling stays hidden without another leading dot.
   const tempPath = path.join(
     path.dirname(configPath),
-    `.${path.basename(configPath)}.ch3-signout-tmp`,
+    `${path.basename(configPath)}.ch3-signout-tmp`,
   );
   const wrote = yield* fs
     .writeFileString(tempPath, `${serialized}\n`)
@@ -534,9 +536,9 @@ export const signOutClaudeAccount = Effect.fn("signOutClaudeAccount")(function* 
   yield* removeOauthAccountFromConfig(configPath);
 
   // Evict ONLY this account's reading and 429 back-off — clearing the whole
-  // cache would re-arm every other account's rate-limit penalty.
-  const accountKey = claudeAccountKey(identity);
-  clearClaudeUsageCacheForAccount(accountKey.trim().length > 0 ? accountKey : homePath);
+  // cache would re-arm every other account's rate-limit penalty. The cache is
+  // keyed by `claudeAccountKey`, the same key probeClaudeProfile fetched under.
+  clearClaudeUsageCacheForAccount(claudeAccountKey(identity));
 
   // Total by construction: a re-probe that could not read the just-cleared
   // directory still describes a signed-out account, so it falls back to the

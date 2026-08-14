@@ -315,15 +315,17 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
                       "bg-primary/10 ring-2 ring-primary ring-offset-1 ring-offset-background",
                   )}
                   onClick={() => {
-                    if (profile.isCurrent) {
-                      onSelected?.();
-                      return;
-                    }
-                    // An unauthenticated config directory would take every
-                    // thread on this instance down, so the row signs in
-                    // rather than switching.
+                    // A signed-out directory signs back in — checked BEFORE
+                    // `isCurrent`, because the account IN USE can be the one
+                    // that logged out (externally, or via sign-out here), and
+                    // an isCurrent-first guard would make its row a dead no-op
+                    // with no way to re-authenticate it from this panel.
                     if (!selectable) {
                       void addAccount(profile.homePath);
+                      return;
+                    }
+                    if (profile.isCurrent) {
+                      onSelected?.();
                       return;
                     }
                     onSelectHomePath(homePathSettingForProfile(profile));
