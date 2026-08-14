@@ -43,10 +43,6 @@
       "types": "./src/state/auth.ts",
       "default": "./src/state/auth.ts"
     },
-    "./state/claudeStatusLine": {
-      "types": "./src/state/claudeStatusLine.ts",
-      "default": "./src/state/claudeStatusLine.ts"
-    },
     "./state/opencodeUsageMetrics": {
       "types": "./src/state/opencodeUsageMetrics.ts",
       "default": "./src/state/opencodeUsageMetrics.ts"

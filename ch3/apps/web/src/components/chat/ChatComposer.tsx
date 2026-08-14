@@ -217,7 +217,7 @@ import {
   deriveLatestContextWindowSnapshot,
   formatProviderDisplayName,
 } from "../../lib/contextWindow";
-import { ClaudeStatusLineRow } from "./ClaudeStatusLineRow";
+import { ClaudeUsageBand } from "./ClaudeUsageBand";
 import { OpenCodeUsageMetricsRow } from "./OpenCodeUsageMetricsRow";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
@@ -3481,15 +3481,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             </div>
           </div>
 
-          {/* Claude Code's own statusLine, which its terminal UI would render */}
+          {/* Native usage band for the in-use Claude account — session, week
+              and burn-rate markers, one shared read fanned out to every thread
+              (replaces the per-thread statusLine mirror that polled the
+              rate-limited usage endpoint once per open conversation). */}
           {isComposerCollapsedMobile || selectedProvider !== "claudeAgent" ? null : (
-            <ClaudeStatusLineRow
-              environmentId={environmentId}
-              cwd={gitCwd}
-              modelDisplayName={selectedModel}
-              contextWindowSize={activeContextWindow?.maxTokens}
-              contextRemainingPercentage={activeContextWindow?.remainingPercentage}
-            />
+            <ClaudeUsageBand environmentId={environmentId} />
           )}
           {/* OpenCode has no statusLine hook, so this is its own configured
               usage command rather than a mirror of one */}

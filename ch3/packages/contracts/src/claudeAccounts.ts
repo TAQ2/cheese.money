@@ -142,6 +142,27 @@ export const ClaudeAccountSignOutResult = Schema.Struct({
 });
 export type ClaudeAccountSignOutResult = typeof ClaudeAccountSignOutResult.Type;
 
+/**
+ * Usage for the account currently in use, for the native usage band shown
+ * under the composer. One read, served through the shared cache and fanned
+ * out to every thread's band — the reverse of the old per-thread statusline
+ * poll that hit the rate-limited endpoint once per open conversation.
+ */
+export const ClaudeCurrentUsageInput = Schema.Struct({});
+export type ClaudeCurrentUsageInput = typeof ClaudeCurrentUsageInput.Type;
+
+export const ClaudeCurrentUsageResult = Schema.Struct({
+  /** Null when no account is signed in, or when it could not be read. */
+  usage: Schema.NullOr(ClaudeAccountUsage),
+  /** The in-use account's label, for the band's tooltip. */
+  accountLabel: Schema.optionalKey(Schema.String),
+  /** The read was refused with 429 — the band shows its last value, dimmed. */
+  rateLimited: Schema.optionalKey(Schema.Boolean),
+  /** The value is a cached reading standing in for a read that did not land. */
+  stale: Schema.optionalKey(Schema.Boolean),
+});
+export type ClaudeCurrentUsageResult = typeof ClaudeCurrentUsageResult.Type;
+
 // Errors
 
 export class ClaudeAccountError extends Schema.TaggedErrorClass<ClaudeAccountError>()(

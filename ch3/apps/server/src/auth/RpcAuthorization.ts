@@ -78,6 +78,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.claudeStartAccountLogin]: AuthOrchestrationOperateScope,
   [WS_METHODS.claudeAwaitAccountLogin]: AuthOrchestrationOperateScope,
   [WS_METHODS.claudeSignOutAccount]: AuthOrchestrationOperateScope,
+  [WS_METHODS.claudeCurrentAccountUsage]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeVcsStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeResourceTelemetry]: AuthOrchestrationReadScope,
   [WS_METHODS.vcsRefreshStatus]: AuthOrchestrationReadScope,

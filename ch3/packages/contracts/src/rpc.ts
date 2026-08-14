@@ -35,6 +35,8 @@ import {
   ClaudeAccountProfilesResult,
   ClaudeAccountSignOutInput,
   ClaudeAccountSignOutResult,
+  ClaudeCurrentUsageInput,
+  ClaudeCurrentUsageResult,
 } from "./claudeAccounts.ts";
 import {
   ClaudeExternalSessionError,
@@ -314,6 +316,7 @@ export const WS_METHODS = {
   claudeStartAccountLogin: "claude.startAccountLogin",
   claudeAwaitAccountLogin: "claude.awaitAccountLogin",
   claudeSignOutAccount: "claude.signOutAccount",
+  claudeCurrentAccountUsage: "claude.currentAccountUsage",
 
   // Source control methods
   sourceControlLookupRepository: "sourceControl.lookupRepository",
@@ -647,6 +650,12 @@ export const WsClaudeAwaitAccountLoginRpc = Rpc.make(WS_METHODS.claudeAwaitAccou
 export const WsClaudeSignOutAccountRpc = Rpc.make(WS_METHODS.claudeSignOutAccount, {
   payload: ClaudeAccountSignOutInput,
   success: ClaudeAccountSignOutResult,
+  error: Schema.Union([ClaudeAccountError, EnvironmentAuthorizationError]),
+});
+
+export const WsClaudeCurrentAccountUsageRpc = Rpc.make(WS_METHODS.claudeCurrentAccountUsage, {
+  payload: ClaudeCurrentUsageInput,
+  success: ClaudeCurrentUsageResult,
   error: Schema.Union([ClaudeAccountError, EnvironmentAuthorizationError]),
 });
 
@@ -1044,5 +1053,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsClaudeStartAccountLoginRpc,
   WsClaudeAwaitAccountLoginRpc,
   WsClaudeSignOutAccountRpc,
+  WsClaudeCurrentAccountUsageRpc,
   WsVcsFetchRemoteRpc,
 );

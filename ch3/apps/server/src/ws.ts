@@ -118,6 +118,7 @@ import {
   startClaudeAccountLogin,
 } from "./provider/Drivers/ClaudeAccounts.ts";
 import { resolveClaudeInstanceHomePath } from "./provider/Drivers/claudeInstanceHome.ts";
+import { defaultClaudeConfigDirPath } from "./provider/Drivers/ClaudeHome.ts";
 import { ProviderService } from "./provider/Services/ProviderService.ts";
 import { readProviderSessionIdFromCursor } from "./provider/providerSessionId.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
@@ -2729,6 +2730,46 @@ const makeWsRpcLayer = (
             Effect.gen(function* () {
               const profile = yield* signOutClaudeAccount({ homePath: input.homePath });
               return { profile };
+            }),
+            {
+              "rpc.aggregate": "provider",
+            },
+          ),
+        [WS_METHODS.claudeCurrentAccountUsage]: () =>
+          observeRpcEffect(
+            WS_METHODS.claudeCurrentAccountUsage,
+            // ONE probe of the in-use account, resolved from the provider
+            // instance the same way the account switcher writes it. Served
+            // through the 60s usage cache in fetchClaudeAccountUsage, so every
+            // thread's band sharing this one query costs at most one endpoint
+            // read per minute across the whole app — the fix for the old
+            // per-thread statusline poll. Total: any failure yields "no
+            // usage" rather than failing the band.
+            Effect.gen(function* () {
+              const homePath = yield* serverSettings.getSettings.pipe(
+                Effect.map((settings) =>
+                  resolveClaudeInstanceHomePath({
+                    providerInstances: settings.providerInstances,
+                    legacyHomePath: settings.providers.claudeAgent.homePath,
+                  }),
+                ),
+                Effect.orElseSucceed(() => ""),
+              );
+              const profile = yield* probeClaudeProfile({
+                homePath: homePath.trim().length > 0 ? homePath : yield* defaultClaudeConfigDirPath(),
+                isCurrent: true,
+                includeUsage: true,
+              }).pipe(Effect.orElseSucceed(() => undefined));
+              const accountLabel =
+                (profile?.organizationName ?? "").trim().length > 0
+                  ? profile!.organizationName!
+                  : (profile?.email ?? "");
+              return {
+                usage: profile?.usage ?? null,
+                ...(accountLabel.length > 0 ? { accountLabel } : {}),
+                ...(profile?.usageRateLimited ? { rateLimited: true } : {}),
+                ...(profile?.usageStale ? { stale: true } : {}),
+              };
             }),
             {
               "rpc.aggregate": "provider",
