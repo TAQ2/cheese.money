@@ -186,53 +186,59 @@ export function KanbanCard({
 
         <span className="flex-1" />
 
-        {!compact ? (
-          // F7: a two-state fact gets a word, not a mystery sparkle.
+        {/* The pin state and both move arrows are one atomic cluster: grouped
+            and flex-none so flex-wrap can never orphan the right arrow on its
+            own line (it did). If the row truly can't fit, the whole cluster
+            drops together, still aligned right. */}
+        <div className="flex flex-none items-center gap-0.5">
+          {!compact ? (
+            // F7: a two-state fact gets a word, not a mystery sparkle.
+            <button
+              type="button"
+              title={
+                pinned
+                  ? "Pinned by you — the classifier won't move it. Click to release."
+                  : "Placed by the classifier. Click to pin it in place."
+              }
+              className={cn(
+                "rounded border px-1 text-[9px] leading-4 transition-colors",
+                pinned
+                  ? "border-border font-semibold text-foreground"
+                  : "border-border/60 text-muted-foreground hover:text-foreground",
+              )}
+              onClick={(event) => {
+                event.stopPropagation();
+                onTogglePin(thread);
+              }}
+            >
+              {pinned ? "pinned" : "auto"}
+            </button>
+          ) : null}
           <button
             type="button"
-            title={
-              pinned
-                ? "Pinned by you — the classifier won't move it. Click to release."
-                : "Placed by the classifier. Click to pin it in place."
-            }
-            className={cn(
-              "rounded border px-1 text-[9px] leading-4 transition-colors",
-              pinned
-                ? "border-border font-semibold text-foreground"
-                : "border-border/60 text-muted-foreground hover:text-foreground",
-            )}
+            aria-label="Move left"
+            disabled={!canMoveLeft}
+            className="rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-accent hover:text-foreground focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
             onClick={(event) => {
               event.stopPropagation();
-              onTogglePin(thread);
+              onMove(thread, -1);
             }}
           >
-            {pinned ? "pinned" : "auto"}
+            <ChevronLeftIcon className="size-4" />
           </button>
-        ) : null}
-        <button
-          type="button"
-          aria-label="Move left"
-          disabled={!canMoveLeft}
-          className="rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-accent hover:text-foreground focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
-          onClick={(event) => {
-            event.stopPropagation();
-            onMove(thread, -1);
-          }}
-        >
-          <ChevronLeftIcon className="size-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Move right"
-          disabled={!canMoveRight}
-          className="rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-accent hover:text-foreground focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
-          onClick={(event) => {
-            event.stopPropagation();
-            onMove(thread, 1);
-          }}
-        >
-          <ChevronRightIcon className="size-4" />
-        </button>
+          <button
+            type="button"
+            aria-label="Move right"
+            disabled={!canMoveRight}
+            className="rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-accent hover:text-foreground focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
+            onClick={(event) => {
+              event.stopPropagation();
+              onMove(thread, 1);
+            }}
+          >
+            <ChevronRightIcon className="size-4" />
+          </button>
+        </div>
       </div>
     </div>
   );
