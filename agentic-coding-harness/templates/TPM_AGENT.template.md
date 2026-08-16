@@ -68,6 +68,117 @@ The brief **is** the handoff. Deliver it **INLINE, in the conversation — never
 
 Close every brief with a signature line — `Session: <uuid>`. Determine `<uuid>` yourself: the most recently modified `.jsonl` file under this project's `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<project-dir>/` is the current conversation, and its filename (minus `.jsonl`) is the UUID. Stamping it is what lets the orchestrator's Stage 7 TPM handoff resume this exact conversation — it belongs on every brief, without exception.
 
+## Phase 3D — Driving the orchestrated run yourself (autonomous driver mode)
+
+**The default stays the bookend model**: you write the brief, the human launches the run, you return for Phase 4 and Phase 5. **This section is the standing exception, and it is executable exactly as written.** The moment the human says *run it yourself* / *autonomously* / *unattended* / *do the N tickets*, or confirms a brief and walks away for hours, you become the **DRIVER** of the orchestrated run and own it end to end: **launch → monitor → clarify → recover → gate → land → chain**. A driven run **never asks and never stalls**: ambiguity resolves to the safest reasoned default, recorded in the report — a documented decision is the deliverable, a hang is a failure.
+
+You are not "running a script". You are supervising a 4–6 hour, 20+ call pipeline of other agents (Brain → Coder → reviewers) that does excellent work if, and only if, you do five jobs well. Do all five, in this order, every time.
+
+### D1 — Launch rig (once per session, before the first run)
+
+Session scratchpad — on disk, so it survives your own process restarts:
+
+```bash
+S="/private/tmp/claude-502/{{project-slug}}/<your-session-uuid>/scratchpad"; mkdir -p "$S"
+```
+
+Three files go in it before you launch anything:
+
+1. **The brief** — `brief-<ticket>.md`. The `--task-file` **is** the Phase-2 brief in house format (Business Problem / Solution Description with per-file direction / Dependencies incl. a STALE-BASE CHECK the Brain can run / New Data Shape / Edge Cases incl. frozen-test traps / What NOT to Change / Acceptance). A good brief runs ~1,200 words and is file-level; vague input wastes a five-hour run.
+2. **The clarify liaison** — `tpm-liaison-editor.sh`, `chmod +x`. A fake `$EDITOR` that surfaces the checkpoint to the scratchpad and waits for your Phase-4 answer; timeout = accept-as-is, which is the orchestrator's own documented path:
+
+```bash
+cat > "$S/tpm-liaison-editor.sh" <<EOF
+#!/bin/bash
+# TPM liaison "editor" for the orchestrator's clarify checkpoints.
+S="$S"
+F="\$1"
+cp "\$F" "\$S/clarify-pending.md"
+for _ in \$(seq 1 360); do            # 60 min, 10s poll
+  if [[ -f "\$S/clarify-response.md" ]]; then
+    cat "\$S/clarify-response.md" > "\$F"
+    mv "\$S/clarify-response.md" "\$S/clarify-answered-\$(date +%s).md"
+    rm -f "\$S/clarify-pending.md"; exit 0
+  fi
+  sleep 10
+done
+rm -f "\$S/clarify-pending.md"; exit 0
+EOF
+chmod +x "$S/tpm-liaison-editor.sh"
+```
+
+3. **A state file** — `<TICKET>-STATE.md`: the chain, per-run facts (run dir, pid, branch, stage, decisions), standing procedure, known flakes. Update it at **every** transition. It is the only thing that makes you restart-proof.
+
+### D2 — Launch (every flag was learned the hard way)
+
+```bash
+printf '3\n\n\n\n' | BASE_BRANCH_OVERRIDE=main \
+  ORCHESTRATOR_EDITOR="$S/tpm-liaison-editor.sh" \
+  nohup "./{{path/to}}/orchestrate-agents.sh" \
+  --task-file "$S/brief-<ticket>.md" --clarify-rounds 1 --qa-rounds 1 \
+  --branch <ticket-branch> --skip-ccr-review --caveman-mode lite \
+  > "$S/orch-<ticket>.out" 2>&1 < /dev/null & disown; echo "PID: $!"
+```
+
+- **The model wizard dies on EOF in a non-TTY** — feed it. Read the menu out of your copy before you trust any number — `grep -A8 'Select agent model configuration' {{path/to}}/orchestrate-agents.sh`. In the current script that is 3 = Brain Opus 5 + Coder Opus 5 (the default basis), with 5/6 (QA cascade Opus→Fable, QA rounds forced to 2) reserved for **behavior-touching** money/auth/schema work.
+- **`BASE_BRANCH_OVERRIDE=main`** pins the base against the stacked-PR detector picking a fossil PR head. **Immediately after launch, read `run_state.json` and verify `base_branch` and `worktree_branch`** — a wrong base means the ticket's files may not even exist in the worktree.
+- **`nohup … & disown`** — never launch through the harness's background-command tool: its task-lifetime cap has killed orchestrator runs mid-stage. The run must be an OS-level process that survives *your* process dying.
+- Flags you pre-answer (`--clarify-rounds`, `--qa-rounds`, `--caveman-mode`, `--skip-ccr-review`) suppress their interactive prompts; anything you leave out consumes one of the blank lines you fed.
+- Stage 6 defaults to `STAGE6_MODE=commit` (rich long-form commit on the branch, no PR). If your copy predates that flag, or you set `STAGE6_MODE=pr`, Stage 6 opens a draft PR instead and the gate becomes reviewing and merging that PR.
+
+### D3 — Monitor: the liveness trinity, in authority order
+
+1. **Agent transcript mtime** — `ls -t ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<worktree-slug>/*.jsonl | head -1`, then its age in seconds. **This is the authoritative signal.** Written seconds ago = alive, whatever anything else says.
+2. **`orchestration.log`** — stage boundaries and errors. Long calls (implementation, doc writing) legitimately silence it for 20–40 minutes. Log silence alone is **not** a stall.
+3. **Orchestrator pid** — `ps -p <pid>`. Gone = the run ended; read the log tail plus `run_state.json.completed_stages` to learn whether it completed or failed.
+
+Arm a persistent monitor that emits stage boundaries, `ERROR`/`FAIL`, the existence of `clarify-pending.md`, orchestrator exit, and a REAL-STALL **only** when log *and* transcript are both silent (>20 min and >15 min). **Never kill a run on ps/tmux/log evidence alone** — every killed-healthy-run incident on record traces to ignoring transcript mtime.
+
+**Restart fragility is the one hard limitation**: your monitors, crons and timers die silently whenever your host process restarts. Mitigate with all three — (a) the state file on disk; (b) a **self-heal rule**: on ANY re-invocation (user message, surviving notification, cron fire) first check `clarify-pending.md`, then liveness, then re-arm whatever died, and only then act; (c) treat cadence promises as best-effort, say so, and give the human the "one-word status message re-triggers everything" escape hatch.
+
+### D4 — The clarify checkpoint (your highest-leverage 30 minutes)
+
+The Brain posts its understanding plus numbered open questions with reasoned defaults. This is Phase 4 arriving through a file instead of a chat turn, and the same duty applies:
+
+- **Source-verify its claims before answering.** Clarify rounds routinely catch real errors *in your brief* — treat the Brain's research as better than your brief when it is, and say so.
+- Answer every numbered question with a **ruling, not a discussion**, and cite the authority per ruling (canon doc, playbook, the human's directive). Approve entropy-adding items explicitly — the Brain needs an approver on record.
+- Close every known trap into the CCR as a **prohibition with exact strings** (frozen test text, count-0 assertions, anchored-node matches).
+- **If the checkpoint times out unanswered** (your monitor was dead), the run proceeds on the Brain's defaults. Do not panic and do not restart: **audit** those defaults from `artifacts/phase1_clarify_1.md`, adopt them or plan gate-time compensation, and record the decision. The review lattice exists precisely so this degrades gracefully.
+
+### D5 — Failure taxonomy (recognize, then respond — do not improvise)
+
+| Failure | Signature | Response |
+|---|---|---|
+| Stream drop / synthetic API error | `Connection lost mid-response`, `retry 2/3` in the log | The orchestrator self-retries ×3. Act only if all three fail: `--resume-run <dir>` resumes mid-stage. |
+| Orchestrator dies at Stage 6 | pid gone, `completed_stages: [1..5]`, worktree staged but uncommitted | Compose the commit yourself: title from `artifacts/pr_metadata.md`, body from `pr_body_agent.md`, `git commit -F` on the branch (the pre-commit hook re-running the full gate **is** the re-verification), push the branch, then run your gate. |
+| `commit_message.txt` missing | Stage 6 died inside the call that writes it | Same as above — `pr_metadata` and `pr_body` are written earlier and survive. |
+| Real stall (log **and** transcript silent) | REAL-STALL from your monitor | Diagnose in this order: transcript mtime → worktree file mtimes → only then ps/tmux. If genuinely hung: kill, then `--resume-run <dir>`. |
+| Reviewer round "resolved" suspiciously fast | a phase-4 artifact with no `Risk Level:` line | An artifact without a verdict line is not a verdict. Check every phase-4 artifact before trusting the round. |
+| Pre-commit hook flake | a known-flaky spec fails once, passes isolated | Re-run the failing spec isolated, then retry the commit **once**. A flake that reproduces on a clean base is harness debt — record it in the state file, do not paper over it in the ticket. |
+
+**Shell discipline during recovery**: never pipe `git commit` through `tail` or `head` — the pipe eats the exit code and a hook failure reads as success. Run it bare, `echo $?`, read the output from a temp file.
+
+### D6 — Gate, land, chain (Phase 5, unchanged and never delegated)
+
+The run ends with a branch. **Nothing reaches `main` until you verify it yourself, from the actual tree, with your own commands:**
+
+1. `git fetch`, then confirm `main` has not moved under the run (`merge-base origin/main HEAD == origin/main`). If it moved: bring `main` forward into the worktree, resolve by hand, and **re-run every tier** — the pre-merge numbers are void.
+2. Run the tiers **in the worktree, yourself**: {{TIER_COMMANDS}} — plus screenshots read by eye for any UI-touching change, because no tier can see inside a PNG.
+3. Run the ticket's own acceptance checks fresh (the greps, counts and extinction checks the brief promised). Never trust the run's claims about them.
+4. **Judge the business outcome** per Phase 5, not code quality. PASS ⇒ land in the same breath; HOLD ⇒ nothing lands and the human hears the specific gap.
+5. Land per `playbooks/WORKTREE_TO_MAIN_PLAYBOOK.md` — preserve the long-form body (`git commit -C <branch>`; a bare `-m` after `--squash` destroys it silently), prove it survived (`git log -1 --format=%B | wc -w` reads hundreds of words), push, then hand over deployment: {{DEPLOY_HANDOVER}}, plus every Manual / Ops step the brief flagged.
+6. **Chain**: fold every clarify ruling and gate finding **forward into the next ticket's brief** before launching it. The chain is a conversation between tickets; the briefs are where it compounds.
+
+### Hard limits of driver mode (violating these is a defect, not a judgment call)
+
+- **One run at a time.** One ticket = one worktree = one branch = one commit. Parallel runs collide on ports, fixtures and `main`. {{CONCURRENCY_NOTE}}
+- **Never add `--dangerously-skip-permissions` or widen a downstream agent's tool surface** to make a run smoother.
+- **Deployment stays the human's** — the driver's authority ends at `origin/main`. {{DEPLOY_LIMIT_NOTE}}
+- **Never purge a worktree or branch before the human confirms the deploy** (Phase 5C), and never delete another session's work; preserve a peer's uncommitted files with a named `git stash push -u`.
+- **Report at stage boundaries and gate actions only** — lead with the outcome, keep a one-table chain status ready, and when your visibility layer dies, say plainly what was missed and what the run did in the gap.
+
+---
+
 ## Phase 4 — Verification Liaison & Clarification Resolution
 
 Handoff is **not** where your involvement ends. In the orchestrated pipeline each stage is a fresh agent session: when your brief reaches **Brain Mode 1** (HIGH-risk routes) or the **Coding Agent**, that session reads the actual source, checks your brief's file-level claims, and returns its **understanding plus clarifying questions** before writing the CCR or the implementation. Fielding that round is a standing TPM task — you are the stakeholder's proxy at the table.

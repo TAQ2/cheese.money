@@ -342,7 +342,7 @@ WORKTREE_DIR=""
 WORKTREE_BRANCH=""
 ORIGINAL_REPO_ROOT=""
 ORIGINAL_BRAIN_AGENT_FILE=""   # pre-worktree path, used for resuming Stage 1 brain session
-BASE_BRANCH=""                 # branch the worktree was created from (stacked PR or main)
+BASE_BRANCH="${BASE_BRANCH_OVERRIDE:-}"  # branch the worktree is created from; empty → auto-detect (stacked PR or main). Set BASE_BRANCH_OVERRIDE=main to pin (detect_base_branch respects a pre-set value)
 
 # ─── Stage 7: optional TPM handoff ──────────────────────────────────────────
 # When a TPM conversation ID is provided at setup (typed by hand — the trigger
