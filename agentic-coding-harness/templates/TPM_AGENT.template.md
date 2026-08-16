@@ -111,6 +111,8 @@ chmod +x "$S/tpm-liaison-editor.sh"
 
 ### D2 — Launch (every flag was learned the hard way)
 
+**Standing configuration — what an unspecified run must be: Opus 5 brain + Opus 5 coder · 1 clarify round · 1 QA round** (Conrad's ruling, 2026-08-16). The flags below encode it and the script's own defaults now match it, so a bare Enter and this command shape produce the same run. Raise it only when Conrad specifies otherwise for that run, and say in your report that you did.
+
 ```bash
 printf '3\n\n\n\n' | BASE_BRANCH_OVERRIDE=main \
   ORCHESTRATOR_EDITOR="$S/tpm-liaison-editor.sh" \
@@ -120,7 +122,7 @@ printf '3\n\n\n\n' | BASE_BRANCH_OVERRIDE=main \
   > "$S/orch-<ticket>.out" 2>&1 < /dev/null & disown; echo "PID: $!"
 ```
 
-- **The model wizard dies on EOF in a non-TTY** — feed it. Read the menu out of your copy before you trust any number — `grep -A8 'Select agent model configuration' {{path/to}}/orchestrate-agents.sh`. In the current script that is 3 = Brain Opus 5 + Coder Opus 5 (the default basis), with 5/6 (QA cascade Opus→Fable, QA rounds forced to 2) reserved for **behavior-touching** money/auth/schema work.
+- **The model wizard dies on EOF in a non-TTY** — feed it. Read the menu out of your copy before you trust any number — `grep -A8 'Select agent model configuration' {{path/to}}/orchestrate-agents.sh`. In the current script the standing configuration is option 3 (Brain Opus 5 + Coder Opus 5); options 5/6 (Opus→Fable QA cascade, QA rounds forced to 2) are taken only on the human's explicit say-so for that ticket.
 - **`BASE_BRANCH_OVERRIDE=main`** pins the base against the stacked-PR detector picking a fossil PR head. **Immediately after launch, read `run_state.json` and verify `base_branch` and `worktree_branch`** — a wrong base means the ticket's files may not even exist in the worktree.
 - **`nohup … & disown`** — never launch through the harness's background-command tool: its task-lifetime cap has killed orchestrator runs mid-stage. The run must be an OS-level process that survives *your* process dying.
 - Flags you pre-answer (`--clarify-rounds`, `--qa-rounds`, `--caveman-mode`, `--skip-ccr-review`) suppress their interactive prompts; anything you leave out consumes one of the blank lines you fed.

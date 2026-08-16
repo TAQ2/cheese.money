@@ -263,7 +263,11 @@ MODEL_CONFIG_LABEL="Brain Opus 5 (1M) + Coder Opus 5 (1M) — default"
 : "${EDITOR:=nano}"
 
 # Defaults
-readonly DEFAULT_QA_ROUNDS=2
+# Standing configuration (founder ruling 2026-08-16): unless a run says
+# otherwise it is Opus 5 brain + Opus 5 coder, ONE clarify round, ONE QA round.
+# Raise the rounds per run with --qa-rounds / --clarify-rounds when the ticket
+# actually warrants it; the defaults are what an unspecified run must produce.
+readonly DEFAULT_QA_ROUNDS=1
 readonly DEFAULT_MAX_TURNS=200
 readonly DEFAULT_MAX_FIX_LOOPS=5
 readonly DEFAULT_CLARIFY_ROUNDS=1
@@ -3621,11 +3625,11 @@ prompt_run_config() {
     if [[ "$QA_ROUNDS_SET" == "false" ]]; then
         printf "${C_DIM} ┃${C_RESET} ${C_BOLD}Independent QA rounds${C_RESET} — fresh Brain Agents audit the implementation.\n"
         printf "${C_DIM} ┃${C_RESET}   0 = skip (no independent QA, full autopilot)\n"
-        printf "${C_DIM} ┃${C_RESET}   1 = one reviewer (faster)\n"
-        printf "${C_DIM} ┃${C_RESET}   2 = two reviewers (default, recommended)\n"
+        printf "${C_DIM} ┃${C_RESET}   1 = one reviewer (default — the standing configuration)\n"
+        printf "${C_DIM} ┃${C_RESET}   2 = two reviewers (raise to this only when the ticket warrants it)\n"
         printf "${C_DIM} ┃${C_RESET}   3-5 = more reviewers (thorough)\n"
         printf "${C_DIM} ┃${C_RESET}\n"
-        printf "${C_DIM} ┃${C_RESET}   QA rounds [0-5, default 2]: "
+        printf "${C_DIM} ┃${C_RESET}   QA rounds [0-5, default 1]: "
         local qa_input
         read -r qa_input
         if [[ -z "$qa_input" ]]; then
