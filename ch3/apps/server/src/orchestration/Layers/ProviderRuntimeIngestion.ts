@@ -20,6 +20,7 @@ import {
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -698,6 +699,94 @@ const make = Effect.gen(function* () {
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
     );
 
+  /**
+   * Background tasks still open per thread, and when each thread's ownership
+   * lease was last written.
+   *
+   * A task launched detached — `nohup ... & disown`, tmux, a queued run —
+   * leaves nothing CH3 can observe: it reparents to pid 1, holds no terminal,
+   * and the session falls to `ready` between the agent's polls, so the kanban
+   * card dropped into the human lane while the machine was busy. The runtime
+   * DOES tell us the task started and finished, so the server holds the lease
+   * on the thread's behalf and nothing has to cooperate.
+   *
+   * In memory on purpose. A restart empties it, which is exactly right: the
+   * processes those tasks belonged to died with the server, and the lease they
+   * left behind expires on its own rather than pinning a card forever.
+   */
+  const openBackgroundTasksByThread = new Map<string, Set<string>>();
+  const leaseWrittenAtByThread = new Map<string, number>();
+  /** Long enough to cover a quiet stretch, short enough that a crash heals. */
+  const AGENT_WORKING_LEASE_MS = 30 * 60 * 1000;
+  /** Tasks report no heartbeat, so the lease is refreshed off other traffic. */
+  const AGENT_WORKING_REFRESH_MS = 10 * 60 * 1000;
+
+  const writeAgentWorkingLease = Effect.fn("writeAgentWorkingLease")(function* (
+    event: ProviderRuntimeEvent,
+    threadId: ThreadId,
+    until: string | null,
+  ) {
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.kanban.update",
+        commandId: yield* providerCommandId(event, "agent-working-lease"),
+        threadId,
+        agentWorkingUntil: until,
+        // Not "classifier": the decider refuses a lease from the classifier,
+        // which only reads the conversation and cannot see a detached run.
+        source: "user",
+      })
+      .pipe(Effect.ignore);
+  });
+
+  /**
+   * Keep the thread's lease in step with its open background tasks.
+   *
+   * Called for every runtime event, because a background task emits no
+   * progress of its own: the only way to keep a lease alive across a run that
+   * outlasts it is to refresh off whatever other traffic the thread produces,
+   * throttled so a busy thread does not rewrite the board constantly.
+   */
+  const syncAgentWorkingLease = Effect.fn("syncAgentWorkingLease")(function* (
+    event: ProviderRuntimeEvent,
+    threadId: ThreadId,
+  ) {
+    const key = String(threadId);
+    const open = openBackgroundTasksByThread.get(key) ?? new Set<string>();
+    let forceWrite = false;
+
+    if (event.type === "task.started") {
+      open.add(String(event.payload.taskId));
+      openBackgroundTasksByThread.set(key, open);
+      forceWrite = true;
+    } else if (event.type === "task.completed") {
+      open.delete(String(event.payload.taskId));
+      if (open.size === 0) {
+        openBackgroundTasksByThread.delete(key);
+        leaseWrittenAtByThread.delete(key);
+        // Released the moment the last task ends, rather than left to lapse:
+        // the card belongs back with the user immediately.
+        return yield* writeAgentWorkingLease(event, threadId, null);
+      }
+      openBackgroundTasksByThread.set(key, open);
+      forceWrite = true;
+    }
+
+    if (open.size === 0) return;
+
+    const now = yield* DateTime.now;
+    const nowMs = DateTime.toEpochMillis(now);
+    const writtenAt = leaseWrittenAtByThread.get(key) ?? 0;
+    if (!forceWrite && nowMs - writtenAt < AGENT_WORKING_REFRESH_MS) return;
+
+    leaseWrittenAtByThread.set(key, nowMs);
+    yield* writeAgentWorkingLease(
+      event,
+      threadId,
+      DateTime.formatIso(DateTime.addDuration(now, `${AGENT_WORKING_LEASE_MS} millis`)),
+    );
+  });
+
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
     timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
@@ -1294,6 +1383,8 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
+
+      yield* syncAgentWorkingLease(event, thread.id);
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;
       const getLoadedThreadDetail = () =>
