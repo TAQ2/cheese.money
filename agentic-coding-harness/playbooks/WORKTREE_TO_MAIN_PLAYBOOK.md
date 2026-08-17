@@ -36,7 +36,17 @@ git -C <repo> rev-parse <base>           # differ? <base> moved during the run
 ```
 On divergence: **never rebase the worktree branch** — rebasing rewrites the exact tree QA reviewed, so what lands is no longer what was approved. `git cherry-pick -n <rich-commit>` onto `<base>` and resolve every conflict as a **union** of both sides (both parents' imports, list entries, doc rows, dependency edges kept; recompute counts/totals from the merged rows rather than picking either side's number). Then re-run the touched suites — a union tree is a tree nothing has ever run.
 
-### 4. Dry-run, then stage the merge
+### 4. Dry-run, then land it
+```bash
+# Prefer the fast-forward: if `<base>` has not moved and the run left its rich commit(s) on the
+# branch, this lands them untouched — the long-form body survives with no `-C` needed, and the
+# branch stays a true ancestor, so the guarded `git branch -d` works at purge time.
+git -C <repo> merge --ff-only <branch>
+```
+If that refuses, `<base>` moved (or the branch is not a descendant) — merge `<base>` forward inside
+the worktree and try again, or take the squash path below and accept that the purge will need the
+evidence check in step 9.
+
 ```bash
 git -C <repo> merge-tree --write-tree --name-only <base> <branch>   # exit 0, no file list = clean
 git -C <repo> merge <branch> --squash --no-commit
@@ -63,14 +73,23 @@ Report the SHA now on `origin/<base>` and the exact deploy commands/console step
 ### 9. On the human's deploy confirmation: purge the scaffolding — unasked
 ```bash
 git -C <repo> worktree remove <repo>-wt-<feature>   # --force only if dirty AND nothing unlanded is inside
-git -C <repo> branch -D <branch>                    # -D: --squash leaves it "unmerged" in git's eyes
+git -C <repo> branch -d <branch>                    # lowercase: git refuses unless the work really is on <base>
 git -C <repo> push origin --delete <branch>         # only if that branch was ever pushed
 git -C <repo> worktree prune
 ```
 Then state in one line what was removed. A worktree still on disk after a confirmed deploy is unfinished Phase 5 work.
 
+**`-d`, not `-D`.** A fast-forward landing leaves the branch a true ancestor of `<base>`, so the
+lowercase, *guarded* delete succeeds and costs nothing. After a **squash** landing git still reads
+the branch as unmerged and `-d` refuses — that refusal is a question to answer, not a flag to
+upgrade. Prove the content actually landed (`git -C <repo> diff <base> <branch>` empty, or
+`git -C <repo> cherry -v <base> <branch>` showing every commit as `-`), and only then `-D`. Never reach for
+`-D` because `-d` complained: a genuine refusal means something still exists only on that branch.
+(`git branch -D` is denied outright by policy in some repos for exactly this reason, and the deny
+list is case-sensitive — `-d` runs unprompted.)
+
 ## Recovery if the commit body was already lost
-The branch commit object survives locally even after `git branch -D`:
+The branch commit object survives locally even after the branch is deleted:
 ```bash
 git log -1 --format=%B <old-branch-sha> > /tmp/newmsg.txt
 git commit --amend -F /tmp/newmsg.txt
@@ -98,5 +117,5 @@ git -C <repo> merge <branch> --squash --no-commit
 git -C <repo> commit -C <branch> && git -C <repo> log -1 --format=%B | wc -w
 git -C <repo> push origin <base>
 # → report the SHA + deployment instructions; on the human's deploy confirmation:
-git -C <repo> worktree remove <repo>-wt-<feature> && git -C <repo> branch -D <branch> && git -C <repo> worktree prune
+git -C <repo> worktree remove <repo>-wt-<feature> && git -C <repo> branch -d <branch> && git -C <repo> worktree prune
 ```

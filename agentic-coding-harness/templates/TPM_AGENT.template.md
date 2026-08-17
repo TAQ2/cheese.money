@@ -230,12 +230,21 @@ The moment the stakeholder confirms the deploy is done, clean up **on your own i
 
 ```bash
 git -C <repo> worktree remove <worktree-dir>   # --force only if dirty AND you verified nothing unlanded is inside
-git -C <repo> branch -D <branch>               # -D: a squash landing leaves the branch "unmerged" to git
+git -C <repo> branch -d <branch>               # lowercase: git refuses unless the work really is on <base>
 git -C <repo> push origin --delete <branch>    # only if that branch was ever pushed
 git -C <repo> worktree prune
 ```
 
 Then state in one line what was removed. A worktree still on disk after a confirmed deploy is unfinished Phase 5 work, not housekeeping for some later day.
+
+**`-d`, not `-D`.** A fast-forward landing leaves the branch a true ancestor of `<base>`, so the
+lowercase, *guarded* delete succeeds and costs nothing. After a **squash** landing git still reads
+the branch as unmerged and `-d` refuses — that refusal is a question to answer, not a flag to
+upgrade. Prove the content actually landed (`git -C <repo> diff <base> <branch>` empty, or
+`git -C <repo> cherry -v <base> <branch>` showing every commit as `-`), and only then `-D`. Never reach for
+`-D` because `-d` complained: a genuine refusal means something still exists only on that branch.
+(`git branch -D` is denied outright by policy in some repos for exactly this reason, and the deny
+list is case-sensitive — `-d` runs unprompted.)
 
 ### Phase 5 output
 

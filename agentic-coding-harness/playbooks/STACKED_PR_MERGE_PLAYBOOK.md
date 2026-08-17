@@ -40,7 +40,9 @@ git push origin <pr-branch>-v2:<pr-branch> --force-with-lease
 ### 6. Verify mergeable, then clean up
 ```bash
 gh pr view <number> --json mergeable --jq '.mergeable'   # must be MERGEABLE
-git branch -D <pr-branch>-v2
+git branch -D <pr-branch>-v2   # -D is correct HERE and only here: the v2 branch was pushed to the
+                               # PR head, never merged into your local base, so the guarded -d
+                               # refuses on a branch that has genuinely already served its purpose.
 ```
 
 ## Strategy B: Merge with `-X ours` (fallback)
