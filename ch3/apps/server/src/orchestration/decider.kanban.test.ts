@@ -89,6 +89,75 @@ it.layer(NodeServices.layer)("kanban thread decider", (it) => {
     }),
   );
 
+  it.effect("records an agent-working lease from a non-classifier caller", () =>
+    Effect.gen(function* () {
+      const event = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.kanban.update",
+          commandId: CommandId.make("cmd-kanban-lease"),
+          threadId: ThreadId.make("thread-1"),
+          agentWorkingUntil: "2026-01-01T00:30:00.000Z",
+          source: "user",
+        },
+        readModel: makeReadModel({}),
+      });
+      const events = Array.isArray(event) ? event : [event];
+      if (events[0]?.type === "thread.kanban-updated") {
+        expect(events[0].payload.kanban.agentWorkingUntil).toBe("2026-01-01T00:30:00.000Z");
+      }
+    }),
+  );
+
+  it.effect("lets the holder release its own lease", () =>
+    Effect.gen(function* () {
+      const event = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.kanban.update",
+          commandId: CommandId.make("cmd-kanban-release"),
+          threadId: ThreadId.make("thread-1"),
+          agentWorkingUntil: null,
+          source: "user",
+        },
+        readModel: makeReadModel({
+          kanban: { ...PINNED_STATE, agentWorkingUntil: "2026-01-01T00:30:00.000Z" },
+        }),
+      });
+      const events = Array.isArray(event) ? event : [event];
+      if (events[0]?.type === "thread.kanban-updated") {
+        expect(events[0].payload.kanban.agentWorkingUntil).toBeNull();
+      }
+    }),
+  );
+
+  it.effect("classifier never clears a lease it cannot see", () =>
+    Effect.gen(function* () {
+      // The classifier only reads the conversation. A detached run it has no
+      // way to observe must not be declared finished because a model wrote a
+      // fresh card summary.
+      const event = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.kanban.update",
+          commandId: CommandId.make("cmd-kanban-classify-lease"),
+          threadId: ThreadId.make("thread-1"),
+          description: "Refreshed summary.",
+          source: "classifier",
+        },
+        readModel: makeReadModel({
+          kanban: {
+            ...PINNED_STATE,
+            pinned: false,
+            agentWorkingUntil: "2026-01-01T00:30:00.000Z",
+          },
+        }),
+      });
+      const events = Array.isArray(event) ? event : [event];
+      if (events[0]?.type === "thread.kanban-updated") {
+        expect(events[0].payload.kanban.agentWorkingUntil).toBe("2026-01-01T00:30:00.000Z");
+        expect(events[0].payload.kanban.description).toBe("Refreshed summary.");
+      }
+    }),
+  );
+
   it.effect("classifier updates stage and summary on an unpinned card", () =>
     Effect.gen(function* () {
       const event = yield* decideOrchestrationCommand({

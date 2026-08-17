@@ -396,6 +396,22 @@ export const ThreadKanbanState = Schema.Struct({
       on this, not wall-clock, because checkpoint capture rewrites a turn's
       completedAt after the fact. Optional so persisted pre-field rows decode. */
   classifiedTurnId: Schema.optional(Schema.NullOr(TurnId)),
+  /**
+   * Lease asserting the agent still owns this thread, as an absolute expiry.
+   *
+   * Work an agent launches detached — `nohup ... & disown`, tmux, a queued
+   * CI run — leaves no process CH3 can see: it reparents to pid 1, holds no
+   * terminal, and belongs to no session, so subprocess inspection and session
+   * status both read it as "nothing running" and the card falls to the human
+   * lane while the machine is busy. The owner says so explicitly instead.
+   *
+   * A lease rather than a flag, because the process that sets it may be
+   * killed before it can clear it: an expiry heals itself, a boolean would
+   * strand the card in the agent lane forever. Refresh it while the work
+   * runs; clear it (null) the moment it finishes. Optional so persisted
+   * pre-field rows decode.
+   */
+  agentWorkingUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type ThreadKanbanState = typeof ThreadKanbanState.Type;
 
@@ -706,6 +722,8 @@ const ThreadKanbanUpdateCommand = Schema.Struct({
   keywords: Schema.optional(Schema.Array(Schema.String)),
   /** Classifier only: the turn this classification read. */
   classifiedTurnId: Schema.optional(TurnId),
+  /** Absolute expiry of the agent-ownership lease; null clears it. */
+  agentWorkingUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** User-requested re-run: the classification reactor picks this up from the
       resulting event and re-reads the conversation on demand. */
   reclassify: Schema.optional(Schema.Literal(true)),

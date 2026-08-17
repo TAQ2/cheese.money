@@ -102,6 +102,23 @@ export function resolveKanbanColumn(
 }
 
 /**
+ * Whether the thread carries an ownership lease that has not yet lapsed.
+ *
+ * An absent or malformed expiry is "no lease" rather than an error: the lane
+ * is a display decision, and a card silently stuck on the wrong side is worse
+ * than one that simply falls back to its execution signals.
+ */
+export function isAgentWorkingLeaseActive(
+  thread: SidebarThreadSummary,
+  nowMs: number = Date.now(),
+): boolean {
+  const until = thread.kanban?.agentWorkingUntil;
+  if (!until) return false;
+  const expiresAtMs = Date.parse(until);
+  return Number.isNaN(expiresAtMs) ? false : expiresAtMs > nowMs;
+}
+
+/**
  * The y-axis: a conversation dips into the agent lane while the agent works
  * and re-emerges to the user lane when it finishes (or needs the user).
  *
@@ -112,13 +129,32 @@ export function resolveKanbanColumn(
  */
 export function resolveKanbanLane(
   thread: SidebarThreadSummary,
-  options?: { readonly hasRunningTerminal?: boolean },
+  options?: { readonly hasRunningTerminal?: boolean; readonly nowMs?: number },
 ): "user" | "agent" {
   const status = resolveSidebarV2Status(thread);
   if (status === "approval" || status === "input") {
     return "user";
   }
+  // An unexpired ownership lease outranks every execution signal below it.
+  // Work launched detached — `nohup ... & disown`, tmux, a queued CI run —
+  // reparents to pid 1 and holds no terminal, so subprocess inspection sees
+  // nothing and the session reads idle between the agent's polls: the card
+  // dropped into the human lane while the run was still going. Only the
+  // launcher knows, so it says so, and this believes it until the lease
+  // lapses. Checked AFTER the blocked-on-a-human cases, never before — a
+  // thread waiting on an approval belongs to the user, lease or no lease.
+  if (isAgentWorkingLeaseActive(thread, options?.nowMs)) {
+    return "agent";
+  }
   if (status === "working") {
+    return "agent";
+  }
+  // A turn still in flight means the AI is working, whatever the session says.
+  // The two disagree while a turn is driving sub-agents: the parent blocks on
+  // the sub-agent's tool call, the session stops reporting itself as running,
+  // and the card surfaced into the user's lane as though it were waiting on a
+  // human — while the agent was busy the whole time.
+  if (thread.latestTurn?.state === "running") {
     return "agent";
   }
   return options?.hasRunningTerminal === true ? "agent" : "user";

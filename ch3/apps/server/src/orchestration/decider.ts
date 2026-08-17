@@ -693,6 +693,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         keywords: [],
         classifiedAt: null,
         classifiedTurnId: null,
+        agentWorkingUntil: null,
       };
       // A pinned card belongs to the user: the classifier may refresh the
       // generated summary but must never move it or retype it.
@@ -717,6 +718,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           command.source === "classifier" && command.classifiedTurnId !== undefined
             ? command.classifiedTurnId
             : (existing.classifiedTurnId ?? null),
+        // Ownership is asserted by whoever launched the work, so the
+        // classifier — which only reads the conversation — must never clear a
+        // lease held by a run it cannot see.
+        agentWorkingUntil:
+          command.source !== "classifier" && command.agentWorkingUntil !== undefined
+            ? command.agentWorkingUntil
+            : (existing.agentWorkingUntil ?? null),
       };
       return {
         ...(yield* withEventBase({

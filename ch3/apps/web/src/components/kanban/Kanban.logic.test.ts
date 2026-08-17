@@ -294,3 +294,93 @@ describe("column order resolution", () => {
     expect(ids.indexOf("custom-a")).toBe(ids.indexOf("exploration") + 1);
   });
 });
+
+describe("resolveKanbanLane with a turn in flight", () => {
+  const thread = (over: Record<string, unknown>) =>
+    ({
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      session: null,
+      latestTurn: null,
+      ...over,
+    }) as never;
+
+  it("keeps a thread in the agent lane while its turn is running", () => {
+    // A turn driving sub-agents: the session is not reporting itself as
+    // running, but the AI is working.
+    expect(
+      resolveKanbanLane(thread({ latestTurn: { turnId: "t1", state: "running" } })),
+    ).toBe("agent");
+  });
+
+  it("returns to the user lane once the turn completes", () => {
+    expect(
+      resolveKanbanLane(thread({ latestTurn: { turnId: "t1", state: "completed" } })),
+    ).toBe("user");
+  });
+
+  it("still surfaces a thread blocked on the user, turn or no turn", () => {
+    expect(
+      resolveKanbanLane(
+        thread({ hasPendingApprovals: true, latestTurn: { turnId: "t1", state: "running" } }),
+      ),
+    ).toBe("user");
+    expect(
+      resolveKanbanLane(
+        thread({ hasPendingUserInput: true, latestTurn: { turnId: "t1", state: "running" } }),
+      ),
+    ).toBe("user");
+  });
+
+  it("leaves an interrupted or errored turn in the user lane", () => {
+    for (const state of ["interrupted", "error"] as const) {
+      expect(resolveKanbanLane(thread({ latestTurn: { turnId: "t1", state } }))).toBe("user");
+    }
+  });
+});
+
+describe("resolveKanbanLane with an agent-ownership lease", () => {
+  const NOW = Date.parse("2026-08-16T23:45:00.000Z");
+  const leased = (agentWorkingUntil: string | null, over: Record<string, unknown> = {}) =>
+    ({
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      session: null,
+      latestTurn: null,
+      kanban: { agentWorkingUntil },
+      ...over,
+    }) as never;
+
+  it("holds the agent lane while detached work is still leased", () => {
+    // The case this exists for: `nohup ... & disown` reparents the run to pid
+    // 1, so no terminal subprocess and no live turn report it. Without the
+    // lease the card sat in the human lane for the whole run.
+    expect(resolveKanbanLane(leased("2026-08-16T23:50:00.000Z"), { nowMs: NOW })).toBe("agent");
+  });
+
+  it("releases the card once the lease lapses", () => {
+    // A run killed before it could clear its lease must not strand the card:
+    // the expiry is what heals it.
+    expect(resolveKanbanLane(leased("2026-08-16T23:40:00.000Z"), { nowMs: NOW })).toBe("user");
+  });
+
+  it("treats a cleared or malformed lease as no lease at all", () => {
+    expect(resolveKanbanLane(leased(null), { nowMs: NOW })).toBe("user");
+    expect(resolveKanbanLane(leased("whenever"), { nowMs: NOW })).toBe("user");
+  });
+
+  it("still surfaces a thread blocked on the user, lease or no lease", () => {
+    // Ownership never outranks being blocked on a human: an approval request
+    // hidden in the agent lane is a thread that waits forever.
+    expect(
+      resolveKanbanLane(leased("2026-08-16T23:50:00.000Z", { hasPendingApprovals: true }), {
+        nowMs: NOW,
+      }),
+    ).toBe("user");
+    expect(
+      resolveKanbanLane(leased("2026-08-16T23:50:00.000Z", { hasPendingUserInput: true }), {
+        nowMs: NOW,
+      }),
+    ).toBe("user");
+  });
+});
