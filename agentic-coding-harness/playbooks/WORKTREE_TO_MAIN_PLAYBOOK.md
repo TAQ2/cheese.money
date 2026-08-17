@@ -67,7 +67,9 @@ git -C <repo> push origin <base>
 ```
 The push is part of the landing, not a separate favour to be requested afterwards.
 
-### 8. Hand the human deployment instructions — the one human step
+### 8. Publish the deploy plan — then fire the parts you own
+**Publish it as bullets, never prose**: numbered, in execution order, one action per bullet, each tagged `[me]` or `[human]` and each naming the proof you will check (log line, DB row, endpoint, pixel). Where the project's deploy tool collects a human gate per run (Touch ID, hardware key), the `[me]` bullets are yours to fire in plan order — that gate is the approval, and you never route around it. Where it does not, every deploy bullet is `[human]`.
+
 Report the SHA now on `origin/<base>` and the exact deploy commands/console steps in order, including every Manual / Ops step the brief flagged (DDL, env vars, third-party dashboards, scheduled jobs, service restarts) and their ordering. If the deploy is push-triggered, say so — the push *was* the deploy, and the confirmation is just the human seeing it live.
 
 ### 9. On the human's deploy confirmation: purge the scaffolding — unasked

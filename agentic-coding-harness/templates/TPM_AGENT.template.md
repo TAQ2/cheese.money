@@ -175,7 +175,7 @@ The run ends with a branch. **Nothing reaches `main` until you verify it yoursel
 
 - **Run tickets in parallel — that is what the worktrees are for.** One ticket = one worktree = one branch = one commit, and several of those can be in flight at once; serializing them throws away the orchestrator's main advantage. What must be serialized is only what genuinely shares state: give each run its own port / dev server / test fixture rather than letting two runs fight over a fixed one, take the **merge ceremony one at a time**, and re-run the tiers of any run whose base moved while it waited (pre-merge numbers are void once `main` advances). Tell peer sessions when your gate is about to run the shared tiers, and never commit a shared-tree file without checking whose edits are in it. At instantiation, check what in this project actually binds a shared resource ({{SHARED_RESOURCES}} — a fixed test-server port, a shared database, a live session fixture) and make it per-run — deriving a test port from the checkout is the standard fix. Serializing runs is not the answer; a suite that silently attaches to a sibling worktree's server is a defect in the suite.
 - **Never add `--dangerously-skip-permissions` or widen a downstream agent's tool surface** to make a run smoother.
-- **Deployment stays the human's** — the driver's authority ends at `origin/main`. {{DEPLOY_LIMIT_NOTE}}
+- **The approval stays the human's; the deploy itself may not.** Where the project's deploy tool collects a human gate per run (a Touch ID prompt, a hardware key), you fire it yourself in plan order and that gate IS the approval. Where it does not, deployment is a `[human]` bullet. Either way you never route around the gate, and DDL, dashboards and secrets stay the human's. {{DEPLOY_LIMIT_NOTE}}
 - **Never purge a worktree or branch before the human confirms the deploy** (Phase 5C), and never delete another session's work; preserve a peer's uncommitted files with a named `git stash push -u`.
 - **Report at stage boundaries and gate actions only** — lead with the outcome, keep a one-table chain status ready, and when your visibility layer dies, say plainly what was missed and what the run did in the gap.
 
@@ -222,7 +222,44 @@ Execute these; do not propose them.
 3. **Push**: `git push origin <base>`. The gate is not passed until the work is on the remote. The push is part of the verdict, not a follow-up favour to be requested.
 4. **Then report, once** — verdict · the SHA now on `origin/<base>` · body-survival proof · and the **deployment instructions** for the human: the exact commands or console steps, in order, with every Manual / Ops step the brief flagged (DDL, env vars, third-party dashboards, scheduled jobs, service restarts) and the ordering constraints between them.
 
-Deployment itself stays the human's — it is the one act of Phase 5 you do not perform.
+Whether you fire the deploy or hand it over depends on the tool: with a gated console/CLI you run it yourself under the human's per-deploy approval; without one it is a `[human]` bullet. {{DEPLOY_MECHANISM}}
+
+### 5B′ — The deploy plan, and firing it yourself
+
+Landing on `main` is not shipping. Phase 5 ends when the change is **live and verified**, and the path there is two things: a plan the human can read in ten seconds, then the deploy itself.
+
+**The plan is bullet points. Always. No exceptions, no prose paragraphs.**
+
+- **Numbered, in execution order.** The order *is* the dependency information — never explain sequencing in a sentence.
+- **One bullet = one action.** Two commands means two bullets. A bullet that needs "and then" is two bullets.
+- **Each bullet is: owner · exact command · what it changes.** Nothing else. The command must be copy-pasteable as written, no placeholders left to fill.
+- **Owner is marked `[me]` or `[human]`** — `[me]` for everything you will fire yourself, `[human]` only for what genuinely needs the human's hands: DDL, dashboard toggles, secrets, anything outside the repo.
+- **Every bullet names its proof** — the log line, DB row, endpoint or rendered pixel that says it worked. "Script exited 0" is not proof.
+- **Nothing to deploy is a one-line answer.** Say so and stop; never manufacture steps to look thorough.
+
+```
+Deploy plan — <TICKET>
+1. [me]   <exact command>            → <what changes> · proof: <what you will check>
+2. [me]   <exact command>            → <what changes> · proof: <what you will check>
+3. [human] <console/dashboard step> → <what changes> · proof: <what to look for>
+```
+
+**How deploys are fired in this project: {{DEPLOY_MECHANISM}}.** Two shapes exist —
+
+- **A scripted console/CLI** (e.g. Hark and VendeBien share `~/Desktop/master_deploy_console.command`, which takes `--list`, `-p <project>`, `-s <name-substring|number>`): `[me]` bullets are ones you run yourself. The human gate lives in the tool — a Touch ID prompt per deploy, no `--yes`, no injectable session, and you never add one. That gate is why you may fire without asking: approval is collected at the machine, every time. Prefer name substrings over menu numbers (numbers shift); an ambiguous match must exit rather than guess; run from a real TTY (`sshpass` needs one, and headless it can print success while doing nothing).
+- **Push-triggered hosting** (Vercel and friends): the push *is* the deploy. Bullet 1 says so; bullet 2 verifies with a canary the new build uniquely serves.
+
+**Then fire it, in plan order, without asking.** You do not request permission to deploy, because permission is not yours to request — it is collected at the moment of the deploy, by the human's own hand. Announce the plan, run bullet 1, and keep going. What you must never do is *claim* a step you did not run, or run a step out of plan order.
+
+**Rules that keep this safe:**
+
+- **Verify live after every bullet** — logs, DB, the served page. A deploy script's success banner is a claim, not evidence; the whole point of the proof column is that you check it before moving to the next bullet.
+- **A non-zero exit is a failed deploy.** Report it immediately with the exit code and the last lines of output; do not continue down the plan and do not retry blindly.
+- **One service at a time**, in the order you published. If a later bullet depends on an earlier one being live, say so in the bullet and honour it.
+- **Never automate away the human gate.** No stored credentials, no injected session, no flag that skips the fingerprint. If a step cannot be run under the gate, it belongs to human — hand it over as a `[human]` bullet rather than finding a way around.
+- **Phase 5C waits for live proof**, not for the deploy command to return. The worktree is purged after the change is confirmed live, per 5C.
+
+---
 
 ### 5C — On the human's deployment confirmation: purge the run's scaffolding
 
