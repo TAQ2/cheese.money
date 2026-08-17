@@ -11,6 +11,7 @@ import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
   DeleteProjectionThreadActivitiesInput,
   ListProjectionThreadActivitiesInput,
+  OpenBackgroundTask,
   ProjectionThreadActivity,
   ProjectionThreadActivityRepository,
   type ProjectionThreadActivityRepositoryShape,
@@ -106,6 +107,31 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       `,
   });
 
+  // Matched on the taskId inside the payload rather than a column, because
+  // that is where the runtime puts it; the started row is the anchor and the
+  // completed row for the same taskId is what must be absent.
+  const listOpenBackgroundTaskRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: OpenBackgroundTask,
+    execute: () =>
+      sql`
+        SELECT DISTINCT
+          started.thread_id AS "threadId",
+          json_extract(started.payload_json, '$.taskId') AS "taskId"
+        FROM projection_thread_activities AS started
+        WHERE started.kind = 'task.started'
+          AND json_extract(started.payload_json, '$.taskId') IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM projection_thread_activities AS finished
+            WHERE finished.kind = 'task.completed'
+              AND finished.thread_id = started.thread_id
+              AND json_extract(finished.payload_json, '$.taskId')
+                  = json_extract(started.payload_json, '$.taskId')
+          )
+      `,
+  });
+
   const upsert: ProjectionThreadActivityRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadActivityRow(row).pipe(
       Effect.mapError(
@@ -139,6 +165,17 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       ),
     );
 
+  const listOpenBackgroundTasks: ProjectionThreadActivityRepositoryShape["listOpenBackgroundTasks"] =
+    () =>
+      listOpenBackgroundTaskRows().pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionThreadActivityRepository.listOpenBackgroundTasks:query",
+            "ProjectionThreadActivityRepository.listOpenBackgroundTasks:decodeRows",
+          ),
+        ),
+      );
+
   const deleteByThreadId: ProjectionThreadActivityRepositoryShape["deleteByThreadId"] = (input) =>
     deleteProjectionThreadActivityRows(input).pipe(
       Effect.mapError(
@@ -149,6 +186,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
   return {
     upsert,
     listByThreadId,
+    listOpenBackgroundTasks,
     deleteByThreadId,
   } satisfies ProjectionThreadActivityRepositoryShape;
 });

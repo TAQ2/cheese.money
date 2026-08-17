@@ -44,6 +44,13 @@ export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
 export type DeleteProjectionThreadActivitiesInput =
   typeof DeleteProjectionThreadActivitiesInput.Type;
 
+/** A background task with a `task.started` row and no `task.completed` row. */
+export const OpenBackgroundTask = Schema.Struct({
+  threadId: ThreadId,
+  taskId: Schema.String,
+});
+export type OpenBackgroundTask = typeof OpenBackgroundTask.Type;
+
 /**
  * ProjectionThreadActivityRepositoryShape - Service API for projected thread activity.
  */
@@ -66,6 +73,20 @@ export interface ProjectionThreadActivityRepositoryShape {
   readonly listByThreadId: (
     input: ListProjectionThreadActivitiesInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
+
+  /**
+   * Every background task that reported a start and never an end.
+   *
+   * Used once, at boot, to close them. A task is owned by the agent process
+   * the server spawned, so if a task is still open when the server starts, the
+   * process that could have finished it is already gone and no completion will
+   * ever arrive. Left alone these accumulate forever: the agent panel showed
+   * entries whose timers had been counting for over two weeks.
+   */
+  readonly listOpenBackgroundTasks: () => Effect.Effect<
+    ReadonlyArray<OpenBackgroundTask>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Delete projected thread activity rows by thread.

@@ -58,6 +58,7 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { KanbanClassificationReactorLive } from "./orchestration/Layers/KanbanClassificationReactor.ts";
+import { OpenBackgroundTaskReconcilerLive } from "./orchestration/Layers/OpenBackgroundTaskReconciler.ts";
 import { ClaudeAccountFailoverReactorLive } from "./provider/Layers/ClaudeAccountFailoverReactor.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
@@ -220,6 +221,8 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(KanbanClassificationReactorLive),
+  // After the engine is up, so the closing activities have somewhere to go.
+  Layer.provideMerge(OpenBackgroundTaskReconcilerLive),
   Layer.provideMerge(ClaudeAccountFailoverReactorLive),
   Layer.provideMerge(ProcessRunner.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
