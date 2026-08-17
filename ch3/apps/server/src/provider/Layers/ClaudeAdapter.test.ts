@@ -1871,6 +1871,52 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("closes a task whose only ending is a terminal task_updated patch", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      // One event fewer than the task_progress case: a terminal patch carries
+      // no usage snapshot, so there is no token-usage event alongside it.
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 5).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      // The regression this guards: `task_notification` was treated as the
+      // only completion signal, and it never arrives for a backgrounded or
+      // killed task. Those tasks stayed "started" forever — the panel
+      // accumulated entries counting up for days.
+      harness.query.emit({
+        type: "system",
+        subtype: "task_updated",
+        task_id: "task-killed-1",
+        patch: { status: "killed", end_time: 1_760_000_000_000, error: "stopped by the user" },
+        session_id: "sdk-session-task-updated",
+        uuid: "task-updated-killed",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const completed = runtimeEvents.find((event) => event.type === "task.completed");
+      assert.equal(completed?.type, "task.completed");
+      if (completed?.type === "task.completed") {
+        // "killed" is the CLI's word; the runtime contract calls it stopped.
+        assert.equal(completed.payload.status, "stopped");
+        assert.equal(completed.payload.taskId, "task-killed-1");
+        assert.equal(completed.payload.summary, "stopped by the user");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("consumes undeclared and UX-internal system subtypes without warning rows", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

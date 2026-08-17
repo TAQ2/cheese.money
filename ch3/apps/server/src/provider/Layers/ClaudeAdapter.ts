@@ -2841,11 +2841,42 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         return;
-      // Task state patch (status/backgrounded/end_time). No runtime mapping
-      // yet — the terminal task_notification reports the outcome — but it
-      // must not surface as an unknown-subtype warning row.
-      case "task_updated":
+      // Task state patch (status/backgrounded/end_time).
+      //
+      // A terminal status here IS the task ending, and it must be reported as
+      // such: `task_notification` was the only completion signal, and it never
+      // arrives for a task that is backgrounded, killed, or abandoned when the
+      // session ends. Dropping this patch left those tasks "started" forever —
+      // the tasks panel accumulated entries whose timers ran for days, one of
+      // them for over two weeks, because nothing else ever closed them.
+      //
+      // Non-terminal patches (pending/running/paused, a description edit, a
+      // backgrounding flag) are still ignored: they change how a task is
+      // running, not whether it is.
+      case "task_updated": {
+        const patchedStatus = message.patch?.status;
+        const terminalStatus =
+          patchedStatus === "completed"
+            ? ("completed" as const)
+            : patchedStatus === "failed"
+              ? ("failed" as const)
+              : // "killed" is the CLI's word for a task that was stopped from
+                // outside; the runtime contract calls that "stopped".
+                patchedStatus === "killed"
+                ? ("stopped" as const)
+                : null;
+        if (terminalStatus === null) return;
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "task.completed",
+          payload: {
+            taskId: RuntimeTaskId.make(message.task_id),
+            status: terminalStatus,
+            ...(message.patch?.error ? { summary: message.patch.error } : {}),
+          },
+        });
         return;
+      }
       case "task_notification":
         yield* emitThreadTokenUsage(
           context,
