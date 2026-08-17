@@ -304,14 +304,20 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   onTogglePlanSidebar: () => void;
   showTerminalToggle: boolean;
   terminalOpen: boolean;
+  /**
+   * Work is running underneath this thread — a terminal subprocess, or a
+   * background task the agent launched. Pulses the control so a run is
+   * visible without opening the drawer.
+   */
+  terminalBusy: boolean;
   terminalShortcutLabel: string | null;
   onToggleTerminal: () => void;
 }) {
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
   const RuntimeModeIcon = runtimeModeOption.icon;
   const terminalTooltip = `${props.terminalOpen ? "Hide" : "Open"} terminal pane${
-    props.terminalShortcutLabel ? ` (${props.terminalShortcutLabel})` : ""
-  }`;
+    props.terminalBusy ? " — something is running" : ""
+  }${props.terminalShortcutLabel ? ` (${props.terminalShortcutLabel})` : ""}`;
   const interactionModeTooltip =
     props.interactionMode === "plan"
       ? "Plan mode — click to return to normal build mode"
@@ -436,7 +442,11 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
                     "shrink-0 whitespace-nowrap",
                     props.terminalOpen
                       ? "bg-blue-500/10 text-blue-400 hover:bg-blue-500/15 hover:text-blue-300"
-                      : "text-muted-foreground/70 hover:text-foreground/80",
+                      : props.terminalBusy
+                        ? // Same teal the sidebar uses for a running terminal,
+                          // so one colour means "running" everywhere.
+                          "text-teal-600 hover:text-teal-500 dark:text-teal-300/90"
+                        : "text-muted-foreground/70 hover:text-foreground/80",
                   )}
                   type="button"
                   onClick={props.onToggleTerminal}
@@ -446,7 +456,10 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             >
               <ComposerControlIcon
                 icon={PanelBottomIcon}
-                className={props.terminalOpen ? "text-current opacity-100" : undefined}
+                className={cn(
+                  props.terminalOpen ? "text-current opacity-100" : undefined,
+                  props.terminalBusy ? "animate-status-pulse" : undefined,
+                )}
               />
               <span className="sr-only sm:not-sr-only">Terminal</span>
             </TooltipTrigger>
@@ -639,6 +652,9 @@ export interface ChatComposerProps {
   settings: UnifiedSettings;
   keybindings: ResolvedKeybindingsConfig;
   terminalOpen: boolean;
+  /** Something is running under this thread: a terminal subprocess, or a
+      background task the agent launched. */
+  terminalBusy?: boolean | undefined;
   gitCwd: string | null;
   /** Opens the terminal drawer, mirroring the window-level panel control so the
    * pane is reachable from the composer instead of only a keyboard shortcut. */
@@ -737,6 +753,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     settings,
     keybindings,
     terminalOpen,
+    terminalBusy = false,
     gitCwd,
     onToggleTerminal,
     promptRef,
@@ -3590,6 +3607,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       onTogglePlanSidebar={togglePlanSidebar}
                       showTerminalToggle={onToggleTerminal !== undefined}
                       terminalOpen={terminalOpen}
+                      terminalBusy={terminalBusy}
                       terminalShortcutLabel={shortcutLabelForCommand(
                         keybindings,
                         "terminal.toggle",

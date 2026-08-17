@@ -202,6 +202,7 @@ import { type ReviewCommentContext } from "../reviewCommentContext";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
+import { isAgentWorkingLeaseActive } from "./kanban/Kanban.logic";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
 import {
@@ -1497,6 +1498,21 @@ function ChatViewContent(props: ChatViewProps) {
     environmentId: activeThread?.environmentId ?? null,
     threadId: activeThreadId,
   });
+  /**
+   * Something is running under this thread, from either side of the fence.
+   *
+   * A terminal subprocess is the visible case — an orchestration script the
+   * user started. The agent-ownership lease is the invisible one: work the
+   * agent launched detached reparents away from every terminal, so the only
+   * thing that knows is the lease the server holds while the thread's
+   * background tasks are open. Both mean the same thing to a reader, so the
+   * terminal control pulses for either.
+   */
+  const threadHasWorkRunning =
+    runningTerminalIds.length > 0 ||
+    (activeThread !== undefined &&
+      activeThread !== null &&
+      isAgentWorkingLeaseActive(activeThread));
   const activeThreadKnownSessionsRaw = useKnownTerminalSessions({
     environmentId: activeThread?.environmentId ?? null,
     threadId: activeThreadId,
@@ -6657,6 +6673,7 @@ function ChatViewContent(props: ChatViewProps) {
                             settings={settings}
                             keybindings={keybindings}
                             terminalOpen={Boolean(terminalUiState.terminalOpen)}
+                            terminalBusy={threadHasWorkRunning}
                             gitCwd={gitCwd}
                             promptRef={promptRef}
                             composerImagesRef={composerImagesRef}

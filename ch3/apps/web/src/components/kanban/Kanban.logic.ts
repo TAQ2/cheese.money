@@ -109,7 +109,9 @@ export function resolveKanbanColumn(
  * than one that simply falls back to its execution signals.
  */
 export function isAgentWorkingLeaseActive(
-  thread: SidebarThreadSummary,
+  // Only the kanban block is read, so the full shell is not required: the chat
+  // view holds the richer thread type and needs the same answer.
+  thread: Pick<SidebarThreadSummary, "kanban">,
   nowMs: number = Date.now(),
 ): boolean {
   const until = thread.kanban?.agentWorkingUntil;

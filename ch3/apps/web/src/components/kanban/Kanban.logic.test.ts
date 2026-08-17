@@ -14,6 +14,7 @@ import {
   kanbanPushTarget,
   planKanbanMove,
   resolveKanbanColumn,
+  isAgentWorkingLeaseActive,
   resolveKanbanLane,
   resolveWipLimit,
   type KanbanBoardSettings,
@@ -382,5 +383,25 @@ describe("resolveKanbanLane with an agent-ownership lease", () => {
         nowMs: NOW,
       }),
     ).toBe("user");
+  });
+});
+
+describe("isAgentWorkingLeaseActive", () => {
+  const NOW = Date.parse("2026-08-16T23:45:00.000Z");
+
+  it("reads a lease off anything carrying the kanban block", () => {
+    // The chat view holds the richer thread type, not the sidebar shell, and
+    // asks the same question to decide whether the terminal control pulses.
+    expect(
+      isAgentWorkingLeaseActive({ kanban: { agentWorkingUntil: "2026-08-16T23:50:00.000Z" } } as never, NOW),
+    ).toBe(true);
+    expect(
+      isAgentWorkingLeaseActive({ kanban: { agentWorkingUntil: "2026-08-16T23:40:00.000Z" } } as never, NOW),
+    ).toBe(false);
+  });
+
+  it("is false when the thread has no kanban block at all", () => {
+    expect(isAgentWorkingLeaseActive({ kanban: null } as never, NOW)).toBe(false);
+    expect(isAgentWorkingLeaseActive({} as never, NOW)).toBe(false);
   });
 });
