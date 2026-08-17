@@ -1160,8 +1160,8 @@ export function AccountsSettingsPanel() {
   const config = (instance.config ?? {}) as Record<string, unknown>;
   const homePath = typeof config["homePath"] === "string" ? config["homePath"] : "";
   const failoverEnabled = config["accountFailoverEnabled"] === true;
-  // Default ON: absent means enabled, matching the server's own read.
-  const rotationEnabled = config["accountRotationEnabled"] !== false;
+  // Opt-in: absent means disabled, matching the server's own read.
+  const rotationEnabled = config["accountRotationEnabled"] === true;
 
   const updateConfigValue = (key: string, value: unknown) => {
     updateSettings(

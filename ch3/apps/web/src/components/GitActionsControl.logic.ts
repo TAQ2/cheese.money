@@ -201,6 +201,14 @@ export function resolveQuickAction(
     };
   }
 
+  // PR-first: once a change request is open it is where the work is going,
+  // so it owns the always-visible slot. Commit and Push stay one click away
+  // in the menu, which offers them independently of this choice. The default
+  // ref is exempt — there is nothing to view from main.
+  if (hasOpenPr && !isDefaultRef) {
+    return { label: `View ${terminology.shortLabel}`, disabled: false, kind: "open_pr" };
+  }
+
   if (hasChanges) {
     if (!gitStatus.hasUpstream && !hasPrimaryRemote) {
       return { label: "Commit", disabled: false, kind: "run_action", action: "commit" };

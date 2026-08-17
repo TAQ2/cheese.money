@@ -326,12 +326,13 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
     /**
      * Proactive account rotation (start on the best-positioned account,
-     * re-evaluate after 60% of the session). ON by default — declared here
-     * so a decode of the config blob preserves an explicit opt-out instead
-     * of silently re-enabling.
+     * re-evaluate after 60% of the session). OFF by default: the probe that
+     * scores accounts reads the Claude credential from the login keychain on
+     * a timer whose first tick fires at startup, which prompts for consent
+     * on any machine that has not already granted it. Opt in per instance.
      */
     accountRotationEnabled: Schema.Boolean.pipe(
-      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
     /**

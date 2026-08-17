@@ -58,6 +58,13 @@ const environmentInput = {
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
+// The real URL the Claude CLI hands back when CH3 starts an account sign-in:
+// CLAUDE_AI_AUTHORIZE_URL from @anthropic-ai/claude-agent-sdk's own default
+// config (verified against the vendored 0.3.170 build) — the personal-
+// subscription scope, on claude.com, not claude.ai.
+const CLAUDE_OAUTH_SIGN_IN_URL =
+  "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A64409%2Fcallback&scope=user%3Ainference&state=x";
+
 function makeFakeBrowserWindow() {
   const windowListeners = new Map<string, (...args: readonly unknown[]) => void>();
   const webContentsListeners = new Map<string, (...args: readonly unknown[]) => void>();
@@ -117,6 +124,7 @@ function makeFakeBrowserWindow() {
     reload: webContents.reload,
     send: webContents.send,
     setAutoHideCursor: window.setAutoHideCursor,
+    setWindowOpenHandler: webContents.setWindowOpenHandler,
     webContentsListeners,
     windowListeners,
   };
@@ -404,6 +412,61 @@ describe("DesktopWindow", () => {
       }),
     );
   });
+
+  it("recognizes only the Claude account sign-in page as an in-app OAuth window", () => {
+    assert.isTrue(DesktopWindow.isClaudeOAuthSignInUrl(CLAUDE_OAUTH_SIGN_IN_URL));
+    // The personal-subscription flow's authorize host — the one the account
+    // switcher actually hits. Missing this is why sign-in bounced to the
+    // system browser instead of opening in-app: the check only ever matched
+    // `claude.ai`, a host the live SDK does not use for this flow.
+    assert.isTrue(DesktopWindow.isClaudeOAuthSignInUrl("https://claude.com/cai/oauth/authorize"));
+    // The console/API-key flow's authorize host.
+    assert.isTrue(DesktopWindow.isClaudeOAuthSignInUrl("https://platform.claude.com/oauth/authorize"));
+    assert.isTrue(DesktopWindow.isClaudeOAuthSignInUrl("https://claude.ai/oauth"));
+    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("http://claude.ai/oauth/authorize"));
+    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("http://claude.com/cai/oauth/authorize"));
+    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("https://evil.example/oauth/authorize"));
+    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("https://claude.ai/settings/profile"));
+    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("https://claude.com/settings/profile"));
+    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("not a url"));
+  });
+
+  it.effect("keeps the Claude sign-in in-app and shells out every other window.open", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const openedExternalUrls: unknown[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        openedExternalUrls,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const handler = fakeWindow.setWindowOpenHandler.mock.calls[0]?.[0] as
+          | ((details: { readonly url: string }) => Electron.WindowOpenHandlerResponse)
+          | undefined;
+        if (!handler) {
+          return yield* Effect.die("window-open handler was not registered");
+        }
+
+        const signIn = handler({ url: CLAUDE_OAUTH_SIGN_IN_URL });
+        yield* Effect.promise(() => Promise.resolve());
+        assert.strictEqual(signIn.action, "allow");
+        assert.deepEqual(openedExternalUrls, []);
+
+        const external = handler({ url: "https://example.com/pricing" });
+        yield* Effect.promise(() => Promise.resolve());
+        assert.strictEqual(external.action, "deny");
+        assert.deepEqual(openedExternalUrls, ["https://example.com/pricing"]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
 
   it.effect("does not open a development window until the backend is ready", () =>
     Effect.gen(function* () {

@@ -1,9 +1,8 @@
 import type { ClaudeAccountProfile, EnvironmentId } from "@ch3tools/contracts";
 import { squashAtomCommandFailure } from "@ch3tools/client-runtime/state/runtime";
 import { CheckIcon, LoaderIcon, LogOutIcon, PlusIcon, SparklesIcon, UserRoundIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { readLocalApi } from "../../localApi";
 import {
   claudeProfilePrimaryLabel,
   claudeProfileSecondaryLabel,
@@ -12,7 +11,9 @@ import {
   isSelectableClaudeProfile,
   isSignedInClaudeProfile,
   recommendClaudeAccount,
+  suggestClaudeAccountFolder,
 } from "./ClaudeAccountSwitcher.logic";
+import { useClaudeAccountSwitchStore } from "../../claudeAccountSwitchStore";
 import { claudeAccountEnvironment } from "../../state/claudeAccounts";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
@@ -28,9 +29,6 @@ import { cn } from "~/lib/utils";
  * switching back is instant. Signing a new one in runs the CLI's own OAuth
  * flow over its local control channel — no tokens are spent anywhere here.
  */
-/** How long the recommendation highlight stays up before the panel goes quiet. */
-const RECOMMENDATION_HIGHLIGHT_MS = 5000;
-
 export interface ClaudeAccountsManagerProps {
   readonly environmentId: EnvironmentId;
   readonly currentHomePath: string;
@@ -69,14 +67,11 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
   // Which row is awaiting a sign-out confirmation. Clearing a credential is
   // destructive and irreversible in one click, so it takes two.
   const [signOutConfirm, setSignOutConfirm] = useState<string | null>(null);
-  // Electron's renderer ignores window.prompt() entirely — it returns without
-  // showing anything, which is why "Add account…" appeared to do nothing.
-  // The folder is collected inline instead.
-  const [newFolder, setNewFolder] = useState<string | null>(null);
-  // The recommendation is a momentary answer, not state the panel keeps: usage
-  // moves under it, so a highlight left on screen would quietly go stale.
+  // The highlight stays up for as long as the panel is open: it is an answer
+  // the user asked for and may act on, and a self-clearing highlight took it
+  // away mid-read. Leaving the view unmounts this component, which drops it —
+  // so the answer never outlives the screen it was asked on.
   const [recommendedHomePath, setRecommendedHomePath] = useState<string | null>(null);
-  const recommendationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const listProfiles = useAtomCommand(claudeAccountEnvironment.listProfiles, {
     reportFailure: false,
@@ -84,6 +79,7 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
   const startLogin = useAtomCommand(claudeAccountEnvironment.startLogin, { reportFailure: false });
   const awaitLogin = useAtomCommand(claudeAccountEnvironment.awaitLogin, { reportFailure: false });
   const signOut = useAtomCommand(claudeAccountEnvironment.signOut, { reportFailure: false });
+  const noteAccountSwitched = useClaudeAccountSwitchStore((store) => store.noteAccountSwitched);
 
   const refresh = useCallback(async () => {
     setBusy("listing");
@@ -107,10 +103,6 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
   }, [currentHomePath, environmentId, listProfiles]);
 
   const showRecommendation = useCallback(() => {
-    if (recommendationTimer.current !== null) {
-      clearTimeout(recommendationTimer.current);
-      recommendationTimer.current = null;
-    }
     const recommendation = recommendClaudeAccount({
       profiles: profiles ?? [],
       nowMs: Date.now(),
@@ -124,33 +116,14 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
     }
     setRecommendedHomePath(recommendation.homePath);
     setNotice(recommendation.detail);
-    recommendationTimer.current = setTimeout(() => {
-      recommendationTimer.current = null;
-      setRecommendedHomePath(null);
-      setNotice(null);
-    }, RECOMMENDATION_HIGHLIGHT_MS);
   }, [profiles]);
-
-  // A pending timer outliving the panel would set state on an unmounted
-  // component — and the popover host unmounts on every close.
-  useEffect(
-    () => () => {
-      if (recommendationTimer.current !== null) {
-        clearTimeout(recommendationTimer.current);
-        recommendationTimer.current = null;
-      }
-    },
-    [],
-  );
 
   const addAccount = useCallback(
     async (folder: string) => {
-      const localApi = readLocalApi();
       const homePath = folder.trim();
       if (homePath.length === 0) {
         return;
       }
-      setNewFolder(null);
       setBusy("signing-in");
       setNotice("Starting sign-in…");
       const started = (await startLogin({ environmentId, input: { homePath } })) as
@@ -166,12 +139,13 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
       }
       const url = started.value.url;
       if (url) {
-        if (localApi) {
-          void localApi.shell.openExternal(url);
-        } else {
-          window.open(url, "_blank", "noopener");
-        }
-        setNotice("Authorize in the browser window that just opened — this waits for it.");
+        // ONE path only: the desktop shell intercepts this window.open and
+        // shows the OAuth page as an in-app child window (DesktopWindow's
+        // window-open handler). The preview-panel route was removed — its
+        // navigation policy could bounce the OAuth redirect to the system
+        // browser. A plain browser build opens a tab, as before.
+        window.open(url, "_blank");
+        setNotice("Authorize in the CH3 sign-in window that just opened — this waits for it.");
       } else {
         setNotice(
           `Claude returned no sign-in link. Run \`CLAUDE_CONFIG_DIR=${homePath} claude\` in a terminal and use /login instead.`,
@@ -329,6 +303,10 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
                       return;
                     }
                     onSelectHomePath(homePathSettingForProfile(profile));
+                    // Re-key the usage band so it reads the account just
+                    // chosen, instead of showing the previous one's numbers
+                    // until its next poll.
+                    noteAccountSwitched(profile.homePath);
                     onSelected?.();
                   }}
                 >
@@ -442,53 +420,6 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
         <p className="text-xs text-muted-foreground">No Claude config directories found.</p>
       ) : null}
 
-      {newFolder !== null ? (
-        <div className="grid gap-1.5 rounded-md border border-border/60 p-2">
-          <label className="text-[11px] text-muted-foreground" htmlFor="claude-account-folder">
-            Folder for the new account — its credentials live here
-          </label>
-          <input
-            id="claude-account-folder"
-            autoFocus
-            className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-[13px] outline-none focus:border-ring"
-            value={newFolder}
-            disabled={busy !== null}
-            onChange={(event) => setNewFolder(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void addAccount(newFolder);
-              }
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setNewFolder(null);
-              }
-            }}
-          />
-          <div className="flex items-center justify-end gap-1">
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="h-6 px-2 text-xs"
-              disabled={busy !== null}
-              onClick={() => setNewFolder(null)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              className="h-6 px-2 text-xs"
-              disabled={busy !== null || newFolder.trim().length === 0}
-              onClick={() => void addAccount(newFolder)}
-            >
-              Sign in
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
       {notice ? (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="min-w-0">{notice}</span>
@@ -531,7 +462,9 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
         <span className="min-w-0 leading-snug">
           Start on the best-positioned account, then stick with it until 60% of its 5-hour session
           is spent — after that, check every two minutes for an account with more weekly allowance
-          expiring before its reset, and rest the current one. Never mid-reply.
+          expiring before its reset, and rest the current one. Never mid-reply. Scoring accounts
+          reads your Claude credential from the login keychain, so macOS may ask for permission the
+          first time.
         </span>
       </label>
 
@@ -542,7 +475,11 @@ export function ClaudeAccountsManager(props: ClaudeAccountsManagerProps) {
           variant="ghost"
           className="h-7 gap-1.5 px-2 text-xs"
           disabled={busy !== null}
-          onClick={() => setNewFolder((existing) => existing ?? "~/.claude-2")}
+          // No folder prompt: the next free `~/.claude-<n>` is computed from
+          // the profile list as it stands now and used directly — the free-
+          // slot logic already guarantees it never names an occupied folder,
+          // so there is nothing for the user to decide.
+          onClick={() => void addAccount(suggestClaudeAccountFolder(profiles))}
         >
           {busy === "signing-in" ? (
             <LoaderIcon className="size-3 animate-spin" />

@@ -152,7 +152,18 @@ describe("when: git status is unavailable", () => {
 });
 
 describe("when: ref is clean, ahead, and has an open PR", () => {
-  it("resolveQuickAction prefers push", () => {
+  it("resolveQuickAction keeps commit & push primary on the default ref", () => {
+    // There is no change request to view from main, so the old order holds
+    // exactly where the PR-first rule has nothing to offer.
+    const quick = resolveQuickAction(status({ hasWorkingTreeChanges: true }), false, true);
+    assert.deepInclude(quick, {
+      kind: "run_action",
+      action: "commit_push",
+      label: "Commit & push",
+    });
+  });
+
+  it("resolveQuickAction offers the open PR ahead of pushing", () => {
     const quick = resolveQuickAction(
       status({
         aheadCount: 3,
@@ -167,7 +178,9 @@ describe("when: ref is clean, ahead, and has an open PR", () => {
       }),
       false,
     );
-    assert.deepInclude(quick, { kind: "run_action", action: "push", label: "Push" });
+    // PR-first: an open change request owns the primary slot; Push stays in
+    // the menu, which offers it independently.
+    assert.deepInclude(quick, { kind: "open_pr", label: "View PR" });
   });
 
   it("buildMenuItems enables push and keeps open PR available", () => {
@@ -414,7 +427,7 @@ describe("when: working tree has local changes", () => {
     });
   });
 
-  it("resolveQuickAction returns commit and push when open PR exists", () => {
+  it("resolveQuickAction offers the open PR even with uncommitted changes", () => {
     const quick = resolveQuickAction(
       status({
         hasWorkingTreeChanges: true,
@@ -430,9 +443,8 @@ describe("when: working tree has local changes", () => {
       false,
     );
     assert.deepInclude(quick, {
-      kind: "run_action",
-      action: "commit_push",
-      label: "Commit & push",
+      kind: "open_pr",
+      label: "View PR",
     });
   });
 
@@ -660,7 +672,7 @@ describe("when: ref has no upstream configured", () => {
     });
   });
 
-  it("resolveQuickAction runs push when clean, no upstream, and local commits are ahead", () => {
+  it("resolveQuickAction offers the open PR when clean, no upstream, and ahead", () => {
     const quick = resolveQuickAction(
       status({
         hasUpstream: false,
@@ -677,9 +689,8 @@ describe("when: ref has no upstream configured", () => {
       false,
     );
     assert.deepInclude(quick, {
-      kind: "run_action",
-      action: "push",
-      label: "Push",
+      kind: "open_pr",
+      label: "View PR",
       disabled: false,
     });
   });

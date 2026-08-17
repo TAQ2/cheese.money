@@ -113,15 +113,15 @@ describe("effectiveSettled", () => {
             running,
             pending,
             // Settled iff nothing blocks (pending work / live session) AND
-            // the override says settled, or (with no override) a merged PR
-            // or staleness auto-settles. The "active" pin suppresses both
-            // auto signals.
+            // the override says settled, or (with no override) staleness
+            // auto-settles. A merged PR deliberately does NOT settle — that
+            // decision belongs to the user. The "active" pin suppresses the
+            // auto signal.
             expected:
               pending === undefined &&
               !running &&
               (settledOverride === "settled" ||
-                (settledOverride === null &&
-                  (changeRequestState === "merged" || inactivity === "stale"))),
+                (settledOverride === null && inactivity === "stale")),
           })),
         ),
       ),
@@ -152,18 +152,7 @@ describe("effectiveSettled", () => {
     },
   );
 
-  it("treats closed change requests like merged ones", () => {
-    const shell = makeShell({ activityAt: null });
-    expect(
-      effectiveSettled(shell, {
-        now: NOW,
-        autoSettleAfterDays: null,
-        changeRequestState: "closed",
-      }),
-    ).toBe(true);
-  });
-
-  it("settles immediately when a change request merges or closes", () => {
+  it("never settles a thread just because its change request merged or closed", () => {
     const recentlyActive = makeShell({ activityAt: "2026-04-09T23:59:59.999Z" });
     for (const changeRequestState of ["merged", "closed"] as const) {
       expect(
@@ -172,7 +161,7 @@ describe("effectiveSettled", () => {
           autoSettleAfterDays: null,
           changeRequestState,
         }),
-      ).toBe(true);
+      ).toBe(false);
     }
   });
 

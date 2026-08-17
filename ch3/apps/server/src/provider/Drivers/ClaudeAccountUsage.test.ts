@@ -36,8 +36,34 @@ describe("Claude account usage", () => {
     expect(parseClaudeAccountUsage(realResponse)).toEqual({
       sessionPercent: 26,
       weekPercent: 3,
+      modelWeekPercent: 4,
       sessionResetsAt: "2026-08-04T08:30:00.467042+00:00",
       weekResetsAt: "2026-08-08T12:59:00+00:00",
+    });
+  });
+
+  it("reads the per-model Fable cap from the limits array", () => {
+    // The current endpoint shape: per-model caps live in `limits[]`, matched
+    // by scope.model.display_name — not under a seven_day_<model> key.
+    const response = JSON.stringify({
+      five_hour: { utilization: 10.0, resets_at: "2026-08-14T20:00:00+00:00" },
+      seven_day: { utilization: 50.0, resets_at: "2026-08-16T13:00:00+00:00" },
+      limits: [
+        { percent: 12.0, scope: { model: { display_name: "Claude Haiku 4.5" } } },
+        {
+          percent: 97.0,
+          resets_at: "2026-08-16T13:00:00+00:00",
+          scope: { model: { display_name: "Claude Fable 5" } },
+        },
+      ],
+    });
+    expect(parseClaudeAccountUsage(response)).toEqual({
+      sessionPercent: 10,
+      weekPercent: 50,
+      modelWeekPercent: 97,
+      sessionResetsAt: "2026-08-14T20:00:00+00:00",
+      weekResetsAt: "2026-08-16T13:00:00+00:00",
+      modelWeekResetsAt: "2026-08-16T13:00:00+00:00",
     });
   });
 
@@ -308,5 +334,31 @@ describe("Claude account usage reads", () => {
         ),
       ),
     );
+  });
+});
+
+it("reports the most constraining per-model window, not the first one listed", () => {
+  // The endpoint can carry a 5-hour and a weekly cap for the same model.
+  // Showing whichever came first let the band read comfortable while the
+  // binding window was full.
+  const response = JSON.stringify({
+    five_hour: { utilization: 10.0 },
+    seven_day: { utilization: 50.0 },
+    limits: [
+      {
+        percent: 56.0,
+        resets_at: "2026-08-19T23:59:00+00:00",
+        scope: { model: { display_name: "Claude Fable 5" } },
+      },
+      {
+        percent: 100.0,
+        resets_at: "2026-08-15T03:39:00+00:00",
+        scope: { model: { display_name: "Claude Fable 5" } },
+      },
+    ],
+  });
+  expect(parseClaudeAccountUsage(response)).toMatchObject({
+    modelWeekPercent: 100,
+    modelWeekResetsAt: "2026-08-15T03:39:00+00:00",
   });
 });

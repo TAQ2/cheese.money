@@ -623,8 +623,9 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   });
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
   const settledPrHoverClass = pr ? settledPrHoverColorClass(pr.state) : undefined;
-  // Report the PR state up: the parent partitions rows with effectiveSettled,
-  // and a merged/closed PR auto-settles a thread — data only rows have.
+  // Report the PR state up for the parent's partition input. Note a
+  // merged/closed PR deliberately does NOT auto-settle a thread anymore —
+  // settling is the user's call; the state still feeds the row's PR badge.
   const prState = pr?.state ?? null;
   useEffect(() => {
     onChangeRequestState(threadKey, prState);

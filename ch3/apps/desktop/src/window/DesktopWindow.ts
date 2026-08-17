@@ -24,6 +24,9 @@ const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linu
 const TITLEBAR_LIGHT_SYMBOL_COLOR = "#1f2937";
 const TITLEBAR_DARK_SYMBOL_COLOR = "#f8fafc";
 const MAIN_WINDOW_BOUNDS_PERSIST_DEBOUNCE_MS = 500;
+// Long enough for the CLI's loopback success page to render before the
+// in-app OAuth child window closes itself.
+const CLAUDE_OAUTH_WINDOW_CLOSE_DELAY_MS = 1_500;
 const DEVELOPMENT_LOAD_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 const DEVELOPMENT_RETRYABLE_LOAD_ERROR_CODES = new Set([
   -2, // ERR_FAILED
@@ -152,6 +155,34 @@ function buildConnectingSplashDataUrl(shouldUseDarkColors: boolean): string {
   const track = shouldUseDarkColors ? "rgba(248,250,252,0.18)" : "rgba(31,41,55,0.18)";
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>html,body{margin:0;height:100%}body{background:${background};color:${label};font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;-webkit-user-select:none;user-select:none;-webkit-app-region:drag}.spinner{width:26px;height:26px;border:3px solid ${track};border-top-color:${accent};border-radius:50%;animation:spin .8s linear infinite}.label{font-size:13px}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body><div class="spinner"></div><div class="label">Connecting to WSL…</div></body></html>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
+/**
+ * The Claude OAuth page CH3 opens during account sign-in — the only
+ * window.open target allowed to become an in-app child window. Everything
+ * else keeps the deny-and-shell-out policy.
+ *
+ * The claude-agent-sdk issues the authorize URL from one of two hosts
+ * depending on scope, and neither is `claude.ai` itself:
+ *   - `platform.claude.com/oauth/authorize` — CONSOLE_AUTHORIZE_URL, the
+ *     API-key/console scope.
+ *   - `claude.com/cai/oauth/authorize` — CLAUDE_AI_AUTHORIZE_URL, the
+ *     personal-subscription scope CH3's account sign-in actually uses.
+ * (Confirmed against @anthropic-ai/claude-agent-sdk 0.3.170's own default
+ * config.) `claude.ai/oauth` is kept too in case a future SDK version reverts
+ * to it — matching it is free, since the check is host+path scoped either way.
+ */
+export function isClaudeOAuthSignInUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:") return false;
+    if (url.hostname === "claude.ai" && url.pathname.startsWith("/oauth")) return true;
+    if (url.hostname === "platform.claude.com" && url.pathname.startsWith("/oauth")) return true;
+    if (url.hostname === "claude.com" && url.pathname.startsWith("/cai/oauth")) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export function isSameOriginRendererNavigation(input: {
@@ -493,10 +524,47 @@ export const make = Effect.gen(function* () {
     });
 
     window.webContents.setWindowOpenHandler(({ url }) => {
+      // The Claude account sign-in stays inside CH3: the accounts view has
+      // no thread panel to host it, so the OAuth page opens as an app child
+      // window instead of bouncing the user to an external browser.
+      if (isClaudeOAuthSignInUrl(url)) {
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: {
+            width: 520,
+            height: 760,
+            autoHideMenuBar: true,
+            webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
+          },
+        };
+      }
       if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
         void runPromise(electronShell.openExternal(url));
       }
       return { action: "deny" };
+    });
+    window.webContents.on("did-create-window", (child, details) => {
+      if (!isClaudeOAuthSignInUrl(details.url)) return;
+      // The flow ends on the CLI's loopback callback page; once the child
+      // lands there the sign-in is complete and the window has nothing left
+      // to say — close it after a beat so the success page registers.
+      child.webContents.on("did-navigate", (_event, navigatedUrl) => {
+        try {
+          const parsed = new URL(navigatedUrl);
+          if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") return;
+        } catch {
+          return;
+        }
+        runFork(
+          Effect.sleep(CLAUDE_OAUTH_WINDOW_CLOSE_DELAY_MS).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                if (!child.isDestroyed()) child.close();
+              }),
+            ),
+          ),
+        );
+      });
     });
     window.webContents.on("will-navigate", (event, url) => {
       if (

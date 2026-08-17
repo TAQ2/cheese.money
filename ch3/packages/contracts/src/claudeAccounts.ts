@@ -10,9 +10,15 @@ import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 export const ClaudeAccountUsage = Schema.Struct({
   sessionPercent: Schema.Number,
   weekPercent: Schema.Number,
+  /**
+   * The per-model weekly cap (Fable on current plans), 0–100. Absent when
+   * the plan reports no per-model window.
+   */
+  modelWeekPercent: Schema.optionalKey(Schema.Number),
   /** ISO instants, when the endpoint supplies them. */
   sessionResetsAt: Schema.optionalKey(Schema.String),
   weekResetsAt: Schema.optionalKey(Schema.String),
+  modelWeekResetsAt: Schema.optionalKey(Schema.String),
 });
 export type ClaudeAccountUsage = typeof ClaudeAccountUsage.Type;
 
@@ -148,7 +154,15 @@ export type ClaudeAccountSignOutResult = typeof ClaudeAccountSignOutResult.Type;
  * out to every thread's band — the reverse of the old per-thread statusline
  * poll that hit the rate-limited endpoint once per open conversation.
  */
-export const ClaudeCurrentUsageInput = Schema.Struct({});
+export const ClaudeCurrentUsageInput = Schema.Struct({
+  /**
+   * The account the caller believes is in use. The server ignores it — it
+   * resolves the in-use account itself — but it makes a switch visible to the
+   * client's query cache, so the band refetches on switch instead of showing
+   * the previous account until its next poll.
+   */
+  accountKey: Schema.optionalKey(Schema.String),
+});
 export type ClaudeCurrentUsageInput = typeof ClaudeCurrentUsageInput.Type;
 
 export const ClaudeCurrentUsageResult = Schema.Struct({

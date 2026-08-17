@@ -474,10 +474,10 @@ export function ProviderInstanceCard({
   const claudeFailoverEnabled =
     (instance.config as { accountFailoverEnabled?: unknown } | undefined)
       ?.accountFailoverEnabled === true;
-  // Default ON: absent means enabled, matching the server's own read.
+  // Opt-in: absent means disabled, matching the server's own read.
   const claudeRotationEnabled =
     (instance.config as { accountRotationEnabled?: unknown } | undefined)
-      ?.accountRotationEnabled !== false;
+      ?.accountRotationEnabled === true;
 
   const updateEnabled = (value: boolean) => {
     onUpdate({ ...instance, enabled: value });

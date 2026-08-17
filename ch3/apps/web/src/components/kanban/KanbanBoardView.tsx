@@ -129,6 +129,7 @@ export function KanbanBoardView() {
   const settings = useClientSettings();
   const updateSettings = useUpdateClientSettings();
   const updateKanban = useAtomCommand(threadEnvironment.updateKanban);
+  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata);
   const { settleThread, unsettleThread, snoozeThread, unsnoozeThread } = useThreadActions();
   const { environments } = useEnvironments();
   const now = useMinuteNow();
@@ -1009,6 +1010,20 @@ export function KanbanBoardView() {
                 onClick={() => runCategorization(cardMenu.thread)}
               >
                 Run categorization
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                onClick={() => {
+                  const thread = cardMenu.thread;
+                  setCardMenu(null);
+                  void updateThreadMetadata({
+                    environmentId: thread.environmentId,
+                    input: { threadId: thread.id, regenerateTitle: true },
+                  });
+                }}
+              >
+                Regenerate title
               </button>
               <button
                 type="button"

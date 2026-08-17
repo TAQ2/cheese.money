@@ -61,6 +61,15 @@ import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 
+// macOS: Chromium's Safe Storage derives its encryption key from an item in
+// the login keychain ("ch3 Safe Storage"), which throws a password prompt
+// at startup — and again after every rebuilt binary, because the keychain ACL
+// is bound to the exact signed executable. CH3 must start silently, so use
+// Chromium's mock keychain instead: connection-catalog secrets are obfuscated
+// rather than keychain-encrypted, and the login keychain is never touched at
+// launch. Must be set before the app's "ready" event.
+Electron.app.commandLine.appendSwitch("use-mock-keychain");
+
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {
     const metadata = yield* Effect.service(ElectronApp.ElectronApp).pipe(

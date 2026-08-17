@@ -189,7 +189,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/usr/local/bin/claude",
         homePath: "",
         accountFailoverEnabled: false,
-        accountRotationEnabled: true,
+        // Rotation is opt-in: absent from the stored config decodes to false.
+        accountRotationEnabled: false,
         accountFailoverThresholdPercent: 98,
         customModels: ["claude-custom"],
         launchArgs: "",
@@ -524,7 +525,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/opt/homebrew/bin/claude",
         homePath: "",
         accountFailoverEnabled: false,
-        accountRotationEnabled: true,
+        // Rotation is opt-in: absent from the stored config decodes to false.
+        accountRotationEnabled: false,
         accountFailoverThresholdPercent: 98,
         customModels: [],
         launchArgs: "",

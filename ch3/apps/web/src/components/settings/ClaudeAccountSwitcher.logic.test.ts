@@ -9,6 +9,7 @@ import {
   isSignedInClaudeProfile,
   claudeProfileUsageLabel,
   recommendClaudeAccount,
+  suggestClaudeAccountFolder,
 } from "./ClaudeAccountSwitcher.logic";
 
 // Shapes taken from what the server actually returns on this machine: the
@@ -131,6 +132,34 @@ describe("claudeProfileUsageLabel", () => {
         usage: { sessionPercent: 4, weekPercent: 86, sessionResetsAt: "not-a-date" },
       }),
     ).toBe("session 4% · week 86%");
+  });
+
+  it("names the week window's reset date and time when the endpoint supplies it", () => {
+    // Date, not just time: unlike the session window (always today), the week
+    // window resets days out, so a bare time would not say which day.
+    const label = claudeProfileUsageLabel({
+      ...base,
+      usage: {
+        sessionPercent: 10,
+        weekPercent: 97,
+        weekResetsAt: "2026-08-16T20:00:00.000Z",
+      },
+    });
+    // The exact rendering is the machine's locale and timezone; the shape is ours.
+    expect(label).toMatch(/^session 10% · week 97% · resets \w+ \d+ .+$/);
+  });
+
+  it("names both windows' resets together when both are supplied", () => {
+    const label = claudeProfileUsageLabel({
+      ...base,
+      usage: {
+        sessionPercent: 26,
+        weekPercent: 3,
+        sessionResetsAt: "2026-08-06T19:00:00.000Z",
+        weekResetsAt: "2026-08-16T20:00:00.000Z",
+      },
+    });
+    expect(label).toMatch(/^session 26% · resets .+ · week 3% · resets \w+ \d+ .+$/);
   });
 
   it("names the two knowable failure states and stays silent otherwise", () => {
@@ -368,5 +397,68 @@ describe("recommended account — incumbent about to stall", () => {
       nowMs,
     });
     expect(recommendation?.isCurrent).toBe(true);
+  });
+});
+
+const numberedProfile = (index: number): ClaudeAccountProfile => ({
+  homePath: `/Users/conradws/.claude-${index}`,
+  displayPath: `~/.claude-${index}`,
+  email: `account-${index}@example.com`,
+  isCurrent: false,
+  isDefaultHome: false,
+});
+
+describe("suggesting a folder for a new Claude account", () => {
+  it("suggests .claude-2 beside a lone default home", () => {
+    expect(suggestClaudeAccountFolder([defaultProfile])).toBe("~/.claude-2");
+  });
+
+  it("counts past folders already taken instead of offering an occupied one", () => {
+    // The regression: the button offered the literal `~/.claude-2` every time.
+    // The server creates the folder only when missing and reuses an existing
+    // one, so the third sign-in landed in the second account's config
+    // directory and overwrote its credentials with no warning.
+    expect(suggestClaudeAccountFolder([defaultProfile, numberedProfile(2)])).toBe("~/.claude-3");
+    expect(
+      suggestClaudeAccountFolder([defaultProfile, numberedProfile(2), numberedProfile(3)]),
+    ).toBe("~/.claude-4");
+  });
+
+  it("fills the gap a deleted folder left rather than climbing forever", () => {
+    // Discovery lists a `~/.claude-*` folder whether or not it holds
+    // credentials, so a number missing from this list is a folder missing
+    // from disk — safe to hand out, and it keeps the names tidy.
+    expect(
+      suggestClaudeAccountFolder([defaultProfile, numberedProfile(2), numberedProfile(4)]),
+    ).toBe("~/.claude-3");
+  });
+
+  it("ignores folders the user named themselves", () => {
+    // `~/.claude-work` is a real profile but occupies no number, and the
+    // suggestion must not skip a number on its account.
+    expect(suggestClaudeAccountFolder([defaultProfile, signedInWorkProfile])).toBe("~/.claude-2");
+  });
+
+  it("reads the number off the path, not the display form", () => {
+    // A Windows host never produces a `~/…` displayPath, so a suggestion that
+    // matched on it would count nothing and collide on every press.
+    expect(
+      suggestClaudeAccountFolder([
+        {
+          homePath: "C:\\Users\\conradws\\.claude-2",
+          displayPath: "C:\\Users\\conradws\\.claude-2",
+          email: "work@example.com",
+          isCurrent: false,
+          isDefaultHome: false,
+        },
+      ]),
+    ).toBe("~/.claude-3");
+  });
+
+  it("falls back to the fixed suggestion when the list never loaded", () => {
+    // Nothing to count against. Inventing a number here would be a guess
+    // dressed as an answer; the field stays editable either way.
+    expect(suggestClaudeAccountFolder(null)).toBe("~/.claude-2");
+    expect(suggestClaudeAccountFolder([])).toBe("~/.claude-2");
   });
 });

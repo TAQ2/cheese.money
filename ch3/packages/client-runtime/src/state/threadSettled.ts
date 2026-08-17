@@ -256,9 +256,10 @@ export function effectiveSettled(
   // "active" is the explicit keep-active pin: it suppresses auto-settle
   // until real activity clears it server-side.
   if (shell.settledOverride === "active") return false;
-  if (options.changeRequestState === "merged" || options.changeRequestState === "closed") {
-    return true;
-  }
+  // A merged/closed PR deliberately does NOT settle the thread: settling is
+  // the user's call, and a thread often outlives its first PR. The
+  // changeRequestState input is still accepted (rows report it for their
+  // PR badge) but it no longer classifies.
   if (options.autoSettleAfterDays === null) return false;
 
   const lastActivityAt = threadLastActivityAt(shell);

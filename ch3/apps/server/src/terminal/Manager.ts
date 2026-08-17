@@ -65,6 +65,7 @@ import {
   type ClaudeInstanceMap,
 } from "../provider/Drivers/claudeInstanceHome.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { claudeAccountResolverScript, claudeShimScript } from "./claudeAccountShim.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
 
 export {
@@ -1149,6 +1150,7 @@ function createTerminalSpawnEnv(
   baseEnv: NodeJS.ProcessEnv,
   runtimeEnv?: Record<string, string> | null,
   claudeAccount?: TerminalClaudeAccount | null,
+  shimDir?: string | null,
 ): NodeJS.ProcessEnv {
   const spawnEnv: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
@@ -1172,6 +1174,14 @@ function createTerminalSpawnEnv(
     } else {
       spawnEnv.CLAUDE_CONFIG_DIR = claudeAccount.configDir;
     }
+  }
+  // First on PATH, so `claude` resolves the SELECTED account when it is
+  // invoked rather than inheriting whichever one this shell was born with.
+  // A shell opened before a switch would otherwise keep running as the old
+  // account for its whole life — silently, against the wrong limits.
+  if (shimDir) {
+    const existing = spawnEnv.PATH ?? spawnEnv.Path ?? "";
+    spawnEnv.PATH = existing.length > 0 ? `${shimDir}:${existing}` : shimDir;
   }
   // Applied last: an explicit per-terminal env is the caller stating exactly
   // what it wants, which outranks the ambient account selection.
@@ -1294,6 +1304,41 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const logsDir = options.logsDir;
   const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
   const platform = yield* HostProcessPlatform;
+
+  /**
+   * Write the `claude` shim once, and hand back the directory to put first on
+   * a terminal's PATH. Rewritten on every spawn rather than cached: the
+   * settings path is stable, but a reinstall moves the Node binary underneath
+   * a stale script, and writing two small files costs nothing next to
+   * spawning a shell.
+   *
+   * Windows is skipped — a POSIX `sh` launcher would not run there, and the
+   * spawn-time `CLAUDE_CONFIG_DIR` still applies.
+   */
+  const ensureClaudeShim = Effect.fn("TerminalManager.ensureClaudeShim")(function* (
+    claudeAccount: TerminalClaudeAccount,
+  ) {
+    if (platform === "win32") return null;
+    const shimDir = path.join(logsDir, "claude-shim");
+    const resolverPath = path.join(shimDir, "resolve-account.cjs");
+    const launcherPath = path.join(shimDir, "claude");
+    const written = yield* Effect.gen(function* () {
+      yield* fileSystem.makeDirectory(shimDir, { recursive: true });
+      yield* fileSystem.writeFileString(
+        resolverPath,
+        claudeAccountResolverScript(claudeAccount.settingsPath),
+      );
+      yield* fileSystem.writeFileString(
+        launcherPath,
+        claudeShimScript({ shimDir, nodePath: process.execPath, resolverPath }),
+      );
+      yield* fileSystem.chmod(launcherPath, 0o755);
+      return true;
+    }).pipe(Effect.orElseSucceed(() => false));
+    // A shim that could not be written must not cost the user a terminal; the
+    // spawn-time account still applies, exactly as before.
+    return written ? shimDir : null;
+  });
   // Terminals must inherit the user's full environment (minus the blocklist
   // applied in createTerminalSpawnEnv) — an allowlist here silently strips
   // things like PSModulePath, DISPLAY, proxies, and toolchain variables.
@@ -1996,7 +2041,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
             const claudeAccount = options.claudeAccount ? yield* options.claudeAccount() : null;
-            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv, claudeAccount);
+            const shimDir = claudeAccount ? yield* ensureClaudeShim(claudeAccount) : null;
+            const terminalEnv = createTerminalSpawnEnv(
+              baseEnv,
+              session.runtimeEnv,
+              claudeAccount,
+              shimDir,
+            );
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;

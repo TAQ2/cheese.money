@@ -117,6 +117,53 @@ const decodeUsage = Schema.decodeUnknownExit(
           }),
         ),
       ),
+      // Per-model caps, current shape: a `limits` array whose entries carry
+      // the model identity under scope.model.display_name. Verified against
+      // the live endpoint (the pre-CH3 statusline script matched
+      // /fable/i on exactly this path).
+      limits: Schema.optional(
+        Schema.NullOr(
+          Schema.Array(
+            Schema.Struct({
+              percent: Schema.optional(Schema.NullOr(Schema.Number)),
+              utilization: Schema.optional(Schema.NullOr(Schema.Number)),
+              resets_at: Schema.optional(Schema.NullOr(Schema.String)),
+              scope: Schema.optional(
+                Schema.NullOr(
+                  Schema.Struct({
+                    model: Schema.optional(
+                      Schema.NullOr(
+                        Schema.Struct({
+                          display_name: Schema.optional(Schema.NullOr(Schema.String)),
+                        }),
+                      ),
+                    ),
+                  }),
+                ),
+              ),
+            }),
+          ),
+        ),
+      ),
+      // Per-model weekly windows, older top-level shape. Which key appears
+      // depends on the plan and API vintage (seven_day_opus was observed in
+      // Aug 2026 fixtures). Absent keys mean the plan has no per-model cap.
+      seven_day_fable: Schema.optional(
+        Schema.NullOr(
+          Schema.Struct({
+            utilization: Schema.optional(Schema.NullOr(Schema.Number)),
+            resets_at: Schema.optional(Schema.NullOr(Schema.String)),
+          }),
+        ),
+      ),
+      seven_day_opus: Schema.optional(
+        Schema.NullOr(
+          Schema.Struct({
+            utilization: Schema.optional(Schema.NullOr(Schema.Number)),
+            resets_at: Schema.optional(Schema.NullOr(Schema.String)),
+          }),
+        ),
+      ),
     }),
   ),
 );
@@ -210,11 +257,39 @@ export const parseClaudeAccountUsage = (raw: string): ClaudeAccountUsage | undef
   if (typeof session !== "number" || typeof week !== "number") return undefined;
   const sessionResetsAt = parsed.value.five_hour?.resets_at ?? undefined;
   const weekResetsAt = parsed.value.seven_day?.resets_at ?? undefined;
+  // The per-model weekly cap (Fable), under whichever shape the endpoint
+  // reports it: the current `limits[]` array first, the older top-level
+  // seven_day_* keys as fallback. Optional by nature — unlike session/week,
+  // absence just means the plan has no per-model cap, so it never
+  // invalidates the whole parse.
+  // The endpoint can report MORE THAN ONE window for a model — a 5-hour cap
+  // and a weekly one. Taking the first match let the band show a roomy window
+  // while the one about to refuse the next turn was full: the meter read 56%
+  // and the run died against a Fable limit in the same breath. The most
+  // constraining window is the honest one to show.
+  const fableLimits = (parsed.value.limits ?? []).filter((limit) =>
+    /fable/i.test(limit?.scope?.model?.display_name ?? ""),
+  );
+  const fableLimit = fableLimits.reduce<(typeof fableLimits)[number] | undefined>(
+    (worst, limit) => {
+      const percent = limit?.percent ?? limit?.utilization;
+      if (typeof percent !== "number") return worst;
+      const worstPercent = worst?.percent ?? worst?.utilization;
+      return typeof worstPercent === "number" && worstPercent >= percent ? worst : limit;
+    },
+    undefined,
+  );
+  const modelWindow = parsed.value.seven_day_fable ?? parsed.value.seven_day_opus;
+  const modelWeek =
+    fableLimit?.percent ?? fableLimit?.utilization ?? modelWindow?.utilization;
+  const modelWeekResetsAt = (fableLimit?.resets_at ?? modelWindow?.resets_at) ?? undefined;
   return {
     sessionPercent: session,
     weekPercent: week,
     ...(sessionResetsAt ? { sessionResetsAt } : {}),
     ...(weekResetsAt ? { weekResetsAt } : {}),
+    ...(typeof modelWeek === "number" ? { modelWeekPercent: modelWeek } : {}),
+    ...(typeof modelWeek === "number" && modelWeekResetsAt ? { modelWeekResetsAt } : {}),
   };
 };
 

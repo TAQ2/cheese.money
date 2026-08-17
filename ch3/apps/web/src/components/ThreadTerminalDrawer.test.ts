@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   resolveTerminalSelectionActionPosition,
+  terminalBufferAppendSuffix,
   shouldHandleTerminalSelectionMouseUp,
   terminalSelectionActionDelayForClickCount,
   terminalScrollRestoreLine,
@@ -95,5 +96,50 @@ describe("terminalScrollRestoreLine", () => {
     // 400 lines back but only 60 lines survive: scrolling to a negative line
     // throws in xterm, and the honest answer is the top of the buffer.
     expect(terminalScrollRestoreLine({ viewportY: 100, baseY: 500 }, 60)).toBe(0);
+  });
+});
+
+
+describe("terminalBufferAppendSuffix", () => {
+  it("appends the tail of a pure append", () => {
+    expect(terminalBufferAppendSuffix("abc", "abcdef")).toBe("def");
+  });
+
+  it("appends nothing when the buffer is unchanged", () => {
+    expect(terminalBufferAppendSuffix("abc", "abc")).toBe("");
+  });
+
+  it("writes the whole buffer when nothing was shown yet", () => {
+    expect(terminalBufferAppendSuffix("", "hello")).toBe("hello");
+  });
+
+  it("appends only the new tail when the server trimmed the head", () => {
+    // The case that made selections impossible: past the 5,000-line cap every
+    // update drops leading lines AND adds trailing ones.
+    expect(terminalBufferAppendSuffix("abcdefgh", "cdefghij")).toBe("ij");
+  });
+
+  it("appends nothing when the head was trimmed and nothing new arrived", () => {
+    expect(terminalBufferAppendSuffix("abcdefgh", "cdefgh")).toBe("");
+  });
+
+  it("handles a realistic line-oriented trim", () => {
+    const previous = "line1\nline2\nline3\n";
+    const current = "line2\nline3\nline4\n";
+    expect(terminalBufferAppendSuffix(previous, current)).toBe("line4\n");
+  });
+
+  it("asks for a replay when the buffers share no overlap", () => {
+    expect(terminalBufferAppendSuffix("abcdef", "zzzz")).toBeNull();
+  });
+
+  it("asks for a replay when the buffer was emptied", () => {
+    expect(terminalBufferAppendSuffix("abcdef", "")).toBeNull();
+  });
+
+  it("asks for a replay rather than searching past the overlap window", () => {
+    const previous = "abcdefgh";
+    const current = "cdefghij";
+    expect(terminalBufferAppendSuffix(previous, current, 2)).toBeNull();
   });
 });

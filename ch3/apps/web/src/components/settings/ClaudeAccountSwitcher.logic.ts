@@ -20,6 +20,52 @@ export function homePathSettingForProfile(profile: ClaudeAccountProfile): string
   return profile.isDefaultHome ? "" : profile.homePath;
 }
 
+/** `.claude-2`, `.claude-3`, … — the folder names this feature hands out. */
+const NUMBERED_CLAUDE_FOLDER = /^\.claude-(\d+)$/;
+
+/** Last path segment, on either separator: the server may be a Windows host. */
+function folderName(absolutePath: string): string {
+  const parts = absolutePath.trim().split(/[/\\]+/);
+  return parts[parts.length - 1] ?? "";
+}
+
+/**
+ * The folder to pre-fill when adding another account.
+ *
+ * The button used to offer the literal `~/.claude-2` on every press. Once a
+ * second account exists, that names an occupied directory — and the server
+ * creates the folder only when it is missing, reusing an existing one as-is.
+ * So the sign-in runs against another account's config directory and the
+ * credentials already there are replaced. The account is gone, and nothing
+ * said so.
+ *
+ * So the suggestion counts instead: `~/.claude-<n>` for the lowest `n` from 2
+ * up that no listed profile occupies. Lowest rather than highest+1 so a
+ * deleted folder's number is reused instead of the names climbing forever —
+ * discovery lists every `~/.claude-*` directory whether or not it has ever
+ * been signed into, so a number free in this list is a directory free on disk.
+ *
+ * The `.claude-` prefix is deliberate and must stay: discovery recognizes a
+ * folder with no credentials in it by that prefix alone, so a folder left
+ * behind by an abandoned sign-in still appears as a row to retry from.
+ *
+ * A null list means the profiles never loaded. There is nothing to count
+ * against, so this falls back to the old fixed suggestion rather than
+ * inventing a number — the field stays editable either way.
+ */
+export function suggestClaudeAccountFolder(
+  profiles: ReadonlyArray<ClaudeAccountProfile> | null,
+): string {
+  const taken = new Set<number>();
+  for (const profile of profiles ?? []) {
+    const match = NUMBERED_CLAUDE_FOLDER.exec(folderName(profile.homePath));
+    if (match) taken.add(Number(match[1]));
+  }
+  let index = 2;
+  while (taken.has(index)) index += 1;
+  return `~/.claude-${index}`;
+}
+
 /** A profile is signed in when the CLI config recorded an account for it. */
 export function isSignedInClaudeProfile(profile: ClaudeAccountProfile): boolean {
   return (profile.email ?? "").trim().length > 0;
@@ -78,6 +124,19 @@ function formatSessionReset(resetsAt: string): string | null {
   const at = new Date(resetsAt);
   if (Number.isNaN(at.getTime())) return null;
   return at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * The week window's reset instant, date + time: unlike the session window
+ * (always today, hours out), the week window can reset days out, so a
+ * time-only stamp would be ambiguous about which day it means.
+ */
+function formatWeekReset(resetsAt: string): string | null {
+  const at = new Date(resetsAt);
+  if (Number.isNaN(at.getTime())) return null;
+  const time = at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const date = at.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${date} ${time}`;
 }
 
 /** Which account the rotation rules would seat, and the sentence explaining it. */
@@ -192,9 +251,11 @@ export function claudeProfileUsageLabel(profile: ClaudeAccountProfile): string |
   const session = `session ${Math.round(usage.sessionPercent)}%${
     sessionReset ? ` · resets ${sessionReset}` : ""
   }`;
+  const weekReset = usage.weekResetsAt ? formatWeekReset(usage.weekResetsAt) : null;
+  const week = `week ${Math.round(usage.weekPercent)}%${
+    weekReset ? ` · resets ${weekReset}` : ""
+  }`;
   // A cached reading is still the number the rules are acting on, so it is
   // shown — labelled, never silently passed off as current.
-  return `${session} · week ${Math.round(usage.weekPercent)}%${
-    profile.usageStale === true ? " · cached" : ""
-  }`;
+  return `${session} · ${week}${profile.usageStale === true ? " · cached" : ""}`;
 }

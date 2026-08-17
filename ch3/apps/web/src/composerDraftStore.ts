@@ -790,12 +790,9 @@ function normalizeProviderModelOptions(
     if (typeof legacy.effort === "string" && legacy.effort.length > 0) {
       codexExtras.push({ id: "reasoningEffort", value: legacy.effort });
     }
-    const fastMode =
-      legacy.codexFastMode === true ||
-      (typeof legacy.serviceTier === "string" && legacy.serviceTier === "fast");
-    if (fastMode) {
-      codexExtras.push({ id: "fastMode", value: true });
-    }
+    // Legacy fast-mode selections are deliberately dropped, not migrated:
+    // fast mode is no longer offered (it burns shared plan usage at a far
+    // higher rate), so a years-old draft must not resurrect it.
     if (codexExtras.length > 0) {
       const existing = result.codex ?? [];
       const existingIds = new Set(existing.map((entry) => entry.id));

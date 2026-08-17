@@ -32,7 +32,7 @@ export interface KanbanCardProps {
 
 /**
  * One conversation as a kanban ticket: title, the Sonnet-generated two-line
- * description, three keywords, project tag, and the type's ghost glow around
+ * description, the project pill, and the type's ghost glow around
  * the contour. Arrows at the bottom-right move one column at a time; drag
  * moves anywhere. Clicking the body opens the conversation.
  */
@@ -121,34 +121,29 @@ export function KanbanCard({
         </p>
       ) : null}
 
-      <div className={cn("flex flex-wrap items-center gap-1", compact && "hidden")}>
-        {(kanban?.keywords ?? []).slice(0, 2).map((keyword) => (
-          <span
-            key={keyword}
-            className="rounded-full border border-border px-1.5 py-px text-[10px] text-muted-foreground"
-          >
-            {keyword}
-          </span>
-        ))}
+      {/* The card's project, as the pill the classifier keywords used to
+          occupy. Keywords restated what the title already says; which project
+          a card belongs to is the fact you actually scan a board for, and on
+          its own row it has the width to be read instead of being crushed to
+          "ba…" beside the move controls. */}
+      <div className="flex flex-wrap items-center gap-1">
+        <span
+          className="flex min-w-0 max-w-full items-center gap-1 rounded-full border border-border px-1.5 py-px text-[10px] text-muted-foreground"
+          title={projectTitle}
+        >
+          <ProjectFavicon
+            environmentId={thread.environmentId}
+            cwd={projectCwd}
+            className="size-3 shrink-0 text-muted-foreground/70"
+          />
+          <span className="truncate">{projectTitle}</span>
+        </span>
       </div>
 
       <div className="flex items-center gap-1.5">
-        {/* Project identity — the favicon (folder-icon fallback) plus the
-            name, always visible so a card's project reads at a glance instead
-            of hiding in a 1.5px dot's tooltip. The name is the guaranteed
-            marker when no favicon exists; it grows and truncates, pushing the
-            type dot and move controls to the right edge. */}
-        <ProjectFavicon
-          environmentId={thread.environmentId}
-          cwd={projectCwd}
-          className="size-3.5 shrink-0 text-muted-foreground/70"
-        />
-        <span
-          className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground"
-          title={projectTitle}
-        >
-          {projectTitle}
-        </span>
+        {/* The project moved up to its own pill row; this spacer keeps the
+            type dot, pin state and move arrows pinned to the right edge. */}
+        <span className="min-w-0 flex-1" />
         {!compact ? (
           // The type is a colored dot, not a label: hue carries the class of
           // service, the tooltip carries the words — and clicking opens the

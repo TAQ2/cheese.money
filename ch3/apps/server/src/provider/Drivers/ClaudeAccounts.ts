@@ -573,6 +573,8 @@ export interface PendingClaudeLogin {
   readonly homePath: string;
   readonly controls: ClaudeLoginControls;
   readonly abort: AbortController;
+  /** The login mkdir'd a fresh folder — remove it again if sign-in fails. */
+  readonly createdDirectory: boolean;
 }
 
 /**
@@ -616,9 +618,17 @@ export const startClaudeAccountLogin = Effect.fn("startClaudeAccountLogin")(func
   // relative to the server's cwd instead of one in the home directory.
   const homePath = path.resolve(expandHomePath(input.homePath.trim()));
   // A brand-new profile is just an empty directory; the CLI populates it.
+  // Remember whether this attempt created it: an abandoned sign-in must not
+  // leave a dead "Not signed in" folder behind in the accounts list.
+  const directoryExisted = yield* fs.exists(homePath).pipe(Effect.orElseSucceed(() => true));
   yield* fs.makeDirectory(homePath, { recursive: true }).pipe(Effect.orElseSucceed(() => {}));
   const settings = { ...input.settings, homePath };
-  const environment = yield* makeClaudeEnvironment(settings);
+  const baseEnvironment = yield* makeClaudeEnvironment(settings);
+  // The CLI's automatic OAuth flow opens the system browser ITSELF — a stray
+  // external tab that competes with the in-app sign-in window CH3 renders.
+  // BROWSER is the CLI's opener override; `true` is a no-op executable, so
+  // the only sign-in surface left is the one the app controls.
+  const environment = { ...baseEnvironment, BROWSER: "true" };
   const executablePath = yield* resolveClaudeSdkExecutablePath(settings.binaryPath, environment);
   const abort = new AbortController();
   const controls = yield* Effect.try(
@@ -659,7 +669,12 @@ export const startClaudeAccountLogin = Effect.fn("startClaudeAccountLogin")(func
   );
   const url = readLoginUrl(response);
   return {
-    pending: { homePath, controls, abort } satisfies PendingClaudeLogin,
+    pending: {
+      homePath,
+      controls,
+      abort,
+      createdDirectory: !directoryExisted,
+    } satisfies PendingClaudeLogin,
     ...(url ? { url } : {}),
   };
 });
@@ -676,6 +691,12 @@ export const CLAUDE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 export const awaitClaudeAccountLogin = Effect.fn("awaitClaudeAccountLogin")(function* (
   pending: PendingClaudeLogin,
 ) {
+  const fs = yield* FileSystem.FileSystem;
+  // Only a folder this very login created is removed on failure — an existing
+  // profile directory is never touched, whatever happens to the sign-in.
+  const discardCreatedDirectory = pending.createdDirectory
+    ? fs.remove(pending.homePath, { recursive: true, force: true }).pipe(Effect.ignore)
+    : Effect.void;
   if (!pending.controls.claudeOAuthWaitForCompletion) {
     return yield* Effect.fail(
       new ClaudeAccountError({
@@ -691,6 +712,7 @@ export const awaitClaudeAccountLogin = Effect.fn("awaitClaudeAccountLogin")(func
     Effect.ensuring(Effect.sync(() => pending.abort.abort())),
   );
   if (settled._tag === "None") {
+    yield* discardCreatedDirectory;
     return yield* Effect.fail(
       new ClaudeAccountError({
         reason: "failed",

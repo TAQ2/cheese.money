@@ -139,7 +139,12 @@ const readFailoverSettings = Effect.fn("readFailoverSettings")(function* () {
   const failoverEnabled = config.accountFailoverEnabled === true;
   // Rotation is ON unless explicitly switched off: absent means enabled, so
   // the default experience is the smart one and unticking is the opt-out.
-  const rotationEnabled = config.accountRotationEnabled !== false;
+  // Rotation is OPT-IN. Its usage probe reads the Claude credential out of
+  // the login keychain on a timer whose first tick fires at startup; on a
+  // machine that has not already granted /usr/bin/security access to that
+  // item, defaulting it on means an unexplained keychain dialog the moment
+  // the app opens. Absent therefore means off, exactly like failover.
+  const rotationEnabled = config.accountRotationEnabled === true;
   if (!failoverEnabled && !rotationEnabled) return undefined;
 
   return {
