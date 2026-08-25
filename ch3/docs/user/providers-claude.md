@@ -270,9 +270,9 @@ name wins. (This is remembered until the server restarts.)
 
 To rename on demand, right-click a thread in the sidebar and choose **Smart rename**.
 
-Names are written by Claude Haiku 4.5 — cheap, and independent of the model running
-your thread. If Claude is unavailable, CH3 falls back to your **Text generation
-model** setting.
+Names are written by Claude Sonnet 5 — the cheapest model CH3 offers for Claude, and
+independent of the model running your thread. If Claude is unavailable, CH3 falls
+back to your **Text generation model** setting.
 
 ## Copy Conversation ID
 

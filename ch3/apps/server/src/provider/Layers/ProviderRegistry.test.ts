@@ -600,6 +600,83 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ]);
       });
 
+      it("drops catalog models a successful refresh no longer lists", () => {
+        // Regression: retired Claude models used to be immortal. The refresh
+        // dropped them, the merge re-added them from the previous snapshot,
+        // and the merged list was persisted to the status cache — so the
+        // picker kept offering models the build no longer knows.
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-08-24T00:00:00.000Z",
+          version: "2.1.241",
+          models: [
+            {
+              slug: "claude-opus-5",
+              name: "Claude Opus 5",
+              isCustom: false,
+              capabilities: null,
+            },
+            {
+              slug: "claude-haiku-4-5",
+              name: "Claude Haiku 4.5",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const refreshedProvider = {
+          ...previousProvider,
+          checkedAt: "2026-08-24T00:01:00.000Z",
+          models: [previousProvider.models[0]!],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
+          ...refreshedProvider.models,
+        ]);
+      });
+
+      it("retains catalog models when an installed CLI probe fails", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-08-24T00:00:00.000Z",
+          version: "2.1.241",
+          models: [
+            {
+              slug: "claude-opus-5",
+              name: "Claude Opus 5",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const failedProvider = {
+          ...previousProvider,
+          status: "error",
+          auth: { status: "unknown" },
+          checkedAt: "2026-08-24T00:01:00.000Z",
+          models: [],
+          message: "Claude Agent CLI health check failed.",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, failedProvider).models, [
+          ...previousProvider.models,
+        ]);
+      });
+
       it("drops stale OpenCode models missing from a successful refresh", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("opencode"),
@@ -1883,6 +1960,36 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ),
       );
 
+      // The catalog is deliberately exactly these three: Fable 5, Opus 5 and
+      // Sonnet 5. Anything older was removed, so a re-added legacy model has to
+      // be a deliberate edit here, not a quiet regression.
+      it.effect("offers only Fable 5, Opus 5 and Sonnet 5", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities(),
+          );
+          assert.deepStrictEqual(
+            status.models.map((model) => model.slug),
+            ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"],
+          );
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "2.1.219\n", stderr: "", code: 0 };
+              if (joined === "auth status")
+                return {
+                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
+                  stderr: "",
+                  code: 0,
+                };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
       it.effect("includes Claude Opus 5 on supported Claude Code versions", () =>
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(
@@ -1983,80 +2090,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             mockSpawnerLayer((args) => {
               const joined = args.join(" ");
               if (joined === "--version") return { stdout: "2.1.168\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect(
-        "includes Claude Opus 4.7 with xhigh as the default effort on supported versions",
-        () =>
-          Effect.gen(function* () {
-            const status = yield* checkClaudeProviderStatus(
-              defaultClaudeSettings,
-              claudeCapabilities(),
-            );
-            const opus47 = status.models.find((model) => model.slug === "claude-opus-4-7");
-            if (!opus47) {
-              assert.fail("Expected Claude Opus 4.7 to be present for Claude Code v2.1.111.");
-            }
-            if (!opus47.capabilities) {
-              assert.fail(
-                "Expected Claude Opus 4.7 capabilities to be present for Claude Code v2.1.111.",
-              );
-            }
-            const effortDescriptor = opus47.capabilities.optionDescriptors?.find(
-              (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
-            );
-            assert.deepStrictEqual(
-              effortDescriptor?.type === "select"
-                ? effortDescriptor.options.find((option) => option.isDefault)
-                : undefined,
-              { id: "xhigh", label: "Extra High", isDefault: true },
-            );
-          }).pipe(
-            Effect.provide(
-              mockSpawnerLayer((args) => {
-                const joined = args.join(" ");
-                if (joined === "--version") return { stdout: "2.1.111\n", stderr: "", code: 0 };
-                if (joined === "auth status")
-                  return {
-                    stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                    stderr: "",
-                    code: 0,
-                  };
-                throw new Error(`Unexpected args: ${joined}`);
-              }),
-            ),
-          ),
-      );
-
-      it.effect("hides Claude Opus 4.7 on older Claude Code versions", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities(),
-          );
-          assert.strictEqual(
-            status.models.some((model) => model.slug === "claude-opus-4-7"),
-            false,
-          );
-          assert.strictEqual(
-            status.message,
-            "Claude Code v2.1.110 is too old for Claude Opus 4.7. Upgrade to v2.1.111 or newer to access it.",
-          );
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.110\n", stderr: "", code: 0 };
               if (joined === "auth status")
                 return {
                   stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',

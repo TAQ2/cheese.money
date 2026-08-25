@@ -45,7 +45,9 @@ import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.t
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
 import {
   hydrateCachedProvider,
+  isAuthoritativeEmptyInventory,
   isCachedProviderCorrelated,
+  isNonAuthoritativeInventory,
   orderProviderSnapshots,
   readProviderStatusCache,
   resolveProviderStatusCachePath,
@@ -78,31 +80,23 @@ const makeManualProviderMaintenanceCapabilities = (provider: ProviderDriverKind)
 const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean =>
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
 
-const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
-  if (provider.driver !== ProviderDriverKind.make("opencode")) {
-    return true;
-  }
-
-  // OpenCode's initial snapshot is deliberately non-authoritative while its
-  // first probe is still running. A probe error from an installed CLI/server
-  // is likewise partial: it could not establish the current inventory.
-  // Conversely, disabled and missing-CLI snapshots are authoritative removals,
-  // as are successful ready/warning inventories (including an empty one after
-  // logout or plugin removal).
-  const isPendingInitialProbe =
-    provider.enabled && !provider.installed && provider.status === "warning";
-  const didInstalledProviderProbeFail = provider.installed && provider.status === "error";
-  return isPendingInitialProbe || didInstalledProviderProbeFail;
-};
-
 const mergeProviderModels = (
   provider: ServerProvider,
   previousModels: ReadonlyArray<ServerProvider["models"][number]>,
   nextModels: ReadonlyArray<ServerProvider["models"][number]>,
 ): ReadonlyArray<ServerProvider["models"][number]> => {
-  const shouldRetainMissingModels = shouldRetainMissingProviderModels(provider);
+  // A snapshot that could not establish an inventory keeps what was already
+  // known; one that did is authoritative, including about what it omits. This
+  // applies to every driver: exempting the CLI-backed ones made a model
+  // deleted from the catalog immortal, because each refresh re-added it from
+  // the previous snapshot and persisted it back to the status cache.
+  const shouldRetainMissingModels = isNonAuthoritativeInventory(provider);
 
-  if (shouldRetainMissingModels && nextModels.length === 0 && previousModels.length > 0) {
+  if (
+    nextModels.length === 0 &&
+    previousModels.length > 0 &&
+    !isAuthoritativeEmptyInventory(provider)
+  ) {
     return previousModels;
   }
 

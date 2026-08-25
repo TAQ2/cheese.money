@@ -430,7 +430,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-opus-4-6",
+          "claude-opus-5",
           [{ id: "effort", value: "max" }],
         ),
         runtimeMode: "full-access",
@@ -453,7 +453,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-opus-4-6",
+          "claude-opus-5",
         ),
         runtimeMode: "full-access",
       });
@@ -463,51 +463,6 @@ describe("ClaudeAdapterLive", () => {
         createInput?.options.env?.CLAUDE_CONFIG_DIR,
         NodePath.join(NodeOS.homedir(), ".claude-work"),
       );
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-    );
-  });
-
-  it.effect("maps the Claude Opus 4.7 default effort to the SDK-supported max value", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("claudeAgent"),
-          model: "claude-opus-4-7",
-        },
-        runtimeMode: "full-access",
-      });
-
-      const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.effort, "max");
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-    );
-  });
-
-  it.effect("maps xhigh effort for Claude Opus 4.7 to the SDK-supported max value", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          "claude-opus-4-7",
-          [{ id: "effort", value: "xhigh" }],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.effort, "max");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -560,7 +515,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("falls back to default effort when unsupported max is requested for Sonnet 4.6", () => {
+  it.effect("ignores Claude thinking toggle for models without a thinking option", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -569,78 +524,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
-          [{ id: "effort", value: "max" }],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.effort, "high");
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-    );
-  });
-
-  it.effect("ignores adaptive effort for Haiku 4.5", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          "claude-haiku-4-5",
-          [{ id: "effort", value: "high" }],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.effort, undefined);
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-    );
-  });
-
-  it.effect("forwards Claude thinking toggle into SDK settings for Haiku 4.5", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          "claude-haiku-4-5",
-          [{ id: "thinking", value: false }],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const createInput = harness.getLastCreateQueryInput();
-      assert.deepEqual(createInput?.options.settings, {
-        alwaysThinkingEnabled: false,
-      });
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-    );
-  });
-
-  it.effect("ignores Claude thinking toggle for non-Haiku models", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [{ id: "thinking", value: false }],
         ),
         runtimeMode: "full-access",
@@ -663,7 +547,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-opus-4-6",
+          "claude-opus-5",
           [{ id: "fastMode", value: true }],
         ),
         runtimeMode: "full-access",
@@ -688,7 +572,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [{ id: "fastMode", value: true }],
         ),
         runtimeMode: "full-access",
@@ -711,7 +595,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [{ id: "outputStyle", value: "Caveman" }],
         ),
         runtimeMode: "full-access",
@@ -736,7 +620,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [],
         ),
         runtimeMode: "full-access",
@@ -759,7 +643,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [{ id: "outputStyle", value: "Caveman" }],
         ),
         runtimeMode: "full-access",
@@ -772,7 +656,7 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [{ id: "outputStyle", value: "Caveman" }],
         ),
       });
@@ -784,7 +668,7 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [{ id: "outputStyle", value: "Plain and Concise" }],
         ),
       });
@@ -799,7 +683,7 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [],
         ),
       });
@@ -822,7 +706,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [{ id: "effort", value: "ultrathink" }],
         ),
         runtimeMode: "full-access",
@@ -834,7 +718,7 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-sonnet-4-6",
+          "claude-sonnet-5",
           [{ id: "effort", value: "ultrathink" }],
         ),
       });
@@ -2137,7 +2021,7 @@ describe("ClaudeAdapterLive", () => {
           output_tokens: 679,
         },
         modelUsage: {
-          "claude-opus-4-6": {
+          "claude-opus-5": {
             contextWindow: 200000,
             maxOutputTokens: 64000,
           },
@@ -2201,7 +2085,7 @@ describe("ClaudeAdapterLive", () => {
           total_tokens: 535000,
         },
         modelUsage: {
-          "claude-opus-4-6": {
+          "claude-opus-5": {
             contextWindow: 200000,
             maxOutputTokens: 64000,
           },
@@ -2278,7 +2162,7 @@ describe("ClaudeAdapterLive", () => {
             total_tokens: 535000,
           },
           modelUsage: {
-            "claude-opus-4-6": {
+            "claude-opus-5": {
               contextWindow: 200000,
               maxOutputTokens: 64000,
             },
@@ -3373,12 +3257,12 @@ describe("ClaudeAdapterLive", () => {
         input: "hello",
         modelSelection: {
           instanceId: ProviderInstanceId.make("claudeAgent"),
-          model: "claude-opus-4-6",
+          model: "claude-opus-5",
         },
         attachments: [],
       });
 
-      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-6[1m]"]);
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-5[1m]"]);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -3421,7 +3305,7 @@ describe("ClaudeAdapterLive", () => {
         const adapter = yield* ClaudeAdapter;
         const modelSelection = {
           instanceId: ProviderInstanceId.make("claudeAgent"),
-          model: "claude-opus-4-6",
+          model: "claude-opus-5",
         };
 
         const session = yield* adapter.startSession({
@@ -3468,7 +3352,7 @@ describe("ClaudeAdapterLive", () => {
         input: "hello",
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-opus-4-6",
+          "claude-opus-5",
           [{ id: "contextWindow", value: "1m" }],
         ),
         attachments: [],
@@ -3478,13 +3362,13 @@ describe("ClaudeAdapterLive", () => {
         input: "hello again",
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-opus-4-6",
+          "claude-opus-5",
           [{ id: "contextWindow", value: "200k" }],
         ),
         attachments: [],
       });
 
-      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-6[1m]", "claude-opus-4-6"]);
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-5[1m]", "claude-opus-5"]);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -3694,7 +3578,7 @@ describe("ClaudeAdapterLive", () => {
         uuid: "assistant-exit-plan",
         parent_tool_use_id: null,
         message: {
-          model: "claude-opus-4-6",
+          model: "claude-opus-5",
           id: "msg-exit-plan",
           type: "message",
           role: "assistant",

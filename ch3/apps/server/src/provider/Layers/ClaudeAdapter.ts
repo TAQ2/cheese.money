@@ -323,11 +323,8 @@ function normalizeClaudeStreamMessages(
   return squashed.length > 0 ? [squashed] : [];
 }
 
-function getEffectiveClaudeAgentEffort(
-  effort: string | null | undefined,
-  model: string | null | undefined,
-): ClaudeSdkEffort | null {
-  const normalized = normalizeClaudeCliEffort(effort, model);
+function getEffectiveClaudeAgentEffort(effort: string | null | undefined): ClaudeSdkEffort | null {
+  const normalized = normalizeClaudeCliEffort(effort);
   return normalized ? (normalized as ClaudeSdkEffort) : null;
 }
 
@@ -393,13 +390,6 @@ function maxClaudeContextWindowFromModelUsage(
 function selectedClaudeContextWindow(
   modelSelection: ModelSelection | undefined,
 ): number | undefined {
-  switch (modelSelection?.model) {
-    case "claude-opus-4-8":
-    case "claude-opus-4-7":
-      // Always 1M at the API; these models expose no contextWindow option.
-      return 1_000_000;
-  }
-
   switch (resolveClaudeContextWindow(modelSelection)) {
     case "1m":
       return 1_000_000;
@@ -3670,7 +3660,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
         : undefined;
       const ultracode = isClaudeUltracodeEffort(effort);
-      const effectiveEffort = getEffectiveClaudeAgentEffort(effort, modelSelection?.model);
+      const effectiveEffort = getEffectiveClaudeAgentEffort(effort);
       const runtimeModeToPermission: Record<string, PermissionMode> = {
         "auto-accept-edits": "acceptEdits",
         auto: "auto",
