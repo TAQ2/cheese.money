@@ -52,12 +52,12 @@ const CLAUDE_PRESENTATION = {
   showInteractionModeToggle: true,
 } as const;
 const MINIMUM_CLAUDE_OPUS_5_VERSION = "2.1.219";
-const MINIMUM_CLAUDE_FABLE_5_VERSION = "2.1.169";
+const MINIMUM_CLAUDE_FABLE_VERSION = "2.1.169";
 
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
-    slug: "claude-fable-5",
-    name: "Claude Fable 5",
+    slug: "claude-fable-5-1",
+    name: "Claude Fable 5.1",
     isCustom: false,
     capabilities: createModelCapabilities({
       optionDescriptors: [
@@ -159,8 +159,8 @@ function supportsClaudeOpus5(version: string | null | undefined): boolean {
   return version ? compareSemverVersions(version, MINIMUM_CLAUDE_OPUS_5_VERSION) >= 0 : false;
 }
 
-function supportsClaudeFable5(version: string | null | undefined): boolean {
-  return version ? compareSemverVersions(version, MINIMUM_CLAUDE_FABLE_5_VERSION) >= 0 : false;
+function supportsClaudeFable(version: string | null | undefined): boolean {
+  return version ? compareSemverVersions(version, MINIMUM_CLAUDE_FABLE_VERSION) >= 0 : false;
 }
 
 function getBuiltInClaudeModelsForVersion(
@@ -170,8 +170,8 @@ function getBuiltInClaudeModelsForVersion(
     if (model.slug === "claude-opus-5") {
       return supportsClaudeOpus5(version);
     }
-    if (model.slug === "claude-fable-5") {
-      return supportsClaudeFable5(version);
+    if (model.slug === "claude-fable-5-1") {
+      return supportsClaudeFable(version);
     }
     return true;
   });
@@ -182,9 +182,9 @@ function formatClaudeOpus5UpgradeMessage(version: string | null): string {
   return `Claude Code ${versionLabel} is too old for Claude Opus 5. Upgrade to v${MINIMUM_CLAUDE_OPUS_5_VERSION} or newer to access it.`;
 }
 
-function formatClaudeFable5UpgradeMessage(version: string | null): string {
+function formatClaudeFableUpgradeMessage(version: string | null): string {
   const versionLabel = version ? `v${version}` : "the installed version";
-  return `Claude Code ${versionLabel} is too old for Claude Fable 5. Upgrade to v${MINIMUM_CLAUDE_FABLE_5_VERSION} or newer to access it.`;
+  return `Claude Code ${versionLabel} is too old for Claude Fable 5.1. Upgrade to v${MINIMUM_CLAUDE_FABLE_VERSION} or newer to access it.`;
 }
 
 export function getClaudeModelCapabilities(model: string | null | undefined): ModelCapabilities {
@@ -743,9 +743,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   );
   const versionUpgradeMessage = supportsClaudeOpus5(parsedVersion)
     ? undefined
-    : supportsClaudeFable5(parsedVersion)
+    : supportsClaudeFable(parsedVersion)
       ? formatClaudeOpus5UpgradeMessage(parsedVersion)
-      : formatClaudeFable5UpgradeMessage(parsedVersion);
+      : formatClaudeFableUpgradeMessage(parsedVersion);
 
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))

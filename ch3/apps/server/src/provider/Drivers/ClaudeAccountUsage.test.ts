@@ -53,7 +53,7 @@ describe("Claude account usage", () => {
         {
           percent: 97.0,
           resets_at: "2026-08-16T13:00:00+00:00",
-          scope: { model: { display_name: "Claude Fable 5" } },
+          scope: { model: { display_name: "Claude Fable 5.1" } },
         },
       ],
     });
@@ -348,12 +348,12 @@ it("reports the most constraining per-model window, not the first one listed", (
       {
         percent: 56.0,
         resets_at: "2026-08-19T23:59:00+00:00",
-        scope: { model: { display_name: "Claude Fable 5" } },
+        scope: { model: { display_name: "Claude Fable 5.1" } },
       },
       {
         percent: 100.0,
         resets_at: "2026-08-15T03:39:00+00:00",
-        scope: { model: { display_name: "Claude Fable 5" } },
+        scope: { model: { display_name: "Claude Fable 5.1" } },
       },
     ],
   });
