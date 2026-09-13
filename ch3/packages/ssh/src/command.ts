@@ -1,6 +1,6 @@
 import * as NodeCrypto from "node:crypto";
 
-import type { DesktopSshEnvironmentTarget, DesktopUpdateChannel } from "@ch3tools/contracts";
+import type { DesktopSshEnvironmentTarget } from "@ch3tools/contracts";
 import { HostProcessPlatform } from "@ch3tools/shared/hostProcess";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -366,7 +366,6 @@ export const resolveSshTarget = Effect.fn("ssh/command.resolveSshTarget")(functi
 
 export function resolveRemoteCH3CliPackageSpec(input: {
   readonly appVersion: string;
-  readonly updateChannel: DesktopUpdateChannel;
   readonly isDevelopment?: boolean;
 }): string {
   const appVersion = input.appVersion.trim();
@@ -374,9 +373,7 @@ export function resolveRemoteCH3CliPackageSpec(input: {
     return `ch3@${appVersion}`;
   }
 
-  if (input.isDevelopment) {
-    return "ch3@nightly";
-  }
-
-  return input.updateChannel === "nightly" ? "ch3@nightly" : "ch3@latest";
+  // One release stream: a development build tracks the newest published
+  // package, and a packaged build with an unpublishable version does too.
+  return input.isDevelopment ? "ch3@nightly" : "ch3@latest";
 }

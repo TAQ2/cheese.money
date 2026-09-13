@@ -20,6 +20,11 @@ export function formatPreviewUrl(input: PreviewUrlPresentationInput): string | n
       return `${input.environmentLabel} · ${fileName}`;
     }
 
+    if (url.protocol === "file:") {
+      // The URL bar shows the path the user typed, not the percent-encoded form it navigated to.
+      return decodeURIComponent(url.pathname);
+    }
+
     return url.protocol === "http:" || url.protocol === "https:" ? url.host : null;
   } catch {
     return null;

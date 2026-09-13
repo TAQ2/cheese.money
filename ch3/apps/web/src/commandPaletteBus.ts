@@ -3,7 +3,13 @@
 const COMMAND_PALETTE_OPEN_EVENT = "ch3:open-command-palette";
 
 export interface CommandPaletteOpenDetail {
-  readonly open?: "add-project" | "new-thread-in";
+  readonly open?: "add-project" | "discover-projects" | "new-thread-in";
+  /**
+   * Where a "new thread in..." pick goes. Absent, it opens a draft
+   * conversation as always; `kanban` hands the project to the board's own
+   * new-thread dialog instead, so a person on the board stays on the board.
+   */
+  readonly newThreadTarget?: "kanban";
 }
 
 export function openCommandPalette(detail?: CommandPaletteOpenDetail): void {

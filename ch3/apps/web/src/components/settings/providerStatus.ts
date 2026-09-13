@@ -1,4 +1,8 @@
-import type { ServerProvider, ServerProviderVersionAdvisory } from "@ch3tools/contracts";
+import type {
+  ServerProvider,
+  ServerProviderUpdateState,
+  ServerProviderVersionAdvisory,
+} from "@ch3tools/contracts";
 
 /**
  * Visual treatment for each server-reported provider status. Centralized so
@@ -90,13 +94,29 @@ export function getProviderVersionLabel(version: string | null | undefined) {
   return version.startsWith("v") ? version : `v${version}`;
 }
 
-export function getProviderVersionAdvisoryPresentation(
-  advisory: ServerProviderVersionAdvisory | undefined,
-): {
+export interface ProviderVersionAdvisoryPresentation {
+  readonly title: string;
   readonly detail: string;
   readonly updateCommand: string | null;
   readonly emphasis: "normal" | "strong";
-} | null {
+  /** True when the last attempt did not land, so the button offers a retry. */
+  readonly retry: boolean;
+}
+
+/**
+ * What the update badge says.
+ *
+ * An update that is still on offer *after* an attempt that did not land is the
+ * shape a person reads as "this button does nothing": the server knows why —
+ * a rate-limited updater, a global prefix it could not write — and until that
+ * reason is shown here it may as well not exist. So the last attempt outranks
+ * the advisory, and the button becomes a deliberate retry rather than the same
+ * unexplained offer.
+ */
+export function getProviderVersionAdvisoryPresentation(
+  advisory: ServerProviderVersionAdvisory | undefined,
+  updateState?: ServerProviderUpdateState | undefined,
+): ProviderVersionAdvisoryPresentation | null {
   if (!advisory || advisory.status === "current" || advisory.status === "unknown") {
     return null;
   }
@@ -104,8 +124,8 @@ export function getProviderVersionAdvisoryPresentation(
   const label = "Update available";
   const version = advisory.latestVersion;
   const versionLabel = getProviderVersionLabel(version);
-
-  return {
+  const available = {
+    title: label,
     detail:
       advisory.message ??
       (versionLabel
@@ -113,5 +133,28 @@ export function getProviderVersionAdvisoryPresentation(
         : `${label}: install the latest provider version.`),
     updateCommand: advisory.updateCommand,
     emphasis: "normal" as const,
+    retry: false,
   };
+
+  if (updateState?.status === "failed") {
+    return {
+      ...available,
+      title: "Update failed",
+      detail: updateState.message ?? "The update command did not finish.",
+      emphasis: "strong",
+      retry: true,
+    };
+  }
+  if (updateState?.status === "unchanged") {
+    return {
+      ...available,
+      title: "Update did not install",
+      detail:
+        updateState.message ??
+        "The update command completed, but this provider is still on the old version.",
+      emphasis: "strong",
+      retry: true,
+    };
+  }
+  return available;
 }

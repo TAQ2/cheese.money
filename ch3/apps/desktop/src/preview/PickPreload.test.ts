@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { computeLabelPosition } from "./PickLabelPosition.ts";
+import { type SealableKeyEvent, sealOverlayKeyEvents } from "./PickOverlayKeys.ts";
 
 const VIEWPORT = { viewportWidth: 1280, viewportHeight: 800 };
 
@@ -82,5 +83,49 @@ describe("computeLabelPosition", () => {
     });
     expect(x).toBeGreaterThanOrEqual(0);
     expect(y).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("sealOverlayKeyEvents", () => {
+  const fakeRoot = () => {
+    const handlers = new Map<string, (event: SealableKeyEvent) => void>();
+    return {
+      handlers,
+      addEventListener: (type: string, handler: (event: SealableKeyEvent) => void) => {
+        handlers.set(type, handler);
+      },
+    };
+  };
+
+  it("seals every key event a page can bind a shortcut to", () => {
+    const root = fakeRoot();
+    sealOverlayKeyEvents(root);
+    expect([...root.handlers.keys()].sort()).toEqual(["keydown", "keypress", "keyup"]);
+  });
+
+  it("stops the event reaching the page", () => {
+    // The bug: a space typed into "Describe the change…" reached the slide
+    // deck's own document handler and advanced a slide instead of typing.
+    const root = fakeRoot();
+    sealOverlayKeyEvents(root);
+    let stopped = 0;
+    for (const handler of root.handlers.values())
+      handler({ stopPropagation: () => (stopped += 1) });
+    expect(stopped).toBe(3);
+  });
+
+  it("never calls preventDefault, so the character is still inserted", () => {
+    // Propagation and the default action are independent. Suppressing the
+    // default here would fix the slide and break the typing.
+    const root = fakeRoot();
+    sealOverlayKeyEvents(root);
+    const handler = root.handlers.get("keydown");
+    expect(handler).toBeDefined();
+    let preventedDefault = false;
+    handler!({
+      stopPropagation: () => {},
+      preventDefault: () => (preventedDefault = true),
+    } as SealableKeyEvent & { preventDefault: () => void });
+    expect(preventedDefault).toBe(false);
   });
 });

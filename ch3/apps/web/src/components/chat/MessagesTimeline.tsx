@@ -4,11 +4,9 @@ import {
   type ScopedThreadRef,
   type ServerProviderSkill,
   type TurnId,
-  SPEECH_MAX_RAW_TEXT_CHARS,
 } from "@ch3tools/contracts";
 import { parseScopedThreadKey } from "@ch3tools/client-runtime/environment";
-import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
-import { resolveChatListAnchoredEndSpace } from "@ch3tools/shared/chatList";
+import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import {
   createContext,
   Fragment,
@@ -56,9 +54,11 @@ import {
   SquarePenIcon,
   TerminalIcon,
   PencilIcon,
+  RotateCcwIcon,
   Undo2Icon,
   WrenchIcon,
   CopyIcon,
+  EllipsisIcon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -69,18 +69,29 @@ import { ChangedFilesCard } from "./ChangedFilesTree";
 import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { MessageSpeakButton } from "./MessageSpeakButton";
+import { WorkingTimer } from "./WorkingTimer";
 import {
   computeStableMessagesTimelineRows,
+  type AgentModelContext,
   type AgentRosterActivity,
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  isUserAttributableTimelineScroll,
   resolveTimelineIsAtEnd,
   resolveTimelineMinimapHasPersistentGutter,
   resolveTimelineMinimapHeightStyle,
-  resolveTimelineMinimapHitStripWidth,
+  resolveTimelineMinimapLane,
+  TIMELINE_MINIMAP_HOVER_DWELL_MS,
+  type TimelineMinimapLane,
+  resolveTimelineMinimapTickWidth,
   resolveTimelineMinimapIndexFromPointer,
-  resolveTimelineMinimapInteractiveWidth,
+  resolveTimelineReadingAnchor,
+  resolveTimelineReadingRestoreScroll,
+  shouldAcceptTimelineMinimapClick,
+  TIMELINE_PROGRAMMATIC_SCROLL_WINDOW_MS,
+  type TimelineReadingAnchor,
+  type TimelineScrollGestureKind,
   resolveTimelineMinimapTopPercent,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
@@ -107,6 +118,7 @@ import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@ch3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatShortTimestamp } from "../../timestampFormat";
 
+import { type ThreadFindHighlight } from "./findInThread";
 import {
   buildInlineTerminalContextText,
   formatInlineTerminalContextLabel,
@@ -142,6 +154,24 @@ interface TimelineRowSharedState {
   onRevertUserMessage: (messageId: MessageId) => void;
   /** Opens the rewind flow already sitting on this message, for editing it. */
   onEditUserMessage: (messageId: MessageId) => void;
+  /** Re-dispatches the turn a `provider.turn.start.failed` row belongs to. */
+  onRetryTurnStart: (messageId: MessageId) => void;
+  /**
+   * The only message whose turn may still be retried: the one still waiting at
+   * the end of the thread. A failed-turn row never leaves the log, so without
+   * this a days-old failure kept an enabled Retry button and could re-dispatch
+   * a turn on a thread that had moved on — including one the person had
+   * already retyped. The decider refuses those, and this is the same rule
+   * where the button lives, so the button is never offered on work it cannot
+   * do. Null when nothing is retriable.
+   */
+  retriableMessageId: MessageId | null;
+  /** Opens a separate new thread, pre-filled to investigate this failure. */
+  onReportTurnStartFailure: (report: {
+    detail: string;
+    createdAt: string;
+    messageId: MessageId | null;
+  }) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
@@ -158,6 +188,84 @@ interface TimelineRowActivityState {
 
 const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
 const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
+/**
+ * The entries find has taken the reader to, for the two bodies that hide their
+ * own text: a long user message clipped to its first lines, and a collapsed
+ * proposed plan showing a preview. A match inside either is highlighted and
+ * invisible, so one that has held the current match shows itself in full.
+ *
+ * It accumulates rather than tracking only the current match, because
+ * re-collapsing the one behind changes the height of everything below it — and
+ * a match revealed against a layout that is about to shrink lands nowhere. It
+ * empties when the find bar closes, which is what puts those bodies back.
+ *
+ * It is separate from `TimelineRowCtx` on purpose — that context feeds every
+ * row, and stepping through matches would re-render all of them.
+ */
+const TimelineFindRevealedEntriesCtx = createContext<ReadonlySet<string>>(new Set());
+const EMPTY_FIND_REVEALED_ENTRIES: ReadonlySet<string> = new Set();
+
+const FIND_HIGHLIGHT_NAME = "find-in-thread";
+const FIND_ACTIVE_HIGHLIGHT_NAME = "find-in-thread-active";
+/** Distance kept between the revealed match and the edge it scrolled past. */
+const FIND_REVEAL_MARGIN_PX = 96;
+/**
+ * How long a reveal may keep correcting itself. Revealing a match changes the
+ * layout it was measured against — the body holding it unfolds, and the list
+ * re-measures the row a frame later — so one measurement is not enough, and an
+ * unbounded number is a loop.
+ */
+const FIND_REVEAL_SETTLE_MS = 400;
+
+/**
+ * The rendered occurrences of `needle` under `root`, per entry, in reading
+ * order.
+ *
+ * It reads the DOM rather than the messages because the highlight has to land
+ * on the rendered text — including inside a Shiki code block, which the
+ * markdown renderer emits as HTML that React never sees as text. The virtualised
+ * list only mounts a screenful of rows, so this walks that screenful, not the
+ * thread; the counter comes from the messages themselves, which is why it can
+ * report matches this pass never sees.
+ *
+ * Only the marked content bodies are searched, so the chrome around a message —
+ * timestamps, tool names, the fold's own label — never lights up under a query
+ * the counter did not count. A match split across inline markup (`hello
+ * **world**`) is not found, because a text node is where a range can be made.
+ */
+function collectRenderedFindRanges(
+  root: HTMLElement,
+  needle: string,
+): { readonly all: Range[]; readonly byEntry: Map<string, Range[]> } {
+  const all: Range[] = [];
+  const byEntry = new Map<string, Range[]>();
+
+  for (const scope of root.querySelectorAll("[data-find-scope]")) {
+    const entryId = scope.closest("[data-timeline-row-id]")?.getAttribute("data-timeline-row-id");
+    if (!entryId) continue;
+    const entryRanges = byEntry.get(entryId) ?? [];
+    byEntry.set(entryId, entryRanges);
+
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node !== null) {
+      const text = node.nodeValue?.toLowerCase() ?? "";
+      let cursor = text.indexOf(needle);
+      while (cursor !== -1) {
+        const range = document.createRange();
+        range.setStart(node, cursor);
+        range.setEnd(node, cursor + needle.length);
+        all.push(range);
+        entryRanges.push(range);
+        cursor = text.indexOf(needle, cursor + needle.length);
+      }
+      node = walker.nextNode();
+    }
+  }
+
+  return { all, byEntry };
+}
+
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
@@ -178,12 +286,36 @@ interface MessagesTimelineProps {
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
   /** Thread activities — carries the background-agent task feed. */
   threadActivities?: ReadonlyArray<AgentRosterActivity>;
+  /**
+   * The thread's own model, the driver behind it and the viewer's tier. Lets
+   * the subagent roster name the model a delegation inherited when its Task
+   * call did not pick one.
+   */
+  agentModelContext?: AgentModelContext | null;
   routeThreadKey: string;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
   /** Opens the rewind flow already sitting on this message, for editing it. */
   onEditUserMessage: (messageId: MessageId) => void;
+  /** Re-dispatches the turn a `provider.turn.start.failed` row belongs to. */
+  onRetryTurnStart: (messageId: MessageId) => void;
+  /**
+   * The only message whose turn may still be retried: the one still waiting at
+   * the end of the thread. A failed-turn row never leaves the log, so without
+   * this a days-old failure kept an enabled Retry button and could re-dispatch
+   * a turn on a thread that had moved on — including one the person had
+   * already retyped. The decider refuses those, and this is the same rule
+   * where the button lives, so the button is never offered on work it cannot
+   * do. Null when nothing is retriable.
+   */
+  retriableMessageId: MessageId | null;
+  /** Opens a separate new thread, pre-filled to investigate this failure. */
+  onReportTurnStartFailure: (report: {
+    detail: string;
+    createdAt: string;
+    messageId: MessageId | null;
+  }) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -193,14 +325,35 @@ interface MessagesTimelineProps {
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
-  anchorMessageId: MessageId | null;
-  onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
-  onAnchorSizeChanged: (messageId: MessageId, size: number) => void;
   contentInsetEndAdjustment: number;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
+  /**
+   * Whether the timeline should stay pinned to the live edge. False once the
+   * reader scrolls away, which is what keeps a streaming turn from pulling
+   * them back down on its next token.
+   */
+  followEnd: boolean;
   hideEmptyPlaceholder?: boolean;
   topFadeEnabled?: boolean;
+  /**
+   * Present only while the thread has older activities to page in. Firing it
+   * prepends rows above the reader; maintainVisibleContentPosition keeps the
+   * viewport anchored, so it never disturbs scroll-follow.
+   */
+  onStartReached?: (() => void) | undefined;
+  /**
+   * Whether the owner has just asked the list to scroll (to the end, after a
+   * send or a settle). A scroll event inside that window is the app's own,
+   * not a jump to undo. See the reading-anchor guard in `handleScroll`.
+   */
+  isProgrammaticScrollExpected?: (() => boolean) | undefined;
+  /**
+   * The conversation's find, when its bar is open: what to highlight, and which
+   * occurrence the reader is standing on. The timeline owns revealing it —
+   * unfolding the turn that hides it and scrolling it into view.
+   */
+  find?: ThreadFindHighlight | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,11 +370,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   runningTurnId,
   turnDiffSummaryByAssistantMessageId,
   threadActivities,
+  agentModelContext,
   routeThreadKey,
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
   onEditUserMessage,
+  onRetryTurnStart,
+  retriableMessageId,
+  onReportTurnStartFailure,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -231,21 +388,22 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timestampFormat,
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
-  anchorMessageId,
-  onAnchorReady,
-  onAnchorSizeChanged,
   contentInsetEndAdjustment,
   onIsAtEndChange,
   onManualNavigation,
+  followEnd,
   hideEmptyPlaceholder = false,
   topFadeEnabled = false,
+  onStartReached,
+  isProgrammaticScrollExpected,
+  find,
 }: MessagesTimelineProps) {
-  const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
+  const [collapsedTurnIds, setCollapsedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
 
   const onToggleTurnFold = useCallback((turnId: TurnId) => {
-    setExpandedTurnIds((existing) => {
+    setCollapsedTurnIds((existing) => {
       const next = new Set(existing);
       if (next.has(turnId)) {
         next.delete(turnId);
@@ -255,6 +413,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return next;
     });
   }, []);
+  // The reading-anchor guard's state: the row under the viewport's top as of
+  // the last scroll event, and until when a scroll event is this component's
+  // own doing (a minimap jump, a fold compensation, a restore). Both refs, not
+  // state — read inside the scroll handler, never rendered.
+  const readingAnchorRef = useRef<TimelineReadingAnchor | null>(null);
+  const programmaticScrollUntilRef = useRef(0);
+  const expectProgrammaticScroll = useCallback(() => {
+    programmaticScrollUntilRef.current = Date.now() + TIMELINE_PROGRAMMATIC_SCROLL_WINDOW_MS;
+  }, []);
+
   const onToggleWorkGroup = useCallback(
     (groupId: string, anchorElement?: HTMLElement) => {
       const anchorBottomBeforeToggle = anchorElement?.getBoundingClientRect().bottom ?? null;
@@ -283,40 +451,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       const list = listRef.current;
       const currentScroll = list?.getState?.().scroll;
       if (list && typeof currentScroll === "number") {
+        expectProgrammaticScroll();
         list.scrollToOffset({ offset: currentScroll + delta, animated: false });
       }
     },
-    [listRef],
+    [expectProgrammaticScroll, listRef],
   );
-
-  // An in-session interrupt leaves its turn expanded so the user keeps their
-  // place; the next turn (or a reload, since this is local state) folds it.
-  const previousLatestTurnRef = useRef(latestTurn);
-  useEffect(() => {
-    const previous = previousLatestTurnRef.current;
-    previousLatestTurnRef.current = latestTurn;
-    if (!latestTurn || previous?.turnId === undefined) {
-      return;
-    }
-    if (latestTurn.turnId === previous.turnId) {
-      if (previous.state === "running" && latestTurn.state === "interrupted") {
-        setExpandedTurnIds((existing) => {
-          const next = new Set(existing);
-          next.add(latestTurn.turnId);
-          return next;
-        });
-      }
-      return;
-    }
-    setExpandedTurnIds((existing) => {
-      if (!existing.has(previous.turnId)) {
-        return existing;
-      }
-      const next = new Set(existing);
-      next.delete(previous.turnId);
-      return next;
-    });
-  }, [latestTurn]);
 
   // Dismissed roster lines, per thread — a manual override for a delegation
   // whose completion never arrived.
@@ -342,7 +482,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         timelineEntries,
         latestTurn,
         runningTurnId,
-        expandedTurnIds,
+        collapsedTurnIds,
         expandedWorkGroupIds,
         isWorking,
         activeTurnStartedAt,
@@ -350,12 +490,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         revertTurnCountByUserMessageId,
         dismissedAgentIds,
         ...(threadActivities === undefined ? {} : { threadActivities }),
+        ...(agentModelContext === undefined ? {} : { agentModelContext }),
       }),
     [
       timelineEntries,
       latestTurn,
       runningTurnId,
-      expandedTurnIds,
+      collapsedTurnIds,
       expandedWorkGroupIds,
       isWorking,
       activeTurnStartedAt,
@@ -363,6 +504,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       revertTurnCountByUserMessageId,
       dismissedAgentIds,
       threadActivities,
+      agentModelContext,
     ],
   );
   const rows = useStableRows(rawRows);
@@ -371,36 +513,133 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     null,
   );
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
-  const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
-  const handleAnchorReady = useCallback(
-    (info: { anchorIndex: number | undefined }) => {
-      if (anchorMessageId !== null && info.anchorIndex !== undefined) {
-        onAnchorReady(anchorMessageId, info.anchorIndex);
-      }
+  const [minimapLane, setMinimapLane] = useState<TimelineMinimapLane>({
+    rightEdge: 0,
+    hitStripWidth: 0,
+    tickWidth: 0,
+  });
+
+  const [timelineScroller, setTimelineScroller] = useState<HTMLElement | null>(null);
+  const attachList = useCallback(
+    (instance: LegendListRef | null) => {
+      listRef.current = instance;
+      setTimelineScroller(instance?.getScrollableNode() ?? null);
     },
-    [anchorMessageId, onAnchorReady],
+    [listRef],
   );
-  const handleAnchorSizeChanged = useCallback(
-    (size: number) => {
-      if (anchorMessageId !== null) {
-        onAnchorSizeChanged(anchorMessageId, size);
+
+  // A scroll gesture only records that the reader touched the scroller; the
+  // scroll handler below is what cancels live-follow, and only when a scroll
+  // actually moves the reader off the end shortly after a gesture. Gestures
+  // used to cancel live-follow directly, which meant any click inside the
+  // conversation — expanding a work log, selecting text — silently disarmed
+  // the follow while the reader sat still at the end; the next turn fold then
+  // collapsed the rows under them with nothing holding the view at the edge.
+  // These listeners live as long as the scroller does. They used to be
+  // attached one frame after the thread changed, from outside this component,
+  // which missed every list that mounted later: opening a thread whose
+  // messages were still loading left a timeline the reader could not scroll
+  // away from while it streamed.
+  const lastScrollGestureAtRef = useRef<number | null>(null);
+  const lastScrollGestureKindRef = useRef<TimelineScrollGestureKind | null>(null);
+  // Wheel specifically, and over the whole timeline viewport rather than the
+  // scroller alone: the minimap rail sits beside the scroller, and a wheel
+  // over it is what makes a tap on it an accident rather than a click.
+  const lastWheelAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!timelineViewportElement) {
+      return;
+    }
+    const recordWheel = () => {
+      lastWheelAtRef.current = Date.now();
+    };
+    timelineViewportElement.addEventListener("wheel", recordWheel, { passive: true });
+    return () => {
+      timelineViewportElement.removeEventListener("wheel", recordWheel);
+    };
+  }, [timelineViewportElement]);
+  useEffect(() => {
+    if (!timelineScroller) {
+      return;
+    }
+    // The kind matters to the reading-anchor guard: a scrollbar grab or a
+    // scroll key can move any distance in one event, a wheel or a touch
+    // cannot.
+    const recordGesture = (kind: TimelineScrollGestureKind) => () => {
+      lastScrollGestureAtRef.current = Date.now();
+      lastScrollGestureKindRef.current = kind;
+    };
+    const recordWheelGesture = recordGesture("wheel");
+    const recordTouchGesture = recordGesture("touch");
+    const recordPointerGesture = recordGesture("pointer");
+    const recordKey = recordGesture("key");
+    const recordKeyGesture = (event: globalThis.KeyboardEvent) => {
+      if (TIMELINE_SCROLL_KEYS.has(event.key)) {
+        recordKey();
       }
-    },
-    [anchorMessageId, onAnchorSizeChanged],
-  );
-  const anchoredEndSpace = useMemo(() => {
-    const config = resolveChatListAnchoredEndSpace(rows, anchorMessageId, (row) =>
-      row.kind === "message" ? row.message.id : null,
-    );
-    return config
-      ? { ...config, onReady: handleAnchorReady, onSizeChanged: handleAnchorSizeChanged }
-      : undefined;
-  }, [anchorMessageId, handleAnchorReady, handleAnchorSizeChanged, rows]);
+    };
+    timelineScroller.addEventListener("wheel", recordWheelGesture, { passive: true });
+    timelineScroller.addEventListener("touchmove", recordTouchGesture, { passive: true });
+    timelineScroller.addEventListener("pointerdown", recordPointerGesture, { passive: true });
+    timelineScroller.addEventListener("keydown", recordKeyGesture, { passive: true });
+    return () => {
+      timelineScroller.removeEventListener("wheel", recordWheelGesture);
+      timelineScroller.removeEventListener("touchmove", recordTouchGesture);
+      timelineScroller.removeEventListener("pointerdown", recordPointerGesture);
+      timelineScroller.removeEventListener("keydown", recordKeyGesture);
+    };
+  }, [timelineScroller]);
 
   const handleScroll = useCallback(() => {
     const state = listRef.current?.getState?.();
     const isAtEnd = resolveTimelineIsAtEnd(state);
+    const now = Date.now();
+    const userAttributable = isUserAttributableTimelineScroll(lastScrollGestureAtRef.current, now);
+    // The reading-anchor guard. The reader is looking at a row; a scroll
+    // event that moves that row screenfuls away with nothing behind it that
+    // could — no scroll asked for by the app, no scrollbar grab or scroll
+    // key, not the list pinning a following reader towards the end — is a
+    // jump, whatever produced it, and their place is put back. A wheel does
+    // not excuse it: one event spanning the conversation is not a wheel,
+    // however recent the wheel was. The restore is itself app intent, so it
+    // cannot trip the guard on its own next event, and it happens BEFORE the
+    // jump can be read as the reader navigating away from the live edge.
+    const restoreTo = resolveTimelineReadingRestoreScroll({
+      anchor: readingAnchorRef.current,
+      state,
+      userAttributable,
+      gestureKind: lastScrollGestureKindRef.current,
+      // This component's own scrolls may go anywhere; the owner's are
+      // scroll-to-ends, which only ever move towards the end.
+      programmaticExpected:
+        now < programmaticScrollUntilRef.current
+          ? "any"
+          : isProgrammaticScrollExpected?.() === true
+            ? "towards-end"
+            : false,
+      followEnd,
+    });
+    if (restoreTo !== null && listRef.current) {
+      console.warn("[timeline] restored the reading position after an unexpected jump", {
+        from: state?.scroll,
+        to: restoreTo,
+        anchor: readingAnchorRef.current,
+        gesture: userAttributable ? lastScrollGestureKindRef.current : null,
+        following: followEnd,
+        rows: state?.data.length,
+      });
+      expectProgrammaticScroll();
+      listRef.current.scrollToOffset({ offset: restoreTo, animated: false });
+      return;
+    }
+    readingAnchorRef.current = resolveTimelineReadingAnchor(state);
     if (isAtEnd !== undefined) {
+      if (userAttributable) {
+        lastScrollGestureAtRef.current = now;
+        if (!isAtEnd) {
+          onManualNavigation();
+        }
+      }
       onIsAtEndChange(isAtEnd);
     }
     if (!state || minimapItems.length === 0) {
@@ -425,7 +664,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
       strip.dataset.inView = inView ? "true" : "false";
     }
-  }, [listRef, minimapItems, minimapStripMap, onIsAtEndChange]);
+  }, [
+    expectProgrammaticScroll,
+    followEnd,
+    isProgrammaticScrollExpected,
+    listRef,
+    minimapItems,
+    minimapStripMap,
+    onIsAtEndChange,
+    onManualNavigation,
+  ]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(handleScroll);
@@ -437,13 +685,32 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return;
     }
 
+    // Where the message column actually starts, read off a rendered row rather
+    // than derived from the viewport width. The column is `max-w-5xl` inside a
+    // padded, scrollbar-guttered scroller, so every prediction of that edge was
+    // a second source of truth beside the CSS — and a wrong one, which is how
+    // the rail came to sit on the text it was supposed to stay clear of. With
+    // no row rendered there is no measurable gutter, and the rail stays inert.
     const measure = () => {
-      const viewportWidth = timelineViewportElement.getBoundingClientRect().width;
-      const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(viewportWidth);
+      const viewportLeft = timelineViewportElement.getBoundingClientRect().left;
+      const column = timelineViewportElement
+        .querySelector("[data-timeline-root]")
+        ?.getBoundingClientRect();
+      const sideGutter = column ? Math.max(0, column.left - viewportLeft) : 0;
+      const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(sideGutter);
       setMinimapHasPersistentGutter((current) =>
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
       );
-      setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth));
+      const nextLane = resolveTimelineMinimapLane(sideGutter);
+      // A fresh object every measure would re-render the whole timeline on
+      // every resize tick; the widths it carries are what actually changed.
+      setMinimapLane((current) =>
+        current.rightEdge === nextLane.rightEdge &&
+        current.hitStripWidth === nextLane.hitStripWidth &&
+        current.tickWidth === nextLane.tickWidth
+          ? current
+          : nextLane,
+      );
     };
 
     const frame = requestAnimationFrame(measure);
@@ -456,6 +723,201 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       observer.disconnect();
     };
   }, [timelineViewportElement, rows.length]);
+
+  // ---------------------------------------------------------------------
+  // Find in conversation — reveal and highlight
+  // ---------------------------------------------------------------------
+  const findQuery = find?.query.trim().length ? find.query : "";
+  const findActiveEntryId = findQuery === "" ? null : (find?.activeEntryId ?? null);
+  const findActiveOccurrenceIndex = find?.activeOccurrenceIndex ?? 0;
+  // Set when the reader moves to another match, cleared once that match has
+  // been put on screen. Without it every mutation of a streaming turn would
+  // drag the view back to the match the reader has since scrolled away from.
+  const findRevealPendingRef = useRef(false);
+  const findRevealedTokenRef = useRef<string | null>(null);
+  const findRevealDeadlineRef = useRef(0);
+  // Set once the row holding the match has been scrolled to, so a match the
+  // highlighter never finds inside it cannot scroll there again on every
+  // mutation of a streaming turn.
+  const findCoarseRevealedTokenRef = useRef<string | null>(null);
+  const findRevealToken =
+    findActiveEntryId === null
+      ? null
+      : `${findQuery}\u0000${findActiveEntryId}\u0000${findActiveOccurrenceIndex}`;
+
+  /** The navigation a fold was last opened for, so it is opened once. */
+  const findUnfoldedTokenRef = useRef<string | null>(null);
+  const [findRevealedEntryIds, setFindRevealedEntryIds] = useState(EMPTY_FIND_REVEALED_ENTRIES);
+  // Adjusted during render rather than in an effect, deliberately: a body that
+  // unfolds to show the match has to be its final height BEFORE the reveal
+  // below measures where that match is. Unfolding one commit later moves the
+  // match after it was put on screen, which is how it ends up off it.
+  if (find === undefined) {
+    if (findRevealedEntryIds.size > 0) {
+      setFindRevealedEntryIds(EMPTY_FIND_REVEALED_ENTRIES);
+    }
+  } else if (findActiveEntryId !== null && !findRevealedEntryIds.has(findActiveEntryId)) {
+    setFindRevealedEntryIds(new Set(findRevealedEntryIds).add(findActiveEntryId));
+  }
+
+  // A match inside a folded turn has no row to scroll to: the fold removes it
+  // from the list entirely. Unfolding is what makes it exist. The fold stays
+  // open after the find bar closes — collapsing it would move the conversation
+  // out from under the reader who just navigated there.
+  //
+  // Once per navigation, not once per render: this effect watches `rows`, and
+  // folding a turn is itself a change to `rows`. Re-running it there would
+  // reopen the fold the reader just closed, on every attempt, for as long as
+  // the match stayed active. Stepping to another match and back is a new
+  // token, so a deliberate return still reveals.
+  useEffect(() => {
+    if (findActiveEntryId === null) return;
+    if (findRevealToken !== null && findRevealToken === findUnfoldedTokenRef.current) return;
+    if (rows.some((row) => row.id === findActiveEntryId)) return;
+    findUnfoldedTokenRef.current = findRevealToken;
+    const entry = timelineEntries.find((candidate) => candidate.id === findActiveEntryId);
+    const turnId =
+      entry?.kind === "message"
+        ? entry.message.turnId
+        : entry?.kind === "proposed-plan"
+          ? entry.proposedPlan.turnId
+          : null;
+    if (!turnId) return;
+    setCollapsedTurnIds((existing) => {
+      if (!existing.has(turnId)) return existing;
+      const next = new Set(existing);
+      next.delete(turnId);
+      return next;
+    });
+  }, [findActiveEntryId, findRevealToken, rows, timelineEntries]);
+
+  const findRevealTokenRef = useRef<string | null>(null);
+  findRevealTokenRef.current = findRevealToken;
+  // Read through a ref inside the highlight pass, and re-run it on this one
+  // boolean rather than on `rows`: an unfold that mounts the active match's
+  // row is the only row change the pass has to react to (see the dependency
+  // note below). Depending on `rows` re-ran it on every streaming chunk.
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const findActiveRowMounted =
+    findActiveEntryId !== null && rows.some((row) => row.id === findActiveEntryId);
+  useEffect(() => {
+    if (findRevealToken === null || findRevealToken === findRevealedTokenRef.current) return;
+    findRevealedTokenRef.current = findRevealToken;
+    findRevealPendingRef.current = true;
+    findRevealDeadlineRef.current = Date.now() + FIND_REVEAL_SETTLE_MS;
+  }, [findRevealToken]);
+
+  useEffect(() => {
+    const registry = typeof CSS === "undefined" ? undefined : CSS.highlights;
+    if (!registry) return;
+    const clear = () => {
+      registry.delete(FIND_HIGHLIGHT_NAME);
+      registry.delete(FIND_ACTIVE_HIGHLIGHT_NAME);
+    };
+    if (!timelineViewportElement || findQuery === "") {
+      clear();
+      return;
+    }
+
+    const needle = findQuery.toLowerCase();
+    let frame = 0;
+    const apply = () => {
+      frame = 0;
+      const { all, byEntry } = collectRenderedFindRanges(timelineViewportElement, needle);
+      registry.set(FIND_HIGHLIGHT_NAME, new Highlight(...all));
+
+      const activeRange =
+        findActiveEntryId === null
+          ? undefined
+          : byEntry.get(findActiveEntryId)?.[findActiveOccurrenceIndex];
+      // No range for the active match means its row is not mounted — the list
+      // renders a screenful. Scrolling to the row is what mounts it; the next
+      // pass, once it has, is what lands on the match itself. The two steps
+      // never share a frame, because a scroll measured against a layout that a
+      // scroll already in flight is about to change lands nowhere.
+      if (!activeRange) {
+        registry.delete(FIND_ACTIVE_HIGHLIGHT_NAME);
+        if (!findRevealPendingRef.current) return;
+        if (findRevealTokenRef.current === findCoarseRevealedTokenRef.current) return;
+        const index = rowsRef.current.findIndex((row) => row.id === findActiveEntryId);
+        if (index === -1) return;
+        findCoarseRevealedTokenRef.current = findRevealTokenRef.current;
+        onManualNavigation();
+        expectProgrammaticScroll();
+        void listRef.current?.scrollToIndex({ index, animated: false, viewOffset: 24 });
+        return;
+      }
+      registry.set(FIND_ACTIVE_HIGHLIGHT_NAME, new Highlight(activeRange));
+
+      if (!findRevealPendingRef.current || !timelineScroller) return;
+      const matchRect = activeRange.getBoundingClientRect();
+      if (matchRect.height === 0) return;
+      const viewRect = timelineScroller.getBoundingClientRect();
+      // Correct first, then keep watching for a short window: the row holding
+      // the match is measured by the list a frame after it unfolds, and a
+      // reveal that trusted its first measurement lands above the viewport.
+      if (
+        matchRect.top < viewRect.top + FIND_REVEAL_MARGIN_PX ||
+        matchRect.bottom > viewRect.bottom - FIND_REVEAL_MARGIN_PX
+      ) {
+        const currentScroll = listRef.current?.getState?.().scroll ?? timelineScroller.scrollTop;
+        onManualNavigation();
+        expectProgrammaticScroll();
+        listRef.current?.scrollToOffset({
+          offset: currentScroll + (matchRect.top - viewRect.top) - FIND_REVEAL_MARGIN_PX,
+          animated: false,
+        });
+      }
+      if (Date.now() > findRevealDeadlineRef.current) {
+        findRevealPendingRef.current = false;
+        return;
+      }
+      if (frame === 0) {
+        frame = requestAnimationFrame(apply);
+      }
+    };
+
+    apply();
+    // Virtualised rows mount and unmount as the list scrolls, and a streaming
+    // reply rewrites its own text — both change what there is to highlight.
+    const observer = new MutationObserver(() => {
+      if (frame === 0) {
+        frame = requestAnimationFrame(apply);
+      }
+    });
+    observer.observe(timelineViewportElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+
+    return () => {
+      observer.disconnect();
+      if (frame !== 0) cancelAnimationFrame(frame);
+      clear();
+    };
+  }, [
+    expectProgrammaticScroll,
+    findActiveEntryId,
+    findActiveOccurrenceIndex,
+    findQuery,
+    listRef,
+    onManualNavigation,
+    // Whether the active match's row is in the row model is a dependency on
+    // purpose. Reading rows only through a ref lost a real case: from the end
+    // of a long thread, a query whose first match sits in a folded turn has no
+    // row to scroll to, so the pass returns; the unfold effect then opens the
+    // turn — but the rows it adds mount far above the viewport, so nothing in
+    // the mounted screenful mutates, the observer never fires, and the counter
+    // reads "1 of 3" over a view that never moves. Re-running when that row
+    // appears is what turns an unfold into a reveal. Depending on `rows`
+    // itself did the same job at the price of a second pass per streaming
+    // chunk, on top of the one the observer already runs.
+    findActiveRowMounted,
+    timelineScroller,
+    timelineViewportElement,
+  ]);
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
@@ -470,6 +932,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       speechAvailable,
       onRevertUserMessage,
       onEditUserMessage,
+      onRetryTurnStart,
+      retriableMessageId,
+      onReportTurnStartFailure,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -488,6 +953,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       speechAvailable,
       onRevertUserMessage,
       onEditUserMessage,
+      onRetryTurnStart,
+      retriableMessageId,
+      onReportTurnStartFailure,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -508,7 +976,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
+      <div className="mx-auto w-full min-w-0 max-w-5xl overflow-x-clip" data-timeline-root="true">
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -530,62 +998,80 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   return (
     <TimelineRowCtx value={sharedState}>
-      <TimelineRowActivityCtx value={activityState}>
-        <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
-          <LegendList<MessagesTimelineRow>
-            ref={listRef}
-            data={rows}
-            keyExtractor={keyExtractor}
-            getItemType={getItemType}
-            renderItem={renderItem}
-            estimatedItemSize={90}
-            initialScrollAtEnd
-            {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
-            contentInsetEndAdjustment={contentInsetEndAdjustment}
-            maintainScrollAtEnd={
-              anchoredEndSpace
-                ? false
-                : {
-                    animated: false,
-                    on: {
-                      dataChange: true,
-                      itemLayout: true,
-                      layout: true,
-                    },
-                  }
-            }
-            maintainVisibleContentPosition={{
-              data: true,
-              size: false,
-            }}
-            onScroll={handleScroll}
-            className={cn(
-              "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
-              topFadeEnabled && "chat-timeline-scroll-fade",
-            )}
-            ListHeaderComponent={topFadeEnabled ? TIMELINE_LIST_FADE_HEADER : TIMELINE_LIST_HEADER}
-            ListFooterComponent={TIMELINE_LIST_FOOTER}
-          />
-          <TimelineMinimap
-            items={minimapItems}
-            bottomInset={contentInsetEndAdjustment}
-            hasPersistentGutter={minimapHasPersistentGutter}
-            hitStripWidth={minimapHitStripWidth}
-            stripMap={minimapStripMap}
-            onSelect={(item) => {
-              onManualNavigation();
-              void listRef.current?.scrollToIndex({
-                index: item.rowIndex,
-                animated: true,
-                viewOffset: 24,
-              });
-            }}
-          />
-        </div>
-      </TimelineRowActivityCtx>
+      <TimelineFindRevealedEntriesCtx value={findRevealedEntryIds}>
+        <TimelineRowActivityCtx value={activityState}>
+          <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+            <LegendList<MessagesTimelineRow>
+              ref={attachList}
+              data={rows}
+              keyExtractor={keyExtractor}
+              getItemType={getItemType}
+              renderItem={renderItem}
+              estimatedItemSize={90}
+              initialScrollAtEnd
+              contentInsetEndAdjustment={contentInsetEndAdjustment}
+              maintainScrollAtEnd={
+                followEnd
+                  ? {
+                      animated: false,
+                      on: {
+                        dataChange: true,
+                        itemLayout: true,
+                        layout: true,
+                      },
+                    }
+                  : false
+              }
+              maintainVisibleContentPosition={{
+                data: true,
+                size: false,
+              }}
+              onScroll={handleScroll}
+              {...(onStartReached === undefined
+                ? {}
+                : { onStartReached, onStartReachedThreshold: 0.25 })}
+              className={cn(
+                "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
+                topFadeEnabled && "chat-timeline-scroll-fade",
+              )}
+              ListHeaderComponent={
+                topFadeEnabled ? TIMELINE_LIST_FADE_HEADER : TIMELINE_LIST_HEADER
+              }
+              ListFooterComponent={TIMELINE_LIST_FOOTER}
+            />
+            <TimelineMinimap
+              items={minimapItems}
+              bottomInset={contentInsetEndAdjustment}
+              hasPersistentGutter={minimapHasPersistentGutter}
+              lane={minimapLane}
+              stripMap={minimapStripMap}
+              lastWheelAtRef={lastWheelAtRef}
+              onSelect={(item) => {
+                onManualNavigation();
+                expectProgrammaticScroll();
+                void listRef.current?.scrollToIndex({
+                  index: item.rowIndex,
+                  animated: true,
+                  viewOffset: 24,
+                });
+              }}
+            />
+          </div>
+        </TimelineRowActivityCtx>
+      </TimelineFindRevealedEntriesCtx>
     </TimelineRowCtx>
   );
 });
+
+const TIMELINE_SCROLL_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End",
+  " ",
+]);
 
 function keyExtractor(item: MessagesTimelineRow) {
   return item.id;
@@ -672,19 +1158,44 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
 function TimelineMinimap({
   bottomInset,
   hasPersistentGutter,
-  hitStripWidth,
+  lane,
   items,
+  lastWheelAtRef,
   stripMap,
   onSelect,
 }: {
   bottomInset: number;
   hasPersistentGutter: boolean;
-  hitStripWidth: number;
+  lane: TimelineMinimapLane;
   items: ReadonlyArray<TimelineMinimapItem>;
+  /** The last wheel over the timeline; a click mid-wheel is not a click. */
+  lastWheelAtRef: React.RefObject<number | null>;
   stripMap: Map<string, HTMLSpanElement>;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
-  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [activeIndex, setActiveIndexState] = useState<number | null>(null);
+  const activeIndexRef = useRef<number | null>(null);
+  const dwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingIndexRef = useRef<number | null>(null);
+
+  const setActiveIndex = useCallback((next: number | null) => {
+    activeIndexRef.current = next;
+    setActiveIndexState(next);
+  }, []);
+
+  const cancelDwell = useCallback(() => {
+    if (dwellTimerRef.current !== null) {
+      clearTimeout(dwellTimerRef.current);
+      dwellTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => cancelDwell, [cancelDwell]);
+  // When the pointer arrived on the rail. A click counts only after a beat of
+  // hovering (see `shouldAcceptTimelineMinimapClick`): a tap-to-click during a
+  // two-finger scroll, with the pointer resting over the rail, otherwise
+  // carries the reader to whatever message sits at that height.
+  const hoveredSinceRef = useRef<number | null>(null);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
@@ -718,19 +1229,42 @@ function TimelineMinimap({
   const updateActiveIndexFromPointer = useCallback(
     (event: MouseEvent<HTMLElement>) => {
       const nextIndex = resolveActiveIndexFromPointer(event);
-      setActiveIndex(nextIndex);
+      if (hoveredSinceRef.current === null && nextIndex !== null) {
+        hoveredSinceRef.current = Date.now();
+      }
+      pendingIndexRef.current = nextIndex;
+
+      if (nextIndex === null) {
+        cancelDwell();
+        setActiveIndex(null);
+        return;
+      }
+      // Open: track the pointer directly, no second wait.
+      if (activeIndexRef.current !== null) {
+        setActiveIndex(nextIndex);
+        return;
+      }
+      // Closed: the pointer has to settle. Sweeping in from the left margin to
+      // reach the first word of a message crosses the rail in a few
+      // milliseconds, and that used to be enough to open a preview over the
+      // words the reader was reaching for.
+      if (dwellTimerRef.current !== null) {
+        return;
+      }
+      dwellTimerRef.current = setTimeout(() => {
+        dwellTimerRef.current = null;
+        setActiveIndex(pendingIndexRef.current);
+      }, TIMELINE_MINIMAP_HOVER_DWELL_MS);
     },
-    [resolveActiveIndexFromPointer],
+    [cancelDwell, resolveActiveIndexFromPointer, setActiveIndex],
   );
 
   const moveActiveIndex = useCallback(
     (delta: number) => {
-      setActiveIndex((current) => {
-        const base = current ?? 0;
-        return Math.max(0, Math.min(items.length - 1, base + delta));
-      });
+      const base = activeIndexRef.current ?? 0;
+      setActiveIndex(Math.max(0, Math.min(items.length - 1, base + delta)));
     },
-    [items.length],
+    [items.length, setActiveIndex],
   );
 
   if (items.length < TIMELINE_MINIMAP_MIN_ITEMS) {
@@ -755,14 +1289,26 @@ function TimelineMinimap({
         <button
           aria-label={`Jump to message: ${activeItem?.userText ?? "User message"}`}
           className={cn(
-            "absolute top-1/2 left-3 -translate-y-1/2 cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
-            // The strip is width-capped to the side gutter so it never overlays
-            // the centered content column; with no usable gutter it goes inert.
-            hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
+            "absolute top-1/2 -translate-y-1/2 cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
+            // The rail lives inside the measured gutter, a margin short of the
+            // text; a gutter too small for even a stub of one hides it.
+            lane.hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
           )}
-          onBlur={() => setActiveIndex(null)}
+          onBlur={() => {
+            cancelDwell();
+            setActiveIndex(null);
+          }}
           onClick={(event) => {
             if (timelineMinimapEventTargetsPreview(event.target)) {
+              return;
+            }
+            if (
+              !shouldAcceptTimelineMinimapClick({
+                hoveredSinceMs: hoveredSinceRef.current,
+                lastWheelAtMs: lastWheelAtRef.current,
+                nowMs: Date.now(),
+              })
+            ) {
               return;
             }
             const nextIndex = resolveActiveIndexFromPointer(event);
@@ -772,7 +1318,7 @@ function TimelineMinimap({
             }
             event.currentTarget.blur();
           }}
-          onFocus={() => setActiveIndex((current) => current ?? 0)}
+          onFocus={() => setActiveIndex(activeIndexRef.current ?? 0)}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown") {
               event.preventDefault();
@@ -793,7 +1339,11 @@ function TimelineMinimap({
               }
             }
           }}
-          onMouseLeave={() => setActiveIndex(null)}
+          onMouseLeave={() => {
+            hoveredSinceRef.current = null;
+            cancelDwell();
+            setActiveIndex(null);
+          }}
           onMouseMove={updateActiveIndexFromPointer}
           onMouseDown={(event) => {
             if (timelineMinimapEventTargetsPreview(event.target)) {
@@ -803,11 +1353,21 @@ function TimelineMinimap({
           }}
           style={{
             height: resolveTimelineMinimapHeightStyle(items.length),
-            width: resolveTimelineMinimapInteractiveWidth(hitStripWidth, activeItem !== null),
+            left: Math.max(0, lane.rightEdge - lane.hitStripWidth),
+            width: lane.hitStripWidth,
           }}
+          // A hidden rail is out of the tab order too. `pointer-events-none`
+          // stops the mouse but not Tab, and focus opens the preview card —
+          // 320px of it, at the viewport's left edge, over the first words of
+          // a message. That is the bug this component is fixing, reached by
+          // keyboard instead of by pointer.
+          tabIndex={lane.hitStripWidth > 0 ? undefined : -1}
           type="button"
         >
-          <div className="absolute top-0 left-3 h-full w-px bg-border/15" />
+          <div
+            className="absolute top-0 h-full w-px bg-border/15"
+            style={{ left: Math.round(lane.tickWidth / 2) }}
+          />
           {items.map((item, index) => {
             const top = `${resolveTimelineMinimapTopPercent(index, items.length)}%`;
             const activeDistance =
@@ -817,13 +1377,7 @@ function TimelineMinimap({
                 aria-hidden="true"
                 className={cn(
                   "pointer-events-none absolute left-0 h-0.5 -translate-y-1/2 rounded-full bg-muted-foreground/35 transition-[background-color,width] duration-150 data-[in-view=true]:bg-foreground/90",
-                  activeDistance === 0
-                    ? "w-6 bg-muted-foreground/75"
-                    : activeDistance === 1
-                      ? "w-4"
-                      : activeDistance === 2
-                        ? "w-2.5"
-                        : "w-2",
+                  activeDistance === 0 && "bg-muted-foreground/75",
                 )}
                 data-in-view="false"
                 data-minimap-strip
@@ -835,16 +1389,23 @@ function TimelineMinimap({
                     stripMap.delete(item.id);
                   }
                 }}
-                style={{ top }}
+                style={{
+                  top,
+                  width: resolveTimelineMinimapTickWidth(lane.tickWidth, activeDistance),
+                }}
               />
             );
           })}
           {activeItem ? (
             <span
-              className="pointer-events-auto absolute left-8 w-80 cursor-text select-text"
+              className="pointer-events-auto absolute w-80 cursor-text select-text"
               data-minimap-preview
               onMouseMove={(event) => event.stopPropagation()}
               style={{
+                // Flush against the strip: the pointer reaches the card without
+                // crossing dead space, which is what the old 22rem-wide
+                // interactive area was compensating for — over the text.
+                left: lane.hitStripWidth,
                 top: `${activeTopPercent}%`,
                 transform: `translateY(${activeTooltipTranslate})`,
               }}
@@ -991,6 +1552,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           </div>
         ) : null}
         <CollapsibleUserMessageBody
+          messageId={row.message.id}
           text={elementContextState.promptText}
           terminalContexts={terminalContexts}
           skills={ctx.skills}
@@ -1051,6 +1613,75 @@ function EditUserMessageButton({ messageId }: { messageId: MessageId }) {
       </TooltipTrigger>
       <TooltipPopup side="top">Edit and resend</TooltipPopup>
     </Tooltip>
+  );
+}
+
+/**
+ * Retries a turn that never started, for the message that is already durably
+ * saved on the thread. Unlike `EditUserMessageButton` this does not rewind or
+ * truncate anything — the message never ran, there is nothing after it to
+ * discard — it just re-dispatches the same turn.
+ */
+function RetryTurnStartButton({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={activity.isWorking}
+            onClick={(event) => {
+              stopRowToggle(event);
+              ctx.onRetryTurnStart(messageId);
+            }}
+            aria-label="Retry sending this message"
+          />
+        }
+      >
+        <RotateCcwIcon className="size-3" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">Retry</TooltipPopup>
+    </Tooltip>
+  );
+}
+
+/**
+ * Low-emphasis escape hatch beside Retry: opens a separate new thread,
+ * pre-filled to investigate this failure, instead of retrying in place. A
+ * text link on purpose, not a `Button`: retrying is the expected action,
+ * this is the fallback for when it keeps happening.
+ */
+function ReportTurnStartFailureLink({
+  detail,
+  createdAt,
+  messageId,
+}: {
+  detail: string | undefined;
+  createdAt: string;
+  messageId: MessageId | undefined;
+}) {
+  const ctx = use(TimelineRowCtx);
+
+  return (
+    <button
+      type="button"
+      className="mr-1 text-[11px] font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+      onClick={(event) => {
+        stopRowToggle(event);
+        ctx.onReportTurnStartFailure({
+          detail: detail ?? "",
+          createdAt,
+          messageId: messageId ?? null,
+        });
+      }}
+    >
+      Report
+    </button>
   );
 }
 
@@ -1117,13 +1748,15 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
-        <ChatMarkdown
-          text={messageText}
-          cwd={ctx.markdownCwd}
-          threadRef={ctx.threadRef ?? undefined}
-          isStreaming={Boolean(row.message.streaming)}
-          skills={ctx.skills}
-        />
+        <div data-find-scope="true">
+          <ChatMarkdown
+            text={messageText}
+            cwd={ctx.markdownCwd}
+            threadRef={ctx.threadRef ?? undefined}
+            isStreaming={Boolean(row.message.streaming)}
+            skills={ctx.skills}
+          />
+        </div>
         <AssistantChangedFilesSection
           turnSummary={row.assistantTurnDiffSummary}
           routeThreadKey={ctx.routeThreadKey}
@@ -1139,7 +1772,12 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
                 <TurnFoldToggle fold={row.assistantTurnFold} />
               </div>
             ) : null}
-            <div className="flex items-center gap-2 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
+            {/* The row's actions fade out with the pointer, EXCEPT while a
+                read-aloud is working, loaded or failed: a sixty-second
+                synthesis behind an invisible spinner is indistinguishable
+                from a button that did nothing, and the audio then arrives
+                with no visible way to stop it. */}
+            <div className="flex items-center gap-2 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100 has-[[data-speech-active]]:opacity-100">
               <AssistantCopyButton row={row} />
               <AssistantSpeakButton row={row} />
               {!row.message.streaming && (
@@ -1175,16 +1813,11 @@ function AssistantSpeakButton({ row }: { row: Extract<TimelineRow, { kind: "mess
     streaming: row.assistantCopyStreaming,
   });
 
-  // Over-length replies are rejected by the RPC schema anyway; hiding the
-  // button beats offering a press that is guaranteed to fail. Measured
-  // against the RAW ceiling — the server judges speakable length itself,
-  // after stripping code and notation that never becomes audio.
-  if (
-    !ctx.speechAvailable ||
-    !copyState.visible ||
-    !copyState.text ||
-    copyState.text.length > SPEECH_MAX_RAW_TEXT_CHARS
-  ) {
+  // No length ceiling here: the button splits anything over the service's
+  // per-request limit and reads the parts in order. Hiding it was the wrong
+  // answer to "this reply is long" — a long reply is the one most worth
+  // listening to rather than reading.
+  if (!ctx.speechAvailable || !copyState.visible || !copyState.text) {
     return null;
   }
 
@@ -1211,10 +1844,12 @@ function ProposedPlanTimelineRow({
   row: Extract<TimelineRow, { kind: "proposed-plan" }>;
 }) {
   const ctx = use(TimelineRowCtx);
+  const revealedByFind = use(TimelineFindRevealedEntriesCtx).has(row.id);
 
   return (
     <div className="min-w-0 px-1 py-0.5">
       <ProposedPlanCard
+        forceExpanded={revealedByFind}
         planMarkdown={row.proposedPlan.planMarkdown}
         environmentId={ctx.activeThreadEnvironmentId}
         threadRef={ctx.threadRef ?? undefined}
@@ -1238,7 +1873,7 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
         <span>
           {row.createdAt ? (
             <>
-              Working for <WorkingTimer createdAt={row.createdAt} />
+              Working for <WorkingTimer startedAt={row.createdAt} />
               {agents.length > 0
                 ? ` · ${agents.length} subagent${agents.length === 1 ? "" : "s"} running`
                 : null}
@@ -1257,7 +1892,9 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
 
 /**
  * Live subagent roster: one bullet per delegation that is still running —
- * task label, model when the Task input named one, and a running timer.
+ * task label, the model it is running on, and a running timer. A model that
+ * is metered on the viewer's tier wears the warning tone and its multiplier,
+ * so a fleet of agents quietly burning 4× quota reads at a glance.
  * Finished agents leave on their own; the close control clears a line whose
  * completion never arrived (interrupted or restarted session).
  */
@@ -1277,25 +1914,49 @@ function AgentRosterTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "ag
                 <span className="text-muted-foreground/45"> — {agent.step}</span>
               ) : null}
             </span>
-            {agent.model ? (
-              <span className="shrink-0 rounded bg-muted/60 px-1 text-muted-foreground/80">
-                {agent.model}
+            {agent.kind === "shell" || agent.model ? (
+              <span
+                data-testid="agent-roster-model"
+                title={
+                  agent.kind === "shell"
+                    ? "A shell command this agent left running — no model"
+                    : undefined
+                }
+                className="max-w-[12rem] shrink-0 truncate rounded bg-muted/60 px-1 text-muted-foreground/80"
+              >
+                {/* A command runs no model, so it says what it is instead:
+                    reading "claude-opus-5" beside a build script suggests one
+                    is being spent on it. */}
+                {agent.kind === "shell" ? "sh" : agent.model}
               </span>
             ) : null}
+            {agent.kind === "shell" ? (
+              /* The CLI's own id for the task — the one its Read and
+                 TaskOutput tools take — so the row names both handles. */
+              <span
+                data-testid="agent-roster-task-id"
+                title="The CLI's id for this background task"
+                className="shrink-0 rounded bg-muted/60 px-1 font-mono text-muted-foreground/80"
+              >
+                {agent.id}
+              </span>
+            ) : null}
+            {agent.pid === undefined ? null : (
+              /* The task id is a handle for the CLI and for nothing else. This
+                 is the one `ps` and `kill` take, and it is on the row so it
+                 comes along with whatever the reader copies. */
+              <span
+                data-testid="agent-roster-pid"
+                title={`Process ${agent.pid} on this machine was running the command when it started`}
+                className="shrink-0 rounded bg-muted/60 px-1 text-muted-foreground/80"
+              >
+                pid {agent.pid}
+              </span>
+            )}
             <span className="shrink-0">
-              <WorkingTimer createdAt={agent.startedAt} />
+              <WorkingTimer startedAt={agent.startedAt} />
             </span>
-            <button
-              type="button"
-              aria-label={`Copy agent id for ${agent.label}`}
-              title="Copy this agent's id"
-              className="shrink-0 px-1 leading-none text-muted-foreground/40 transition-colors hover:text-foreground"
-              onClick={() => {
-                void writeTextToClipboard(agent.id, "agent id");
-              }}
-            >
-              <CopyIcon className="size-3" aria-hidden />
-            </button>
+            <AgentIdCopyButton agentId={agent.id} agentLabel={agent.label} pid={agent.pid} />
             <button
               type="button"
               aria-label={`Dismiss ${agent.label}`}
@@ -1317,26 +1978,48 @@ function AgentRosterTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "ag
 // does not create a React commit every second while a response is streaming.
 // ---------------------------------------------------------------------------
 
-/** Live "Working for Xs" label. */
-function WorkingTimer({ createdAt }: { createdAt: string }) {
-  const textRef = useRef<HTMLSpanElement>(null);
-  const initialText = formatWorkingTimerNow(createdAt);
-
-  useEffect(() => {
-    const updateText = () => {
-      if (textRef.current) {
-        textRef.current.textContent = formatWorkingTimerNow(createdAt);
-      }
-    };
-    updateText();
-    const id = setInterval(updateText, 1000);
-    return () => clearInterval(id);
-  }, [createdAt]);
-
+/**
+ * Copy an agent's id, and say so.
+ *
+ * A click that changes nothing on screen reads as a click that did nothing, so
+ * the icon becomes a tick for a moment. Same two-second window the rest of the
+ * app uses for a copy, from the same hook.
+ */
+function AgentIdCopyButton({
+  agentId,
+  agentLabel,
+  pid,
+}: {
+  agentId: string;
+  agentLabel: string;
+  /** The OS process behind a shell row, when the server could name one. */
+  pid?: number | undefined;
+}) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "agent id" });
+  // Both handles, because they answer different questions and the person
+  // copying a backgrounded command usually wants the second: the runtime's id
+  // is what the CLI polls, and the pid is what `ps` and `kill` take. Copying
+  // the id alone sent people back to the row to read the number off the screen.
+  const copied = pid === undefined ? agentId : `${agentId} · pid ${pid}`;
   return (
-    <span ref={textRef} className="tabular-nums">
-      {initialText}
-    </span>
+    <button
+      type="button"
+      aria-label={`Copy agent id for ${agentLabel}`}
+      title={
+        isCopied ? "Copied" : pid === undefined ? "Copy this agent's id" : "Copy the id and the pid"
+      }
+      className={cn(
+        "shrink-0 px-1 leading-none transition-colors",
+        isCopied ? "text-emerald-500" : "text-muted-foreground/40 hover:text-foreground",
+      )}
+      onClick={() => copyToClipboard(copied, undefined)}
+    >
+      {isCopied ? (
+        <CheckIcon className="size-3" aria-hidden />
+      ) : (
+        <CopyIcon className="size-3" aria-hidden />
+      )}
+    </button>
   );
 }
 
@@ -1610,6 +2293,7 @@ function shouldCollapseUserMessage(text: string): boolean {
 }
 
 const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(props: {
+  messageId: MessageId;
   text: string;
   terminalContexts: ParsedTerminalContextEntry[];
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
@@ -1617,6 +2301,13 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
   footer?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const revealedByFind = use(TimelineFindRevealedEntriesCtx).has(props.messageId);
+  // Find opens this body by pressing the same control the reader would, rather
+  // than by holding it open beside the control. Forcing it open separately
+  // leaves a button reading "Show full message" under a message already shown
+  // in full, whose next press does nothing — and takes away the reader's
+  // ability to collapse what the search opened.
+  if (revealedByFind && !expanded) setExpanded(true);
   const hasVisibleBody = props.text.trim().length > 0 || props.terminalContexts.length > 0;
   const canCollapse = hasVisibleBody && shouldCollapseUserMessage(props.text);
   const isCollapsed = canCollapse && !expanded;
@@ -1626,6 +2317,7 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
       {hasVisibleBody ? (
         <div
           className={cn("relative", isCollapsed && "max-h-44 overflow-hidden")}
+          data-find-scope="true"
           data-user-message-body="true"
           data-user-message-collapsed={isCollapsed ? "true" : "false"}
           data-user-message-collapsible={canCollapse ? "true" : "false"}
@@ -1920,33 +2612,6 @@ function useStableRows(rows: MessagesTimelineRow[]): MessagesTimelineRow[] {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-function formatWorkingTimer(startIso: string, endIso: string): string | null {
-  const startedAtMs = Date.parse(startIso);
-  const endedAtMs = Date.parse(endIso);
-  if (!Number.isFinite(startedAtMs) || !Number.isFinite(endedAtMs)) {
-    return null;
-  }
-
-  const elapsedSeconds = Math.max(0, Math.floor((endedAtMs - startedAtMs) / 1000));
-  if (elapsedSeconds < 60) {
-    return `${elapsedSeconds}s`;
-  }
-
-  const hours = Math.floor(elapsedSeconds / 3600);
-  const minutes = Math.floor((elapsedSeconds % 3600) / 60);
-  const seconds = elapsedSeconds % 60;
-
-  if (hours > 0) {
-    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-  }
-
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
-}
-
-function formatWorkingTimerNow(startIso: string): string {
-  return formatWorkingTimer(startIso, new Date().toISOString()) ?? "0s";
-}
-
 type WorkEntryIconName =
   | "bot"
   | "check"
@@ -2125,6 +2790,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
 }) {
   const { workEntry, workspaceRoot } = props;
   const activity = use(TimelineRowActivityCtx);
+  const ctx = use(TimelineRowCtx);
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
@@ -2160,10 +2826,36 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       ? "font-medium text-destructive"
       : "font-medium text-foreground/82";
   const turnSettled = !activity.activeTurnInProgress;
-  const showNeutralIndicator = !turnSettled && workEntryIndicatesToolNeutralStatus(workEntry);
+  // Explicitly in flight. Kept apart from the neutral bucket because that one
+  // means "no status at all" and renders as "Empty" — the wrong word for a
+  // call that is running, and a worse one for an agent that is.
+  const isInProgress = workEntry.toolLifecycleStatus === "inProgress";
+  /**
+   * A settled turn implies a finished call — for a FOREGROUND one.
+   *
+   * A background agent outlives the turn that spawned it by design, so the
+   * turn ending is no evidence at all about the agent: its completion arrives
+   * on the task feed as `task.completed`, which is what `deriveAgentRoster`
+   * waits for and what this row never sees. Inferring success from the parent
+   * turn painted a green check on an agent that was still working — and on one
+   * that had been killed, which is the same lie from the other end.
+   */
+  const settledImpliesFinished = workEntry.itemType !== "collab_agent_tool_call";
   const showSuccessIndicator =
-    workEntryIndicatesToolSuccess(workEntry) ||
-    (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry));
+    !isInProgress &&
+    (workEntryIndicatesToolSuccess(workEntry) ||
+      (turnSettled && settledImpliesFinished && workEntryIndicatesToolNeutralStatus(workEntry)));
+  // Running, and still claimed by a live turn — or a background agent, whose
+  // turn's ending says nothing.
+  const showRunningIndicator = isInProgress && (!turnSettled || !settledImpliesFinished);
+  const showNeutralIndicator =
+    !showRunningIndicator &&
+    !showSuccessIndicator &&
+    (isInProgress || (!turnSettled && workEntryIndicatesToolNeutralStatus(workEntry)));
+  // An in-progress row whose turn has settled and which cannot outlive it is
+  // the one case with no answer: nothing reported an ending, and nothing is
+  // going to. Say that rather than claiming either outcome.
+  const neutralIndicatorTooltip = isInProgress ? "No result reported" : "Empty";
   const rowToggleProps = canExpand
     ? {
         role: "button" as const,
@@ -2205,6 +2897,18 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-px text-muted-foreground/55">
+            {workEntry.sourceActivityKind === "provider.turn.start.failed" &&
+              workEntry.retryMessageId &&
+              workEntry.retryMessageId === ctx.retriableMessageId && (
+                <RetryTurnStartButton messageId={workEntry.retryMessageId} />
+              )}
+            {workEntry.sourceActivityKind === "provider.turn.start.failed" && (
+              <ReportTurnStartFailureLink
+                detail={workEntry.detail}
+                createdAt={workEntry.createdAt}
+                messageId={workEntry.retryMessageId}
+              />
+            )}
             <span
               className="flex size-4 shrink-0 items-center justify-center"
               aria-hidden={!canExpand}
@@ -2249,6 +2953,22 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   </TooltipTrigger>
                   <TooltipPopup>Completed</TooltipPopup>
                 </Tooltip>
+              ) : showRunningIndicator ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={<span className="flex size-4 items-center justify-center" />}
+                  >
+                    {/* A static mark, not a spinner: these rows sit on screen
+                        for the length of a build and a repainting one costs a
+                        frame budget for no information. */}
+                    <EllipsisIcon
+                      data-testid="work-entry-running"
+                      className="block size-3 shrink-0 text-muted-foreground/70"
+                      aria-hidden
+                    />
+                  </TooltipTrigger>
+                  <TooltipPopup>Running</TooltipPopup>
+                </Tooltip>
               ) : showNeutralIndicator ? (
                 <Tooltip>
                   <TooltipTrigger
@@ -2256,7 +2976,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   >
                     <MinusIcon className="block size-3 shrink-0 opacity-70" aria-hidden />
                   </TooltipTrigger>
-                  <TooltipPopup>Empty</TooltipPopup>
+                  <TooltipPopup>{neutralIndicatorTooltip}</TooltipPopup>
                 </Tooltip>
               ) : null}
             </span>

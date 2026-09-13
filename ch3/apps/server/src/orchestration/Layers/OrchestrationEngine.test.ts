@@ -102,6 +102,7 @@ describe("OrchestrationEngine", () => {
           return savedEvent;
         }),
       readFromSequence: () => Stream.empty,
+      readStreamFromSequence: () => Stream.empty,
       readAll: () =>
         Stream.fail(
           new PersistenceSqlError({
@@ -178,6 +179,7 @@ describe("OrchestrationEngine", () => {
               fullSnapshotReadCount += 1;
               return projectionSnapshot;
             }),
+          listProjects: () => Effect.die("this test should not list projects"),
           getShellSnapshot: () =>
             Effect.succeed({
               snapshotSequence: projectionSnapshot.snapshotSequence,
@@ -203,6 +205,7 @@ describe("OrchestrationEngine", () => {
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+          getThreadActivitiesPage: () => Effect.succeed(Option.none()),
           searchThreads: () => Effect.succeed({ matches: [] }),
         }),
       ),
@@ -805,6 +808,16 @@ describe("OrchestrationEngine", () => {
       readFromSequence(sequenceExclusive) {
         return Stream.fromIterable(events.filter((event) => event.sequence > sequenceExclusive));
       },
+      readStreamFromSequence(stream, sequenceExclusive) {
+        return Stream.fromIterable(
+          events.filter(
+            (event) =>
+              event.sequence > sequenceExclusive &&
+              event.aggregateKind === stream.aggregateKind &&
+              event.aggregateId === stream.streamId,
+          ),
+        );
+      },
       readAll() {
         return Stream.fromIterable(events);
       },
@@ -1036,6 +1049,16 @@ describe("OrchestrationEngine", () => {
       },
       readFromSequence(sequenceExclusive) {
         return Stream.fromIterable(events.filter((event) => event.sequence > sequenceExclusive));
+      },
+      readStreamFromSequence(stream, sequenceExclusive) {
+        return Stream.fromIterable(
+          events.filter(
+            (event) =>
+              event.sequence > sequenceExclusive &&
+              event.aggregateKind === stream.aggregateKind &&
+              event.aggregateId === stream.streamId,
+          ),
+        );
       },
       readAll() {
         return Stream.fromIterable(events);

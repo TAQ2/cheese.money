@@ -60,7 +60,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
   clearComposerDraftsEnvironment,
+  createEmptyThreadDraft,
   finalizePromotedDraftThreadByRef,
+  hydrateImagesFromPersisted,
   markPromotedDraftThread,
   markPromotedDraftThreadByRef,
   markPromotedDraftThreads,
@@ -750,8 +752,8 @@ describe("composerDraftStore project draft thread mapping", () => {
       branch: "feature/test",
       worktreePath: "/tmp/worktree-test",
       envMode: "worktree",
-      runtimeMode: "full-access",
-      interactionMode: "default",
+      runtimeMode: null,
+      interactionMode: null,
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     expect(useComposerDraftStore.getState().getDraftThread(draftId)).toMatchObject({
@@ -761,10 +763,56 @@ describe("composerDraftStore project draft thread mapping", () => {
       branch: "feature/test",
       worktreePath: "/tmp/worktree-test",
       envMode: "worktree",
-      runtimeMode: "full-access",
-      interactionMode: "default",
+      runtimeMode: null,
+      interactionMode: null,
       createdAt: "2026-01-01T00:00:00.000Z",
     });
+  });
+
+  it("records no modes on a draft nobody has chosen modes for", () => {
+    // The reported bug: with Settings → General → New thread access set to Full
+    // access, new threads kept opening — and running — on Auto. The draft used
+    // to be seeded with whatever the client believed that setting was, and the
+    // client believes the shipped `auto` until the primary server's config
+    // arrives, which is a race lost on every launch. Recording nothing leaves
+    // the setting to be read where the composer renders it.
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+
+    const draftThread = useComposerDraftStore.getState().getDraftThread(draftId);
+    expect(draftThread?.runtimeMode).toBeNull();
+    expect(draftThread?.interactionMode).toBeNull();
+  });
+
+  it("keeps a mode carried onto a draft, and clears it when told to", () => {
+    // Carrying is the one thing that outranks the setting: a thread opened from
+    // inside another continues the same work. Clearing is how the reusable-draft
+    // path puts a stored draft back on the configured default.
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, {
+      threadId,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    });
+    expect(useComposerDraftStore.getState().getDraftThread(draftId)).toMatchObject({
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    });
+
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    expect(useComposerDraftStore.getState().getDraftThread(draftId)).toMatchObject({
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    });
+
+    store.setProjectDraftThreadId(projectRef, draftId, {
+      threadId,
+      runtimeMode: null,
+      interactionMode: null,
+    });
+    const cleared = useComposerDraftStore.getState().getDraftThread(draftId);
+    expect(cleared?.runtimeMode).toBeNull();
+    expect(cleared?.interactionMode).toBeNull();
   });
 
   it("clears only matching project draft mapping entries", () => {
@@ -1566,7 +1614,8 @@ describe("composerDraftStore sticky composer settings", () => {
     expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("cursor");
   });
 
-  it("applies sticky activeProvider to new drafts", () => {
+  it("opens a new draft on the tier default instance and model", () => {
+    // Whatever the sticky map holds, a new thread opens on Claude Sonnet 5.
     const store = useComposerDraftStore.getState();
     const threadId = ThreadId.make("thread-sticky-active-provider");
     const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
@@ -1576,10 +1625,33 @@ describe("composerDraftStore sticky composer settings", () => {
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
       modelSelectionByProvider: {
-        claudeAgent: modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6"),
+        claudeAgent: modelSelection(CLAUDE_AGENT_DRIVER, "claude-sonnet-5"),
       },
       activeProvider: "claudeAgent",
     });
+  });
+
+  it("does not carry a response style into a new thread", () => {
+    // The style is a per-conversation choice: every new conversation opens on
+    // the shipped one. Someone who switched a thread to None — or to any other
+    // style — must not have made that the opening style for every thread they
+    // start afterwards. The rest of the options still carry; the model is the
+    // tier default.
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-sticky-output-style");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    store.setStickyModelSelection(
+      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", {
+        outputStyle: "default",
+        effort: "max",
+      }),
+    );
+    store.applyStickyState(threadRef);
+
+    expect(
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
+    ).toEqual(modelSelection(CLAUDE_AGENT_DRIVER, "claude-sonnet-5", { effort: "max" }));
   });
 });
 
@@ -1770,5 +1842,156 @@ describe("createDebouncedStorage", () => {
     vi.advanceTimersByTime(300);
     expect(base.setItem).toHaveBeenCalledTimes(1);
     expect(base.setItem).toHaveBeenCalledWith("key", "v2");
+  });
+});
+
+/**
+ * Sticky state is the composer's memory *between* conversations, and the only
+ * production caller of `applyStickyState` is new-thread creation. So whatever
+ * is in that map becomes the model a new thread opens on — which is exactly
+ * the route by which one deliberate reach for a stronger model would turn into
+ * a standing default. It must not survive the jump.
+ */
+describe("sticky state never seeds a new thread with the last thread's model", () => {
+  const OPENCODE_INSTANCE = ProviderInstanceId.make("opencode");
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("replaces a sticky Fable 5.1 with the Sonnet 5 default", () => {
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-sticky-metered-fable");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    // The map can hold Fable even though the picker refuses to make it sticky:
+    // a trait change persists the thread's current model (`persistSticky`), and
+    // the map outlives the install that wrote it.
+    useComposerDraftStore.setState({
+      stickyModelSelectionByProvider: {
+        [CLAUDE_AGENT_INSTANCE]: modelSelection(CLAUDE_AGENT_DRIVER, "claude-fable-5-1", {
+          effort: "max",
+        }),
+      },
+      stickyActiveProvider: CLAUDE_AGENT_INSTANCE,
+    });
+
+    store.applyStickyState(threadRef);
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE]?.model).toBe("claude-sonnet-5");
+    expect(draft?.activeProvider).toBe(CLAUDE_AGENT_INSTANCE);
+  });
+
+  it("seeds the tier default on a machine with no sticky state at all", () => {
+    // The case every other test here skips by seeding sticky state first: a
+    // fresh install, or cleared storage. Nothing else writes the default, so
+    // without this the composer falls through to the project's saved selection
+    // and a new thread opens on whatever that names.
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-sticky-empty");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    useComposerDraftStore.setState({
+      stickyModelSelectionByProvider: {},
+      stickyActiveProvider: null,
+    });
+    store.applyStickyState(threadRef);
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE]?.model).toBe("claude-sonnet-5");
+    expect(draft?.activeProvider).toBe(CLAUDE_AGENT_INSTANCE);
+  });
+
+  it("replaces a sticky Opus 5 with Sonnet 5 on the standard tier", () => {
+    // Both tiers open on Sonnet 5, so the standard seat lands on the same model
+    // the Premium one does — Opus 5 stays one dialog away in the picker.
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-sticky-metered-opus");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    useComposerDraftStore.setState({
+      stickyModelSelectionByProvider: {
+        [CLAUDE_AGENT_INSTANCE]: modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-5"),
+      },
+      stickyActiveProvider: CLAUDE_AGENT_INSTANCE,
+    });
+
+    store.applyStickyState(threadRef);
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE]?.model).toBe("claude-sonnet-5");
+    expect(draft?.activeProvider).toBe(CLAUDE_AGENT_INSTANCE);
+  });
+
+  it("leaves a sticky OpenCode selection behind entirely", () => {
+    // Only the tier default's instance is seeded. An OpenCode selection — Kimi
+    // K3 here, metered at this tier — has no route into a fresh thread, and the
+    // active provider comes from the policy rather than from what was last
+    // used.
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-sticky-metered-kimi");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    useComposerDraftStore.setState({
+      stickyModelSelectionByProvider: {
+        [OPENCODE_INSTANCE]: createModelSelection(OPENCODE_INSTANCE, "maple/kimi-k3"),
+      },
+      stickyActiveProvider: OPENCODE_INSTANCE,
+    });
+
+    store.applyStickyState(threadRef);
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.modelSelectionByProvider[OPENCODE_INSTANCE]).toBeUndefined();
+    expect(draft?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE]?.model).toBe("claude-sonnet-5");
+    expect(draft?.activeProvider).toBe(CLAUDE_AGENT_INSTANCE);
+  });
+
+  it("replaces a sticky model the tier lets people select freely", () => {
+    // Opus 5 is one click away at `top` — no dialog — which is exactly why the
+    // old metered-only rule let it ride into every thread afterwards. The
+    // options it was carrying still come along.
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-sticky-unmetered");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    store.setStickyModelSelection(
+      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-5", { effort: "max" }),
+    );
+    store.applyStickyState(threadRef);
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE]).toEqual(
+      modelSelection(CLAUDE_AGENT_DRIVER, "claude-sonnet-5", { effort: "max" }),
+    );
+    expect(draft?.activeProvider).toBe(CLAUDE_AGENT_INSTANCE);
+  });
+
+  it("leaves an existing thread that is already on a metered model alone", () => {
+    // The other half of the rule. Someone answered the usage dialog for *this*
+    // conversation; nothing here reaches back and takes the model away.
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-already-on-fable");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    store.setModelSelection(
+      threadRef,
+      modelSelection(CLAUDE_AGENT_DRIVER, "claude-fable-5-1", { effort: "max" }),
+    );
+
+    // Starting an unrelated new thread must not disturb it, even though the
+    // new one is the thing being corrected.
+    useComposerDraftStore.setState({
+      stickyModelSelectionByProvider: {
+        [CLAUDE_AGENT_INSTANCE]: modelSelection(CLAUDE_AGENT_DRIVER, "claude-fable-5-1"),
+      },
+      stickyActiveProvider: CLAUDE_AGENT_INSTANCE,
+    });
+    store.applyStickyState(scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("thread-brand-new")));
+
+    expect(
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
+    ).toEqual(modelSelection(CLAUDE_AGENT_DRIVER, "claude-fable-5-1", { effort: "max" }));
   });
 });

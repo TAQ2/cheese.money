@@ -7,6 +7,7 @@
  *
  * @module ProviderAdapter
  */
+import type { McpProviderSessionConfig } from "../../mcp/McpProviderSession.ts";
 import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
@@ -36,6 +37,15 @@ export interface ProviderAdapterCapabilities {
 export interface ProviderThreadTurnSnapshot {
   readonly id: TurnId;
   readonly items: ReadonlyArray<unknown>;
+}
+
+/** A session rebuilt at boot around a process that survived the restart. */
+export interface ProviderReattachedSession {
+  readonly session: ProviderSession;
+  /** The turn the previous server was in the middle of, or null when idle. */
+  readonly activeTurnId: string | null;
+  /** The MCP credential the live process was given, for the registry to adopt. */
+  readonly mcpSession: McpProviderSessionConfig | null;
 }
 
 export interface ProviderThreadSnapshot {
@@ -179,6 +189,31 @@ export interface ProviderAdapterShape<TError> {
    * Stop all sessions owned by this adapter.
    */
   readonly stopAll: () => Effect.Effect<void, TError>;
+
+  /**
+   * Let go of every session whose process can outlive this server without
+   * stopping it, and say which threads were let go. Only an adapter whose
+   * processes run behind a keeper has one; the rest are stopped by `stopAll`.
+   */
+  readonly detachAll?: () => Effect.Effect<ReadonlyArray<ThreadId>, TError>;
+
+  /**
+   * Rebuild every session a previous server let go of and whose process is
+   * still alive. Runs once at boot, before the reconcilers decide what the
+   * previous server lost.
+   */
+  /**
+   * Take back every session a previous server left running.
+   *
+   * `knownInstanceIds` is every provider instance this server is configured
+   * with. An adapter that keeps per-instance state on disk uses it to tell
+   * "another instance will claim this" from "nobody ever will": the second is
+   * a process left holding a CLI that no restart can reach, and it is retired
+   * rather than skipped.
+   */
+  readonly reattachAll?: (
+    knownInstanceIds?: ReadonlySet<string>,
+  ) => Effect.Effect<ReadonlyArray<ProviderReattachedSession>, TError>;
 
   /**
    * Canonical runtime event stream emitted by this adapter.

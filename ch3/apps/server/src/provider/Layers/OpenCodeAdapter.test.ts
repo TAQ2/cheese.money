@@ -1491,6 +1491,62 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.deepEqual(closeCallsDuringRun, []);
     }),
   );
+
+  it.effect("hands a session error to onSessionError with the model and the raw payload", () =>
+    Effect.gen(function* () {
+      // This callback is the only place CH3 ever sees an upstream provider's
+      // status code — OpenCode owns the HTTP conversation. `OpenCodeDriver`
+      // hangs OpenCode's account failover off it, so a seam that stops being
+      // reached retires nothing and a spent subscription looks like a hang.
+      const seen: Array<{ readonly model: string | undefined; readonly error: unknown }> = [];
+      const rawError = {
+        name: "APIError",
+        data: { message: "Unauthorized", statusCode: 401, responseBody: '{"error":"bad key"}' },
+      };
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.error",
+          properties: { sessionID: "http://127.0.0.1:9999/session", error: rawError },
+        },
+      ];
+
+      const adapterLayer = Layer.effect(
+        OpenCodeAdapter,
+        makeOpenCodeAdapter(openCodeAdapterTestSettings, {
+          onSessionError: (input) =>
+            Effect.sync(() => {
+              seen.push(input);
+            }),
+        }),
+      ).pipe(
+        Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(ServerSettingsService.layerTest({})),
+        Layer.provideMerge(providerSessionDirectoryTestLayer),
+        Layer.provideMerge(NodeServices.layer),
+      );
+
+      yield* Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId: asThreadId("thread-session-error"),
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("opencode"),
+            "maple/glm-5-2",
+          ),
+        });
+        yield* advanceTestClock(10);
+      }).pipe(Effect.provide(adapterLayer));
+
+      NodeAssert.equal(seen.length, 1);
+      // The model slug is what tells a OpenCode rejection from an Anthropic one,
+      // and the raw payload is where the status code survives.
+      NodeAssert.equal(seen[0]?.model, "maple/glm-5-2");
+      NodeAssert.deepEqual(seen[0]?.error, rawError);
+    }),
+  );
 });
 
 // ---------------------------------------------------------------------------

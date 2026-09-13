@@ -1,4 +1,4 @@
-import { RotateCcwIcon } from "lucide-react";
+import { ArrowLeftIcon, RotateCcwIcon } from "lucide-react";
 import {
   Outlet,
   createFileRoute,
@@ -28,6 +28,29 @@ function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
     >
       <RotateCcwIcon className="mx-1 size-3.5" />
       Restore defaults
+    </Button>
+  );
+}
+
+/**
+ * The way out of settings, in the settings header itself.
+ *
+ * The other back affordance lives in the settings sidebar, which leaves no
+ * way out at all when that sidebar is collapsed — the reason this one is in
+ * the content header, where it is always on screen. Same target as Escape:
+ * back in history, or the workspace root when there is no history to pop.
+ */
+function SettingsBackButton({ onBack }: { readonly onBack: () => void }) {
+  return (
+    <Button
+      size="icon-sm"
+      variant="ghost"
+      aria-label="Back"
+      title="Back (Esc)"
+      className="-ms-1 shrink-0 text-muted-foreground hover:text-foreground"
+      onClick={onBack}
+    >
+      <ArrowLeftIcon className="size-4" />
     </Button>
   );
 }
@@ -79,6 +102,7 @@ function SettingsContentLayout() {
             )}
           >
             <div className="flex w-full items-center gap-2">
+              <SettingsBackButton onBack={navigateBackWithinApp} />
               <span className="text-sm font-medium text-foreground">Settings</span>
               {showRestoreDefaults ? (
                 <div className="ms-auto flex items-center gap-2">
@@ -96,7 +120,8 @@ function SettingsContentLayout() {
               COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
             )}
           >
-            <span className="text-xs font-medium tracking-wide text-muted-foreground/70">
+            <SettingsBackButton onBack={navigateBackWithinApp} />
+            <span className="ms-2 text-xs font-medium tracking-wide text-muted-foreground/70">
               Settings
             </span>
             {showRestoreDefaults ? (

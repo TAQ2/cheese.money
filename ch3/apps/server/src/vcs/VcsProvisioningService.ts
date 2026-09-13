@@ -43,7 +43,11 @@ export const make = Effect.gen(function* () {
   )(function* (input) {
     const kind = yield* resolveRequestedKind(input.kind);
     const driver = yield* registry.get(kind);
-    return yield* driver.initRepository(input);
+    const result = yield* driver.initRepository(input);
+    // The detection cache is allowed to hold "not a repository" for a few
+    // seconds, which is exactly the answer this call just made wrong.
+    yield* registry.invalidate(input.cwd);
+    return result;
   });
 
   return VcsProvisioningService.of({

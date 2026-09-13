@@ -38,13 +38,17 @@ export function connectCliAuthRoutesEnabled(): boolean {
 export function buildConnectCliClerkAuthorizeUrl(request: ConnectAuthorizeRequest): string | null {
   const { clerkPublishableKey } = resolveCloudPublicConfig();
   const clientId = resolveConnectCliOAuthClientId();
-  if (!clerkPublishableKey || !clientId) {
+  const hostedAppUrl = configuredHostedAppUrl();
+  // Without a configured hosted origin there is no redirect URI to hand
+  // Clerk, so the out-of-band flow is unavailable rather than pointed at a
+  // domain this build does not own.
+  if (!clerkPublishableKey || !clientId || hostedAppUrl === null) {
     return null;
   }
   return buildConnectClerkAuthorizeUrl({
     authorizationEndpoint: `${clerkFrontendApiUrlFromPublishableKey(clerkPublishableKey)}/oauth/authorize`,
     clientId,
-    redirectUri: connectCallbackUrl(configuredHostedAppUrl()),
+    redirectUri: connectCallbackUrl(hostedAppUrl),
     scopes: CONNECT_OAUTH_SCOPES,
     state: request.state,
     challenge: request.challenge,

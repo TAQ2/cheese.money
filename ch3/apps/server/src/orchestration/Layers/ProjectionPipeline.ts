@@ -130,6 +130,19 @@ function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
   );
 }
 
+/**
+ * The only activity kinds that can change the pending-user-input count.
+ *
+ * Declared beside the loop below so the filter and the switch cannot drift: a
+ * kind added to one and not the other is a thread that shows a question nobody
+ * asked, or hides one somebody did.
+ */
+const PENDING_USER_INPUT_ACTIVITY_KINDS = [
+  "user-input.requested",
+  "user-input.resolved",
+  "provider.user-input.respond.failed",
+] as const;
+
 function derivePendingUserInputCountFromActivities(
   activities: ReadonlyArray<ProjectionThreadActivity>,
 ): number {
@@ -554,27 +567,39 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         return;
       }
 
-      const [messages, proposedPlans, activities, pendingApprovals] = yield* Effect.all([
-        projectionThreadMessageRepository.listByThreadId({ threadId }),
+      // Every one of these used to be a whole-history read, run on every event
+      // a thread receives, inside the command worker's write transaction: all
+      // messages, and every activity payload the thread ever had — 20 MB on the
+      // busiest thread on this machine, ~200 ms a time, 1,502 times an hour.
+      // The derivations below are unchanged; only the amount of database they
+      // are handed is. Plans stay a full read because that table holds a
+      // handful of rows per thread and the derivation walks all of them.
+      const [latestUserMessageAt, proposedPlans, activities, pendingApprovals] = yield* Effect.all([
+        projectionThreadMessageRepository.latestUserMessageAt({ threadId }),
         projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
-        projectionThreadActivityRepository.listByThreadId({ threadId }),
+        projectionThreadActivityRepository.listByThreadIdForKinds({
+          threadId,
+          kinds: PENDING_USER_INPUT_ACTIVITY_KINDS,
+        }),
         projectionPendingApprovalRepository.listByThreadId({ threadId }),
       ]);
-
-      let latestUserMessageAt: string | null = null;
-      for (const message of messages) {
-        if (
-          message.role === "user" &&
-          (latestUserMessageAt === null || message.createdAt > latestUserMessageAt)
-        ) {
-          latestUserMessageAt = message.createdAt;
-        }
-      }
 
       const pendingApprovalCount = pendingApprovals.filter(
         (approval) => approval.status === "pending",
       ).length;
       const pendingUserInputCount = derivePendingUserInputCountFromActivities(activities);
+      // Counted in the database, scoped to the current turn, and skipped
+      // entirely when there is no turn to scope to. Reading the rows to add
+      // them up here meant loading every `tool.started` and `tool.completed`
+      // payload the thread ever had — the two most numerous kinds there are —
+      // on every event, inside the write transaction.
+      const liveDelegationCount =
+        existingRow.value.latestTurnId === null
+          ? 0
+          : yield* projectionThreadActivityRepository.countLiveDelegations({
+              threadId,
+              turnId: existingRow.value.latestTurnId,
+            });
       const hasActionableProposedPlan = deriveHasActionableProposedPlan({
         latestTurnId: existingRow.value.latestTurnId,
         proposedPlans,
@@ -585,6 +610,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         latestUserMessageAt,
         pendingApprovalCount,
         pendingUserInputCount,
+        liveDelegationCount,
         hasActionableProposedPlan: hasActionableProposedPlan ? 1 : 0,
       });
     });
@@ -617,6 +643,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             latestUserMessageAt: null,
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
+            liveDelegationCount: 0,
             hasActionableProposedPlan: 0,
             deletedAt: null,
           });
@@ -1106,6 +1133,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         runtimeMode: event.payload.session.runtimeMode,
         activeTurnId: event.payload.session.activeTurnId,
         lastError: event.payload.session.lastError,
+        // The contract makes this optional so a projection rebuild replaying
+        // pre-migration events still decodes; the column is nullable, not
+        // absent. `undefined` has no SQL spelling, so it becomes NULL here.
+        lastErrorClass: event.payload.session.lastErrorClass ?? null,
         updatedAt: event.payload.session.updatedAt,
       });
     });
@@ -1115,11 +1146,37 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, _attachmentSideEffects) {
       switch (event.type) {
         case "thread.turn-start-requested": {
+          // A retry re-requests the turn for a message that is ALREADY the
+          // pending one, and it carries no plan reference: `thread.turn.retry`
+          // names a thread and a message, and the decider has no way back to
+          // the plan the first attempt was started from — the read model does
+          // not keep it. `replacePendingTurnStart` clears and re-inserts, so
+          // taking the event at face value would write NULL over the linkage
+          // and a plan-sourced turn would come back unlinked from the plan it
+          // implements. So a request that names no plan, for the message that
+          // is already pending, inherits what is there. A request naming a
+          // DIFFERENT message is a different turn and inherits nothing.
+          const pending =
+            event.payload.sourceProposedPlan === undefined
+              ? yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+                  threadId: event.payload.threadId,
+                })
+              : Option.none();
+          const carriedForward =
+            Option.isSome(pending) && pending.value.messageId === event.payload.messageId
+              ? pending.value
+              : undefined;
           yield* projectionTurnRepository.replacePendingTurnStart({
             threadId: event.payload.threadId,
             messageId: event.payload.messageId,
-            sourceProposedPlanThreadId: event.payload.sourceProposedPlan?.threadId ?? null,
-            sourceProposedPlanId: event.payload.sourceProposedPlan?.planId ?? null,
+            sourceProposedPlanThreadId:
+              event.payload.sourceProposedPlan?.threadId ??
+              carriedForward?.sourceProposedPlanThreadId ??
+              null,
+            sourceProposedPlanId:
+              event.payload.sourceProposedPlan?.planId ??
+              carriedForward?.sourceProposedPlanId ??
+              null,
             requestedAt: event.payload.createdAt,
           });
           return;

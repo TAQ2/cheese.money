@@ -19,11 +19,11 @@ import * as Schema from "effect/Schema";
 import { CH3_PROJECT_FILE_NAME, type CH3ProjectFile } from "@ch3tools/contracts";
 import { CH3ProjectFileFromJson } from "@ch3tools/shared/ch3ProjectFile";
 
-// Read during the T3 -> CH3 rebrand (2026-08-06): projects configured before
-// the rename -- Hark, VendeBien -- still carry a `t3.json` on disk. Checked
-// only when `ch3.json` is absent, so it never shadows a project that has
-// already migrated. Drop once every consumer has renamed its own file.
-const LEGACY_PROJECT_FILE_NAME = "t3.json";
+// Projects configured before the rebrand still carry a `ch3.json` or the
+// older `t3.json` on disk. Both are read only when `ch3.json` is absent,
+// so neither can shadow a project that has already migrated. Drop once every
+// consumer has renamed its own file.
+const LEGACY_PROJECT_FILE_NAMES = ["ch3.json", "t3.json"] as const;
 
 const decodeCH3ProjectFileJson = Schema.decodeEffect(CH3ProjectFileFromJson);
 
@@ -72,7 +72,9 @@ export const make = Effect.gen(function* () {
   const load: CH3ProjectFileLoader["Service"]["load"] = Effect.fn("CH3ProjectFileLoader.load")(
     function* (workspaceRoot) {
       const filePath = path.join(workspaceRoot, CH3_PROJECT_FILE_NAME);
-      const legacyFilePath = path.join(workspaceRoot, LEGACY_PROJECT_FILE_NAME);
+      const legacyFilePaths = LEGACY_PROJECT_FILE_NAMES.map((name) =>
+        path.join(workspaceRoot, name),
+      );
       const readAt = (candidatePath: string) =>
         fileSystem.readFileString(candidatePath).pipe(
           Effect.map(Option.some),
@@ -90,11 +92,14 @@ export const make = Effect.gen(function* () {
                   ).pipe(Effect.as(Option.none<string>())),
           }),
         );
-      const raw = yield* readAt(filePath).pipe(
-        Effect.flatMap((primary) =>
-          Option.isSome(primary) ? Effect.succeed(primary) : readAt(legacyFilePath),
-        ),
-      );
+      // Newest name wins; a legacy file is read only when the current one is
+      // absent, so it can never shadow a project that has already migrated.
+      let raw = yield* readAt(filePath);
+      for (const candidate of legacyFilePaths) {
+        if (Option.isSome(raw)) break;
+        raw = yield* readAt(candidate);
+      }
+
       if (Option.isNone(raw)) {
         return Option.none<CH3ProjectFile>();
       }

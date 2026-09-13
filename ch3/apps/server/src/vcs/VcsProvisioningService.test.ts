@@ -65,6 +65,9 @@ it.effect("routes repository initialization through an explicit VCS driver kind"
     Layer.provide(
       Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
         get: (kind) => (kind === "git" ? Effect.succeed(driver) : Effect.die("unexpected kind")),
+        // Initialising a repository invalidates what detection cached for that
+        // directory, so the mock has to answer it.
+        invalidate: (cwd) => Effect.sync(() => calls.push(`invalidate:${cwd}`)),
       }),
     ),
   );
@@ -73,7 +76,7 @@ it.effect("routes repository initialization through an explicit VCS driver kind"
     const provisioning = yield* VcsProvisioningService.VcsProvisioningService;
     yield* provisioning.initRepository({ cwd: "/repo", kind: "git" });
 
-    assert.deepStrictEqual(calls, ["git:/repo"]);
+    assert.deepStrictEqual(calls, ["git:/repo", "invalidate:/repo"]);
   }).pipe(Effect.provide(testLayer));
 });
 
@@ -84,6 +87,9 @@ it.effect("defaults repository initialization to Git until callers choose a VCS 
     Layer.provide(
       Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
         get: (kind) => (kind === "git" ? Effect.succeed(driver) : Effect.die("unexpected kind")),
+        // Initialising a repository invalidates what detection cached for that
+        // directory, so the mock has to answer it.
+        invalidate: (cwd) => Effect.sync(() => calls.push(`invalidate:${cwd}`)),
       }),
     ),
   );
@@ -92,6 +98,6 @@ it.effect("defaults repository initialization to Git until callers choose a VCS 
     const provisioning = yield* VcsProvisioningService.VcsProvisioningService;
     yield* provisioning.initRepository({ cwd: "/repo" });
 
-    assert.deepStrictEqual(calls, ["default:/repo"]);
+    assert.deepStrictEqual(calls, ["default:/repo", "invalidate:/repo"]);
   }).pipe(Effect.provide(testLayer));
 });

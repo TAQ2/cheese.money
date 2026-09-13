@@ -383,6 +383,19 @@ export interface OpenCodeAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
   /** Where this adapter publishes the servers its sessions start. */
   readonly sessionServers?: OpenCodeSessionServers;
+  /**
+   * Called with the raw `session.error` payload and the model that was running
+   * when it arrived, before the error is turned into orchestration events.
+   *
+   * This is the only place CH3 ever sees an upstream provider's status code:
+   * OpenCode owns the HTTP conversation, and its error payload is where the
+   * code and response body survive. The adapter stays provider-agnostic — the
+   * driver decides whose failure it was and what to do about it.
+   */
+  readonly onSessionError?: (input: {
+    readonly model: string | undefined;
+    readonly error: unknown;
+  }) => Effect.Effect<void>;
 }
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -827,7 +840,7 @@ export function makeOpenCodeAdapter(
 
     /**
      * Context window for `providerID/modelID`, from OpenCode's own provider
-     * config so a custom provider (Maple, here) is covered without a hardcoded
+     * config so a custom provider (OpenCode, here) is covered without a hardcoded
      * table. Fetched at most once per session: the window is a property of the
      * model and does not move mid-conversation.
      *
@@ -1333,6 +1346,12 @@ export function makeOpenCodeAdapter(
 
         case "session.error": {
           const message = sessionErrorMessage(event.properties.error);
+          if (options?.onSessionError) {
+            yield* options.onSessionError({
+              model: context.session.model,
+              error: event.properties.error,
+            });
+          }
           const activeTurnId = context.activeTurnId;
           context.activeTurnId = undefined;
           yield* updateProviderSession(

@@ -2,6 +2,7 @@ import { EnvironmentHttpApi } from "@ch3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
@@ -9,6 +10,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
+import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as HttpResponseCompression from "./httpCompression/HttpResponseCompression.ts";
 import {
   otlpTracesProxyRouteLayer,
@@ -22,6 +24,7 @@ import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import * as ClaudeAccountRiddles from "./persistence/ClaudeAccountRiddles.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
@@ -30,6 +33,7 @@ import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRe
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
+import { TurnStallWatchdogLive } from "./provider/Layers/TurnStallWatchdog.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
@@ -39,6 +43,7 @@ import * as GitHubCli from "./sourceControl/GitHubCli.ts";
 import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
+
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
@@ -59,9 +64,14 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { KanbanClassificationReactorLive } from "./orchestration/Layers/KanbanClassificationReactor.ts";
 import { ClaudeAccountFailoverReactorLive } from "./provider/Layers/ClaudeAccountFailoverReactor.ts";
+import { ClaudeAccountRiddleReactorLive } from "./provider/Layers/ClaudeAccountRiddleReactor.ts";
+import { configureClaudeUsageCachePath } from "./provider/Drivers/ClaudeAccountUsage.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
+import * as ClaudeCliInstaller from "./provider/ClaudeCliInstaller.ts";
+import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
+import { installMissingRequiredProviders } from "./provider/requiredProviderInstall.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as CH3ProjectFileLoader from "./project/CH3ProjectFileLoader.ts";
@@ -94,14 +104,15 @@ import { serverRelayBrokerTracingLayer } from "./cloud/relayTracing.ts";
 import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as CloudCliState from "./cloud/CliState.ts";
-import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
+import * as MemoryHeartbeat from "./diagnostics/MemoryHeartbeat.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as DesktopTelemetryReceiver from "./resourceTelemetry/DesktopTelemetryReceiver.ts";
 import * as NativeTelemetryClient from "./resourceTelemetry/NativeTelemetryClient.ts";
 import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts";
 import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinary.ts";
+import * as BackgroundShellPidLookup from "./resourceTelemetry/BackgroundShellPidLookup.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
@@ -163,6 +174,10 @@ const ResourceDiagnosticsLayerLive = Layer.mergeAll(
   ResourceTelemetryLayerLive,
   ProcessDiagnostics.layer.pipe(Layer.provide(ResourceTelemetryLayerLive)),
   ProcessResourceMonitor.layer.pipe(Layer.provide(ResourceTelemetryLayerLive)),
+  // Ingestion asks this which process a backgrounded shell task runs in, so a
+  // task row can name a pid. One `lsof` per task, not the sampler: the join is
+  // the task's output file, which no process sample carries.
+  BackgroundShellPidLookup.layer.pipe(Layer.provide(ProcessRunner.layer)),
 );
 
 const RelayClientLive = Layer.unwrap(
@@ -213,14 +228,32 @@ const PlatformServicesLive = Layer.unwrap(
   }),
 );
 
+/**
+ * Where plan-usage readings and the endpoint's pause outlive a server run.
+ * First in the reactor chain below — `provideMerge` builds earlier entries
+ * first — so the path is configured before the reactors that read usage come
+ * up, and the first tick after a restart answers from the file instead of
+ * asking every account at once, the burst that earns the pause.
+ */
+const ClaudeUsageCacheLayerLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    configureClaudeUsageCachePath(path.join(config.stateDir, "claude-usage-cache.json"));
+  }),
+);
+
 const ReactorLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(ClaudeUsageCacheLayerLive),
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(KanbanClassificationReactorLive),
+  // After the engine is up, so the closing activities have somewhere to go.
   Layer.provideMerge(ClaudeAccountFailoverReactorLive),
+  Layer.provideMerge(ClaudeAccountRiddleReactorLive),
   Layer.provideMerge(ProcessRunner.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
@@ -241,7 +274,9 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
 );
 
-const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
+const PersistenceLayerLive = Layer.mergeAll(ClaudeAccountRiddles.layer).pipe(
+  Layer.provideMerge(SqlitePersistenceLayerLive),
+);
 
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProjectConfig.layer),
@@ -314,6 +349,30 @@ const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(ServerSettingsLayerLive),
 );
 
+/**
+ * Claude Code, installed if this machine does not have it.
+ *
+ * Forked from the runtime scope rather than from a connection's, which is where
+ * this used to live: a native install takes minutes, and a closed lid or a
+ * flaky wifi that drops the WebSocket must not interrupt it halfway with
+ * nothing recorded. Once per server, not once per tab.
+ *
+ * Discarded, and it never fails: an install that cannot happen leaves the app
+ * exactly as it was.
+ */
+const RequiredProviderInstallLive = Layer.effectDiscard(
+  Effect.forkScoped(
+    installMissingRequiredProviders().pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ProviderMaintenanceRunner.layer,
+          ClaudeCliInstaller.layer.pipe(Layer.provide(ProviderMaintenanceRunner.layer)),
+        ),
+      ),
+    ),
+  ),
+);
+
 const PreviewLayerLive = Layer.empty.pipe(
   Layer.provideMerge(PreviewManager.layer),
   Layer.provideMerge(PortScannerLayerLive),
@@ -331,6 +390,16 @@ const WorkspaceLayerLive = Layer.mergeAll(
   WorkspaceEntriesLayerLive,
   WorkspaceFileSystemLayerLive,
 );
+
+/**
+ * Repository identity, and the locator that reads it.
+ *
+ * One entry rather than two because `pipe` takes at most twenty arguments and
+ * this chain was at the limit: the twenty-first collapses every requirement in
+ * the graph to `any`, which turns a missing service from a compile error into a
+ * boot-time crash.
+ */
+const RepositoryLayerLive = Layer.mergeAll(RepositoryIdentityResolver.layer);
 
 const ProjectFaviconResolverLayerLive = ProjectFaviconResolver.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
@@ -350,7 +419,8 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
   ),
 );
 
-const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
+const ProviderRuntimeLayerLive = TurnStallWatchdogLive.pipe(
+  Layer.provideMerge(ProviderSessionReaperLive),
   Layer.provideMerge(ProviderLayerLive),
   Layer.provideMerge(OrchestrationLayerLive),
 );
@@ -391,10 +461,20 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // the rewritten registry reads snapshots off the instance registry and
   // no longer transitively provides it. Exposing it at the runtime level
   // keeps a single Live for all opencode consumers.
-  Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
+  // One vault for the whole environment: the RPC that opens it, the spawn that
+  // spends from it and the driver that reports rejections to it must all be
+  // looking at the same in-memory keys. Merged out of this layer rather than
+  // bundled privately inside the runtime, so `ws.ts` sees that same instance.
+  //
+  // The proxy supervisor rides along for the same reason and with the same
+  // lifetime: it is bound to this layer's scope, so one proxy serves every
+  // connection and every turn and exits with the server rather than being
+  // restarted per WebSocket. Merged here rather than as its own entry because
+  // `pipe` takes at most twenty.
+  Layer.provideMerge(Layer.mergeAll(OpenCodeRuntime.OpenCodeRuntimeLive)),
   Layer.provideMerge(WorkspaceLayerLive),
   Layer.provideMerge(ProjectFaviconResolverLayerLive),
-  Layer.provideMerge(RepositoryIdentityResolver.layer),
+  Layer.provideMerge(RepositoryLayerLive),
   Layer.provideMerge(ServerEnvironment.layer),
   Layer.provideMerge(AuthLayerLive),
   Layer.provideMerge(ServerSecretStore.layer),
@@ -420,9 +500,11 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provide(NetService.layer),
 );
 
-const RuntimeServicesLive = ServerRuntimeStartup.layer.pipe(
-  Layer.provideMerge(RuntimeDependenciesLive),
-);
+const RuntimeServicesLive = Layer.mergeAll(
+  RequiredProviderInstallLive,
+  // Runs for the life of the server so the sample before a death outlives it.
+  MemoryHeartbeat.layer,
+).pipe(Layer.provideMerge(ServerRuntimeStartup.layer), Layer.provideMerge(RuntimeDependenciesLive));
 
 export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(

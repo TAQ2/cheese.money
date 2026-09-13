@@ -34,6 +34,15 @@ const setup = Layer.effectDiscard(
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* sql`PRAGMA journal_mode = WAL;`;
+    // Under WAL, NORMAL fsyncs once per checkpoint instead of once per
+    // commit, and a crash can lose only the last transactions, never
+    // corrupt the file. The projector commits once per event per projector,
+    // so FULL was one fsync per event on every boot replay and every turn.
+    yield* sql`PRAGMA synchronous = NORMAL;`;
+    // A second CH3 server on the same home — a dev sandbox, a CLI command
+    // run beside the app — opens the same file. Without a timeout the second
+    // writer gets SQLITE_BUSY the instant the first holds the lock.
+    yield* sql`PRAGMA busy_timeout = 5000;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
     yield* runMigrations();
   }),

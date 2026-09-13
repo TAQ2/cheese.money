@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildVerifiedFileLinkMeta,
   resolveInlineCodeFileLinkMeta,
+  resolveProseFileLinkMeta,
   resolveMarkdownFileLinkMeta,
   resolveMarkdownFileLinkTarget,
   rewriteMarkdownFileUriHref,
@@ -303,5 +304,34 @@ describe("buildVerifiedFileLinkMeta", () => {
 
     expect(meta.targetPath).toBe("/Users/julius/project/schema.sql:42");
     expect(meta.column).toBeUndefined();
+  });
+});
+
+describe("resolveProseFileLinkMeta", () => {
+  const spaced =
+    "/Users/conradws/Desktop/CH3 Repos For Documentation/" +
+    "iOS Alt-Data Program — CCRs and Briefs/ORCH-20260904-3-behaviour-usage-trust.md";
+
+  /**
+   * The prose detector scans backwards from the extension precisely so it can
+   * admit directory names with spaces and em dashes in them. Resolving those
+   * matches through the inline-code rule threw every one of them away — the
+   * span was found, resolved to null, and rendered as raw text — so the shape
+   * the backwards scan exists for was the one shape that never became a chip.
+   */
+  it("resolves an absolute path whose directories contain spaces", () => {
+    const meta = resolveProseFileLinkMeta(spaced);
+    expect(meta?.filePath).toBe(spaced);
+    expect(meta?.basename).toBe("ORCH-20260904-3-behaviour-usage-trust.md");
+  });
+
+  it("is what inline code still refuses, because a span with a space is a command", () => {
+    expect(resolveInlineCodeFileLinkMeta(spaced)).toBeNull();
+    expect(resolveInlineCodeFileLinkMeta("git status")).toBeNull();
+    expect(resolveProseFileLinkMeta("git status")).toBeNull();
+  });
+
+  it("still refuses a backtick, which is never part of a path", () => {
+    expect(resolveProseFileLinkMeta("/tmp/a`b.md")).toBeNull();
   });
 });

@@ -1,8 +1,10 @@
 import { assert, describe, it } from "vite-plus/test";
 
 import {
+  collectMacLauncherSignTargets,
   makeDevelopmentLauncherScript,
   resolveElectronBinaryPath,
+  resolveLocalSignIdentity,
   resolveMacLauncherPaths,
 } from "./electron-launcher.mjs";
 
@@ -77,5 +79,29 @@ describe("electron development launcher", () => {
       "exec '/repo/apps/desktop/.electron-runtime/CH3 (Dev).app/Contents/MacOS/Electron'",
     );
     assert.notInclude(script, "node_modules/electron");
+  });
+
+  it("signs with the stable local identity when configured, ad-hoc otherwise", () => {
+    assert.equal(resolveLocalSignIdentity({}), "-");
+    assert.equal(resolveLocalSignIdentity({ CH3CODE_DESKTOP_LOCAL_SIGN_IDENTITY: "  " }), "-");
+    assert.equal(
+      resolveLocalSignIdentity({ CH3CODE_DESKTOP_LOCAL_SIGN_IDENTITY: " CH3 Dev " }),
+      "CH3 Dev",
+    );
+  });
+
+  it("re-signs patched helpers before the outer bundle, and only the bundle on a script refresh", () => {
+    const bundle = "/repo/apps/desktop/.electron-runtime/CH3 (Dev).app";
+    const listHelperBundleNames = () => ["Electron Helper.app", "Electron Helper (GPU).app"];
+
+    assert.deepEqual(
+      collectMacLauncherSignTargets(bundle, { helpers: true, listHelperBundleNames }),
+      [
+        `${bundle}/Contents/Frameworks/Electron Helper.app`,
+        `${bundle}/Contents/Frameworks/Electron Helper (GPU).app`,
+        bundle,
+      ],
+    );
+    assert.deepEqual(collectMacLauncherSignTargets(bundle, { helpers: false }), [bundle]);
   });
 });

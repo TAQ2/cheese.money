@@ -13,7 +13,7 @@ import { ClaudeStatusLine } from "./ClaudeStatusLine";
  * `statusLine` hook and CH3 mirrors it so an existing script keeps working;
  * OpenCode has no such hook, and the plan data behind Claude's meters — the
  * session and weekly rate-limit windows — has no equivalent on a flat-rate
- * provider like Maple. So this reports what an OpenCode user can actually
+ * provider. So this reports what an OpenCode user can actually
  * measure: spend against a billing cycle, burn rate, cache efficiency.
  *
  * `ClaudeStatusLine` is reused deliberately: despite the name it is a plain

@@ -175,8 +175,8 @@ const knownWindowsCliDirs = (env: NodeJS.ProcessEnv): ReadonlyArray<string> => [
   ),
 ];
 
-const startMarker = (name: string) => `__CH3CODE_ENV_${name}_START__`;
-const endMarker = (name: string) => `__CH3CODE_ENV_${name}_END__`;
+const startMarker = (name: string) => `__CH3_ENV_${name}_START__`;
+const endMarker = (name: string) => `__CH3_ENV_${name}_END__`;
 
 const executableName = (command: string): string => command.split(/[\\/]/u).at(-1) ?? command;
 

@@ -4,10 +4,14 @@
 
 CH3 Connect uses one Clerk application for web, desktop, and mobile authentication. The relay verifies
 two kinds of bearer credential: template JWTs generated from the `ch3-relay` template with the shared
-`ch3-relay` audience, and Clerk OAuth tokens issued to the CLI. `verifyRelayClientBearerToken` in
-`infra/relay/src/http/Api.ts` tries the template/session path first and falls back to OAuth
-verification (`acceptsToken: "oauth_token"`), so the CLI's OAuth credential works without a JWT
-template.
+`ch3-relay` audience, and Clerk OAuth tokens issued to the CLI. The relay tries the template/session path first and falls
+back to OAuth verification (`acceptsToken: "oauth_token"`), so the CLI's OAuth credential works
+without a JWT template.
+
+**The relay's own source is no longer in this repository.** It was upstream's Cloudflare Worker,
+which CH3 does not deploy, and it was removed rather than carried — the clients here talk to a
+relay that is already running, and nothing in this repo builds or deploys one. What follows
+describes what a relay must provide, not how to deploy this one.
 
 For the wider system diagram, see
 [ch3-connect-auth-flow.html](./ch3-connect-auth-flow.html).
@@ -49,19 +53,11 @@ registers a hidden fallback `connect` command that reports the missing configura
 silently vanishing from help. The bundled server still accepts runtime overrides for self-hosted or
 operator-managed deployments.
 
-For a hosted relay deployment, copy `infra/relay/.env.example` to `infra/relay/.env`. The relay
-deployment reads `RELAY_DOMAIN`, `RELAY_API_ZONE_NAME`, `RELAY_TUNNEL_ZONE_NAME`,
-`CLERK_PUBLISHABLE_KEY`, and `CLERK_JWT_AUDIENCE` through Effect `Config`. There are no checked-in
-deployment defaults.
-`vp run --filter ch3-relay deploy` invokes Alchemy from the relay directory, so Alchemy loads
-`infra/relay/.env`. After a successful deployment, the wrapper updates the repository-root `.env`
-with the deployed HTTPS relay URL. The relay still requires
-`CLERK_SECRET_KEY` as an Alchemy secret. Never put `CLERK_SECRET_KEY` in a client application
-environment or commit it to the repository.
-
-The `prod` Alchemy stage owns the retained PlanetScale database. Non-production stages reference
-that database and provision isolated PlanetScale branches, so deploy `prod` before creating a
-personal developer stage.
+A hosted relay reads `RELAY_DOMAIN`, `RELAY_API_ZONE_NAME`, `RELAY_TUNNEL_ZONE_NAME`,
+`CLERK_PUBLISHABLE_KEY` and `CLERK_JWT_AUDIENCE` from its own environment, and holds
+`CLERK_SECRET_KEY` as a server-side secret. Never put `CLERK_SECRET_KEY` in a client application
+environment or commit it to the repository. `CH3CODE_RELAY_URL` in the repository-root `.env` is what
+points these clients at it.
 
 ## Headless CLI OAuth Application
 
@@ -137,8 +133,7 @@ In **Clerk Dashboard > JWT templates**, create a template with:
 | Claims  | `{ "aud": "ch3-relay" }` |
 
 Set `CH3CODE_CLERK_JWT_TEMPLATE=ch3-relay` in the repository-root `.env`, and set
-`CLERK_JWT_AUDIENCE=ch3-relay` in `infra/relay/.env`. Define `CLERK_JWT_TEMPLATE` and
-`CLERK_JWT_AUDIENCE` in the production relay deployment environment as well. The stable `aud` value
+`CLERK_JWT_AUDIENCE=ch3-relay` in the relay's own environment, alongside `CLERK_JWT_TEMPLATE`. The stable `aud` value
 is shared by production and non-production relay stages. The client-facing `CH3CODE_RELAY_URL` still
 selects the concrete relay deployment, but changing that URL does not require a JWT template change.
 
@@ -174,16 +169,16 @@ artifact.
 
 ## Desktop Passkeys
 
-The production macOS bundle ID is `com.ch3tools.ch3`. To enable native passkeys:
+The production macOS bundle ID is `com.ch3.ch3`. To enable native passkeys:
 
-1. Create an explicit macOS App ID for `com.ch3tools.ch3` in the Apple Developer portal and enable
+1. Create an explicit macOS App ID for `com.ch3.ch3` in the Apple Developer portal and enable
    **Associated Domains**.
 2. Create a compatible macOS provisioning profile for that App ID and the certificate used to sign
    the distributed app.
 3. In Clerk's Native API settings, add an iOS app with the same Apple Team ID and bundle ID. This is
    also the configuration point for Electron/macOS passkeys.
 4. Confirm Clerk serves `https://<frontend-api>/.well-known/apple-app-site-association` and that
-   `webcredentials.apps` contains `<TEAM_ID>.com.ch3tools.ch3`.
+   `webcredentials.apps` contains `<TEAM_ID>.com.ch3.ch3`.
 5. Set the local or CI signing configuration described below.
 
 For a local signed build, add these values to `.env.local` or export them before invoking the

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
@@ -9,8 +10,10 @@ import {
 } from "@ch3tools/contracts";
 import {
   createModelSelection,
+  getOutputStyleSelection,
   normalizeCustomModelSlug,
   resolveSelectableModel,
+  withOutputStyleSelection,
 } from "@ch3tools/shared/model";
 import { getComposerProviderState } from "./components/chat/composerProviderState";
 import { UnifiedSettings } from "@ch3tools/contracts/settings";
@@ -255,6 +258,85 @@ export function resolveAppModelSelectionForInstance(
     entry.models[0]?.slug ??
     null
   );
+}
+
+/**
+ * Rewrite a selection a *new* conversation is about to inherit so it opens on
+ * the default model.
+ *
+ * Every model above the default is a reach made for the conversation it was
+ * made in. Every route that seeds a fresh conversation from somewhere else —
+ * the model carried over from the thread being viewed, the sticky selection
+ * the composer remembers between threads, a project's saved default — would
+ * otherwise turn one reach into a standing default, and a new thread would
+ * open on whatever the last one happened to end on.
+ *
+ * How much of the selection survives depends on where it came from:
+ *
+ * - It is already on the instance the default belongs to (the stock Claude
+ *   one): its options — reasoning effort, context window — ride along
+ *   and only the slug changes.
+ * - It is not (Codex, OpenCode, or a custom Claude instance pointed at another
+ *   catalogue): the whole selection is replaced. Its options belong to the
+ *   instance being left behind and would not mean anything on the one being
+ *   landed on, and that instance may not carry the default's slug at all.
+ *
+ * This is not a check on what a person may *choose*. An existing conversation
+ * keeps the model it was set to — that choice was made, in that thread, and
+ * the picker still offers every model.
+ */
+/**
+ * What every new conversation opens on: the stock Claude instance and its
+ * default model. One constant, so the composer, the draft store and the
+ * new-thread hook cannot disagree about where a fresh thread starts.
+ */
+export const NEW_THREAD_DEFAULT_MODEL: {
+  readonly driverKind: ProviderDriverKind;
+  readonly slug: string;
+} = {
+  driverKind: ProviderDriverKind.make("claudeAgent"),
+  slug: DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")] ?? "claude-sonnet-5",
+};
+
+export function withNewThreadDefaultModel(
+  selection: ModelSelection | null | undefined,
+): ModelSelection {
+  const { driverKind, slug } = NEW_THREAD_DEFAULT_MODEL;
+  const defaultInstanceId = defaultInstanceIdForDriver(driverKind);
+  if (!selection || selection.instanceId !== defaultInstanceId) {
+    return createModelSelection(defaultInstanceId, slug);
+  }
+  return selection.model === slug ? selection : { ...selection, model: slug };
+}
+
+/**
+ * Strip the response style from a selection a *new* conversation is about to
+ * inherit.
+ *
+ * The same rule as `withNewThreadDefaultModel`, for the same shape of
+ * reason: a response style is a decision about the conversation it was made
+ * in. Every conversation opens on the style CH3 ships for that purpose
+ * (`PREFERRED_OUTPUT_STYLE`), so a thread somebody switched to None — or to
+ * anything else — must not turn that into the opening style for every thread
+ * started from it afterwards.
+ *
+ * Both routes into a fresh conversation go through here: the selection carried
+ * over from the thread being viewed, and the sticky selection the composer
+ * remembers between threads. The thread the selection came from keeps its
+ * style; nothing here reaches back to change it.
+ *
+ * A selection carrying no style is returned by reference, so callers can keep
+ * comparing identity to decide whether anything moved.
+ */
+export function withoutInheritedOutputStyle(selection: ModelSelection): ModelSelection {
+  if (getOutputStyleSelection(selection.options) === undefined) return selection;
+  // `options` is pulled out of the spread rather than overwritten: a selection
+  // whose only option was the style has no options left and must carry no key
+  // at all, matching the shape the descriptor rebuild produces for "no
+  // options".
+  const { options: _inheritedOptions, ...withoutOptions } = selection;
+  const options = withOutputStyleSelection(selection.options, null);
+  return options === undefined ? withoutOptions : { ...withoutOptions, options };
 }
 
 /**

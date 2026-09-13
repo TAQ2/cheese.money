@@ -16,7 +16,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
-import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import {
+  OrchestrationProjectionSnapshotQueryLive,
+  THREAD_DETAIL_ACTIVITY_WINDOW,
+} from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
@@ -366,6 +369,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
+            lastErrorClass: null,
             updatedAt: "2026-02-24T00:00:07.000Z",
           },
         },
@@ -437,9 +441,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
+            lastErrorClass: null,
             updatedAt: "2026-02-24T00:00:07.000Z",
           },
           latestUserMessageAt: "2026-02-24T00:00:04.000Z",
+          liveDelegationCount: 0,
           hasPendingApprovals: true,
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
@@ -1131,6 +1137,167 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("windows the thread detail to the newest activities and pages the rest", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_state`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-1',
+          'Project 1',
+          '/tmp/project-1',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          '[]',
+          '2026-04-01T00:00:00.000Z',
+          '2026-04-01T00:00:01.000Z',
+          NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'thread-1',
+          'project-1',
+          'Thread 1',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access',
+          'default',
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          0,
+          0,
+          0,
+          '2026-04-01T00:00:02.000Z',
+          '2026-04-01T00:00:03.000Z',
+          NULL
+        )
+      `;
+
+      const sequencedCount = THREAD_DETAIL_ACTIVITY_WINDOW + 10;
+      const createdAtFor = (offset: number) => {
+        const minutes = String(Math.floor(offset / 60)).padStart(2, "0");
+        const seconds = String(offset % 60).padStart(2, "0");
+        return `2026-04-01T01:${minutes}:${seconds}.000Z`;
+      };
+      // Two legacy rows without a sequence, then the sequenced history.
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES
+          ('legacy-1', 'thread-1', NULL, 'info', 'runtime.note', 'legacy one', '{}', NULL, '2026-04-01T00:59:58.000Z'),
+          ('legacy-2', 'thread-1', NULL, 'info', 'runtime.note', 'legacy two', '{}', NULL, '2026-04-01T00:59:59.000Z')
+      `;
+      for (let sequence = 1; sequence <= sequencedCount; sequence += 1) {
+        const activityId = `activity-${String(sequence).padStart(4, "0")}`;
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+          )
+          VALUES (
+            ${activityId}, 'thread-1', NULL, 'info', 'runtime.note',
+            ${`sequence ${sequence}`}, '{}', ${sequence}, ${createdAtFor(sequence)}
+          )
+        `;
+      }
+
+      const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+      assert.equal(threadDetail._tag, "Some");
+      if (threadDetail._tag !== "Some") return;
+      const activities = threadDetail.value.activities;
+      assert.equal(activities.length, THREAD_DETAIL_ACTIVITY_WINDOW);
+      assert.equal(threadDetail.value.hasMoreActivities, true);
+      // Newest window, ascending: sequences 11..sequencedCount.
+      assert.equal(activities[0]?.sequence, 11);
+      assert.equal(activities[activities.length - 1]?.sequence, sequencedCount);
+
+      // A small page older than the window's head.
+      const smallPage = yield* snapshotQuery.getThreadActivitiesPage(ThreadId.make("thread-1"), {
+        beforeSequence: 11,
+        limit: 4,
+      });
+      assert.equal(smallPage._tag, "Some");
+      if (smallPage._tag !== "Some") return;
+      assert.deepEqual(
+        smallPage.value.activities.map((activity) => activity.sequence),
+        [7, 8, 9, 10],
+      );
+      assert.equal(smallPage.value.hasMoreBefore, true);
+
+      // The final page carries the remaining sequenced rows plus the legacy
+      // pre-sequence rows, exactly once, oldest first.
+      const finalPage = yield* snapshotQuery.getThreadActivitiesPage(ThreadId.make("thread-1"), {
+        beforeSequence: 7,
+      });
+      assert.equal(finalPage._tag, "Some");
+      if (finalPage._tag !== "Some") return;
+      assert.deepEqual(
+        finalPage.value.activities.map((activity) => activity.id),
+        [
+          asEventId("legacy-1"),
+          asEventId("legacy-2"),
+          asEventId("activity-0001"),
+          asEventId("activity-0002"),
+          asEventId("activity-0003"),
+          asEventId("activity-0004"),
+          asEventId("activity-0005"),
+          asEventId("activity-0006"),
+        ],
+      );
+      assert.equal(finalPage.value.hasMoreBefore, false);
+
+      // Every row is reachable exactly once across window + pages.
+      const seenIds = new Set<string>([
+        ...activities.map((activity) => activity.id),
+        ...smallPage.value.activities.map((activity) => activity.id),
+        ...finalPage.value.activities.map((activity) => activity.id),
+      ]);
+      assert.equal(seenIds.size, sequencedCount + 2);
+
+      const missingThreadPage = yield* snapshotQuery.getThreadActivitiesPage(
+        ThreadId.make("thread-missing"),
+        { beforeSequence: 100 },
+      );
+      assert.equal(missingThreadPage._tag, "None");
+    }),
+  );
+
   it.effect("uses projection_threads.latest_turn_id for targeted thread latest turn queries", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -1818,6 +1985,115 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       );
     }),
   );
+});
+
+it.effect("ProjectionSnapshotQuery.listProjects answers from the project table alone", () => {
+  const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provideMerge(RepositoryIdentityResolver.layer),
+    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+  return Effect.gen(function* () {
+    const snapshotQuery = yield* ProjectionSnapshotQuery;
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`DELETE FROM projection_projects`;
+    yield* sql`DELETE FROM projection_threads`;
+    yield* sql`DELETE FROM projection_thread_activities`;
+
+    yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-1',
+          'Project 1',
+          '/tmp/project-1',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          '[]',
+          '2026-08-28T00:00:00.000Z',
+          '2026-08-28T00:00:01.000Z',
+          NULL
+        )
+      `;
+
+    yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'thread-1',
+          'project-1',
+          'Thread 1',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'local',
+          'chat',
+          NULL,
+          NULL,
+          '2026-08-28T00:00:02.000Z',
+          '2026-08-28T00:00:03.000Z',
+          NULL
+        )
+      `;
+
+    // A payload the activity decoder cannot read. `getSnapshot` loads every
+    // activity payload in the database to answer a question about projects,
+    // which is what put a gigabyte of transient heap on a once-a-minute poll
+    // and killed the server. A row it cannot decode is the cheapest possible
+    // proof that this query never goes near that table.
+    yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          created_at
+        )
+        VALUES (
+          'activity-1',
+          'thread-1',
+          'turn-1',
+          'info',
+          'runtime.note',
+          'unreadable',
+          'this is not json',
+          '2026-08-28T00:00:04.000Z'
+        )
+      `;
+
+    const projects = yield* snapshotQuery.listProjects();
+    assert.deepStrictEqual(
+      projects.map((project) => project.id),
+      ["project-1"],
+    );
+    assert.strictEqual(projects[0]?.workspaceRoot, "/tmp/project-1");
+
+    // The control: the same data through the whole-database read fails on the
+    // row above, so the assertion over listProjects is not vacuous.
+    const snapshot = yield* Effect.exit(snapshotQuery.getSnapshot());
+    assert.strictEqual(snapshot._tag, "Failure");
+  }).pipe(Effect.provide(layer));
 });
 
 it.effect(

@@ -84,6 +84,15 @@ CLAUDE_CONFIG_DIR path: ~/.claude_personal_home
 Use the email shown in Settings to confirm each provider is using the intended account. Emails are
 blurred by default; click the blurred email to reveal it.
 
+### Signing In From Settings Switches To The Account
+
+A sign-in started from **Settings → Claude accounts** — a roster row's **Sign in**, or **Add
+account…** — ends with CH3 switching the provider to that account, and a toast saying so. It
+used to end with "select it to switch", and people did not: the account they had just signed in
+to escape an exhausted one sat unselected while the old one went on refusing turns. Pick any other
+row to switch back. The one exception is the shared Fable account on a Standard seat, which signs
+in but stays unselected until its rules allow it (see _Which models you can use_).
+
 ## The Terminal Uses The Same Account
 
 The selected account is not only for the composer. Every terminal CH3 starts is given that
@@ -105,9 +114,87 @@ a new terminal, or restarting one, also picks up the switch.
 
 An explicit environment variable set on a terminal still wins over the selection.
 
+### Terminals CH3 did not start
+
+A tmux session, a plain Terminal window, an orchestration run you launched yourself — CH3 never
+touched their environment, so they keep whichever account they were born with. That is how a long
+run ends up on a signed-out or exhausted account while the app shows a healthy one, with nothing
+on screen connecting the two.
+
+One line fixes it for every shell on the machine. The Claude account panel shows it with a copy
+button, and it looks like this:
+
+```sh
+export PATH="$HOME/.ch3/bin:$PATH"
+```
+
+That directory holds a `claude` of CH3's own, which reads the selected account at the moment
+you run `claude` — not when the shell started — and then hands over to the real binary. So a shell
+that has been open for six hours still lands on the account selected right now.
+
+Add it to `~/.zshrc`, not `~/.zshenv`: a login shell runs `/etc/zprofile`, whose `path_helper`
+rebuilds `PATH` and would push the directory back down. `~/.zshrc` is the first file that runs
+after it, and it covers every interactive shell, tmux panes included. `cron` jobs and
+`ssh host claude ...` read neither file and keep the account their own environment names.
+
+**CH3 never edits your shell configuration.** It writes the directory and shows you the line;
+adding it is yours to do, and removing that one line is the whole uninstall.
+
+If CH3 is closed, moved, or cannot read its settings, the shim says so on stderr and runs the
+real `claude` with whatever account your shell already had. It never leaves you without a working
+`claude`.
+
 If CH3 cannot read its own settings file, it falls back to its defaults everywhere — the composer
-included — so terminals are handed the default account too. The terminal and the composer never
-disagree about which account they are on.
+included — so terminals it spawns are handed the default account too, and the terminal and the
+composer never disagree about which account they are on.
+
+A shim-routed terminal deliberately answers differently: when the settings cannot be read the shim
+keeps whatever account that shell already had and says so on stderr, rather than quietly moving it
+to the default. Silently switching a long orchestration run onto another account mid-flight is worse
+than leaving it where it was.
+
+## Why Do My Unused Accounts Show Activity?
+
+If you have more than one Claude account signed in, CH3 keeps the ones you are **not** using
+warm. Every 25 minutes it asks one of them for a short riddle on Haiku 4.5, moving to the next
+account each time. The riddle is throwaway; the request is the point.
+
+The reason is that a signed-in account which never transacts anything lets its session go stale, and
+you find that out at the worst moment — when the account you are using hits its limit and CH3
+tries to fail over to a dead one. A cheap request on a timer keeps the credential exercised.
+
+What it costs you: a small amount of quota on each idle account, and the account is used, so it
+appears in Anthropic's own usage view. What it does not do is touch the account you have selected —
+your real work already keeps that one warm — and it creates no thread, no session and nothing in
+your history.
+
+**To switch it off**, open Settings, find the Claude provider, and turn off keep-warm requests. It
+also stops if you disable the Claude provider entirely. Nothing else breaks when it is off; you are
+just more likely to meet a stale account the first time failover needs one.
+
+## Why Does A Row Say "The Endpoint Is Limiting This Account"?
+
+Plan usage — the session, week and Fable meters on each row and under the composer — comes from
+Anthropic's usage endpoint, which rate limits reads **per account** and answers with a `retry-after`
+of minutes to forty minutes. The shared accounts (`claudio.*`, `fabio.*`) are read by every
+machine signed in as them, so one of them can be over its limit all day while the others answer
+normally; that is not this CH3 asking too often, and there is nothing on this machine to fix.
+CH3 reads one account at a time, a beat apart, remembers every reading and every account's pause
+across restarts, and keeps reading the other accounts while one is limited. The limited row keeps
+its last numbers, dated, and says when its next read is — "next read 12:28 pm". A row that reads
+"usage not read yet — the endpoint is limiting this account" is one CH3 has not managed to read
+since it started, not a broken account: switching to it works as usual.
+
+## A Reply Said "Working" For Ages, Then Nothing — What Happens Now?
+
+Two things, both automatic. If CH3 was quit or restarted while a reply was in progress, the
+conversation comes back with that reply marked interrupted and a banner saying the reply was lost
+and to send your message again — nothing is left saying "Working" for a process that no longer
+exists. If CH3 is running and the reply simply goes silent — nothing from the model for five
+minutes, or ten while a command is running — CH3 sends the message you used to type by hand: a
+line prefixed `[CH3]` asking the agent to continue from where it left off. You will see that
+line in the conversation; it is not something you wrote. A reply waiting on your approval or your
+answer is never nudged.
 
 ## Can I Switch Claude Accounts In An Existing Thread?
 
@@ -270,9 +357,34 @@ name wins. (This is remembered until the server restarts.)
 
 To rename on demand, right-click a thread in the sidebar and choose **Smart rename**.
 
-Names are written by Claude Haiku 4.5 — cheap, and independent of the model running
-your thread. If Claude is unavailable, CH3 falls back to your **Text generation
-model** setting.
+Names are written by Claude Sonnet 5 — the cheapest model CH3 offers for Claude, and
+independent of the model running your thread. If Claude is unavailable, CH3 falls
+back to your **Text generation model** setting.
+
+## Talking to the agent that led an orchestrator run
+
+When a business-problem or coding run has finished, its cockpit shows **Habla con
+Estratega** (or **Habla con Cerebro** for a coding run) — in the header beside
+Detener/Reanudar, and again under **Documentos**, where whoever just read the memo
+already is.
+
+It opens a real conversation with the agent that adjudicated every challenger finding
+and wrote the decision memo. Not a summary of it: CH3 resumes that agent's own
+Claude Code session, so it answers with the whole run still in context and can quote
+the challengers it ruled on. The first message tells it the run is over and that a
+human is present, so it asks you questions instead of guessing — the run's own
+directive had forbidden that.
+
+The conversation is filed under a project called **Seguimiento de corridas**, and the
+run's own transcript is imported into it, so the thread opens where the run left off.
+It starts on the ordinary Claude default model rather than the one the run used, which
+may have been metered.
+
+If CH3 cannot identify the agent, it says so instead of offering a control that
+would not work. The three reasons are: the run never opened an agent; the session's
+transcript is no longer on this machine (deleted, or the run happened on another
+computer); or nothing on disk identifies which agent led — in which case CH3
+refuses rather than risk putting you in front of a challenger it ruled against.
 
 ## Copy Conversation ID
 

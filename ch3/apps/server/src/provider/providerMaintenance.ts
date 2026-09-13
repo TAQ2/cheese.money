@@ -197,8 +197,19 @@ function makeHomebrewProviderMaintenanceCapabilities(
   });
 }
 
+/**
+ * A provider that updates itself, run by the path it was found at.
+ *
+ * The bare name would be resolved again by whatever PATH the update happens to
+ * inherit, which is not necessarily the binary whose version was just probed:
+ * a machine with `~/.opencode/bin/opencode` on the app's PATH and another
+ * `opencode` earlier on the login shell's would upgrade the second and report
+ * the first as current, forever. The native branch is only reached because a
+ * resolved path matched, so that path is the honest thing to run.
+ */
 function makeNativeProviderMaintenanceCapabilities(
   definition: PackageManagedProviderMaintenanceDefinition,
+  commandPath: string | null,
 ): ProviderMaintenanceCapabilities | null {
   if (!definition.nativeUpdate) {
     return null;
@@ -207,7 +218,7 @@ function makeNativeProviderMaintenanceCapabilities(
   return makeProviderMaintenanceCapabilities({
     provider: definition.provider,
     packageName: definition.npmPackageName,
-    updateExecutable: definition.nativeUpdate.executable,
+    updateExecutable: commandPath ?? definition.nativeUpdate.executable,
     updateArgs: definition.nativeUpdate.args,
     updateLockKey: definition.nativeUpdate.lockKey,
   });
@@ -287,7 +298,7 @@ export function resolvePackageManagedProviderMaintenance(
       commandPaths.some((commandPath) => nativeUpdate.isCommandPath(commandPath))
     ) {
       return (
-        makeNativeProviderMaintenanceCapabilities(definition) ??
+        makeNativeProviderMaintenanceCapabilities(definition, resolvedCommandPath) ??
         makeNpmGlobalProviderMaintenanceCapabilities(definition)
       );
     }

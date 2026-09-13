@@ -47,7 +47,10 @@ import {
   resolveClaudeApiModelId,
   resolveClaudeEffort,
 } from "../provider/Layers/ClaudeProvider.ts";
-import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
+import {
+  CLAUDE_AI_MCP_SERVERS_OFF,
+  makeClaudeEnvironment,
+} from "../provider/Drivers/ClaudeHome.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
 
@@ -74,7 +77,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   // so they are disabled independently of --strict-mcp-config.
   const claudeEnvironment = {
     ...(yield* makeClaudeEnvironment(claudeSettings, environment)),
-    ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+    ...CLAUDE_AI_MCP_SERVERS_OFF,
   };
 
   const readStreamAsString = <E>(
@@ -148,7 +151,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const findDescriptor = (id: string) => descriptors.find((descriptor) => descriptor.id === id);
     const rawEffortSelection = getModelSelectionStringOptionValue(modelSelection, "effort");
     const resolvedEffort = resolveClaudeEffort(caps, rawEffortSelection);
-    const cliEffort = normalizeClaudeCliEffort(resolvedEffort, modelSelection.model);
+    const cliEffort = normalizeClaudeCliEffort(resolvedEffort);
     const ultracode = isClaudeUltracodeEffort(resolvedEffort);
     const thinkingDescriptor = findDescriptor("thinking");
     const fastModeDescriptor = findDescriptor("fastMode");
@@ -159,7 +162,6 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const settings = {
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
       ...(fastMode ? { fastMode: true } : {}),
-      ...(ultracode ? { ultracode: true } : {}),
     };
     const settingsJson =
       Object.keys(settings).length > 0

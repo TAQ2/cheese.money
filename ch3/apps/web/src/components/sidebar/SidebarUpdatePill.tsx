@@ -7,6 +7,7 @@ import {
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateDownloadConfirmationMessage,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -25,7 +26,7 @@ function SidebarUpdateReleaseNotesTooltip({
   readonly state: NonNullable<ReturnType<typeof useDesktopUpdateState>>;
   readonly tooltip: string;
 }) {
-  if (state.channel !== "nightly" || state.releaseNotes.length === 0) {
+  if (state.releaseNotes.length === 0) {
     return <>{tooltip}</>;
   }
 
@@ -76,14 +77,20 @@ export function SidebarUpdatePill() {
     if (disabled || action === "none") return;
 
     if (action === "download") {
+      // The same confirmation the About row and Settings show. This pill is the
+      // surface people actually click, and it was the one entry point without
+      // it — so the warning written after an update closed CH3 and left
+      // somebody staring at a dead dock icon was missing from the button that
+      // caused it.
+      if (!window.confirm(getDesktopUpdateDownloadConfirmationMessage(state))) return;
       void bridge
         .downloadUpdate()
         .then((result) => {
           if (result.completed) {
             toastManager.add({
               type: "success",
-              title: "Update downloaded",
-              description: "Restart the app from the update button to install it.",
+              title: "Update finished",
+              description: "CH3 will reopen on the new version.",
             });
           }
           if (!shouldToastDesktopUpdateActionResult(result)) return;
@@ -92,7 +99,7 @@ export function SidebarUpdatePill() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not download update",
+              title: "Could not update",
               description: actionError,
             }),
           );
@@ -101,7 +108,7 @@ export function SidebarUpdatePill() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not start update download",
+              title: "Could not start the update",
               description: error instanceof Error ? error.message : "An unexpected error occurred.",
             }),
           );
@@ -177,12 +184,7 @@ export function SidebarUpdatePill() {
                   ) : state?.status === "downloading" ? (
                     <>
                       <DownloadIcon className="size-3.5" />
-                      <span>
-                        Downloading
-                        {typeof state.downloadPercent === "number"
-                          ? ` (${Math.floor(state.downloadPercent)}%)`
-                          : "…"}
-                      </span>
+                      <span>Updating…</span>
                     </>
                   ) : (
                     <>
@@ -196,9 +198,7 @@ export function SidebarUpdatePill() {
             <TooltipPopup
               align="start"
               className={
-                state?.channel === "nightly" && state.releaseNotes.length > 0
-                  ? "max-w-none text-balance"
-                  : undefined
+                state && state.releaseNotes.length > 0 ? "max-w-none text-balance" : undefined
               }
               side="top"
             >

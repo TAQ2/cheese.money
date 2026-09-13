@@ -1,4 +1,5 @@
 import {
+  ProviderDriverKind as ProviderDriverKindSchema,
   type ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
@@ -12,14 +13,53 @@ import * as Schema from "effect/Schema";
 
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 
+const OPENCODE_DRIVER_KIND = ProviderDriverKindSchema.make("opencode");
+
 const decodeProviderStatusCache = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ServerProviderSchema),
 );
 
+/**
+ * Whether a snapshot can be trusted about the models it leaves out.
+ *
+ * A snapshot that never established an inventory — the pending initial probe,
+ * or an installed CLI whose probe failed — omits models because it did not
+ * look, so the previously known list survives. Every other snapshot is a real
+ * answer, and a model missing from it has left the catalog.
+ *
+ * This distinction is the whole reason retired models used to be immortal: a
+ * merge that kept unknown models unconditionally re-added them on every refresh
+ * and wrote them back to the on-disk cache, so deleting a model from the
+ * catalog could never reach the picker.
+ */
+export const isNonAuthoritativeInventory = (provider: ServerProvider): boolean => {
+  const isPendingInitialProbe =
+    provider.enabled && !provider.installed && provider.status === "warning";
+  const didInstalledProviderProbeFail = provider.installed && provider.status === "error";
+  return isPendingInitialProbe || didInstalledProviderProbeFail;
+};
+
+/**
+ * Whether an *empty* inventory means "this provider has no models" rather than
+ * "the probe came back with nothing useful".
+ *
+ * Only OpenCode reports emptiness for real: its models come from a live server
+ * that legitimately has none after a logout or a plugin removal. The CLI-backed
+ * providers build their list from a compile-time catalog plus settings, so an
+ * empty list there is indistinguishable from a probe that enumerated nothing —
+ * the previous list stands rather than blanking the picker.
+ */
+export const isAuthoritativeEmptyInventory = (provider: ServerProvider): boolean =>
+  provider.driver === OPENCODE_DRIVER_KIND && !isNonAuthoritativeInventory(provider);
+
 const mergeProviderModels = (
+  fallbackProvider: ServerProvider,
   fallbackModels: ReadonlyArray<ServerProvider["models"][number]>,
   cachedModels: ReadonlyArray<ServerProvider["models"][number]>,
 ): ReadonlyArray<ServerProvider["models"][number]> => {
+  if (!isNonAuthoritativeInventory(fallbackProvider)) {
+    return fallbackModels;
+  }
   const fallbackSlugs = new Set(fallbackModels.map((model) => model.slug));
   return [...fallbackModels, ...cachedModels.filter((model) => !fallbackSlugs.has(model.slug))];
 };
@@ -59,7 +99,11 @@ export const hydrateCachedProvider = (input: {
   const { message: _fallbackMessage, ...fallbackWithoutMessage } = input.fallbackProvider;
   const hydratedProvider: ServerProvider = {
     ...fallbackWithoutMessage,
-    models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
+    models: mergeProviderModels(
+      input.fallbackProvider,
+      input.fallbackProvider.models,
+      input.cachedProvider.models,
+    ),
     installed: input.cachedProvider.installed,
     version: input.cachedProvider.version,
     status: input.cachedProvider.status,

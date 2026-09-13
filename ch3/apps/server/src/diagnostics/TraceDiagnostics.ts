@@ -81,6 +81,15 @@ interface TraceDiagnosticsErrorSummary {
 const DEFAULT_SLOW_SPAN_THRESHOLD_MS = 1_000;
 const TOP_LIMIT = 10;
 const RECENT_LIMIT = 20;
+/**
+ * How much trace text one diagnostics read will hold in memory.
+ *
+ * The rotation ceiling is ten backups of ten megabytes each plus the live file,
+ * and every one of them used to be read and kept. Eight megabytes is several
+ * hours of the current stream, which is more than any question this answers.
+ */
+const TRACE_READ_BYTE_BUDGET = 8 * 1024 * 1024;
+
 function toRotatedTracePaths(traceFilePath: string, maxFiles: number): ReadonlyArray<string> {
   const backupCount = Math.max(0, Math.floor(maxFiles));
   const backups = Array.from(
@@ -418,31 +427,39 @@ export const make = Effect.gen(function* () {
     function* (options) {
       const readAt = options.readAt ?? (yield* DateTime.now);
       const slowSpanThresholdMs = options.slowSpanThresholdMs ?? DEFAULT_SLOW_SPAN_THRESHOLD_MS;
+      // Newest first, and only until the budget is spent. Rotation keeps ten
+      // ten-megabyte backups beside the live file, and reading all eleven put
+      // more than a hundred megabytes of text in memory to answer a question
+      // about the recent past. What is stale is what gets dropped.
       const paths = toRotatedTracePaths(options.traceFilePath, options.maxFiles);
-      const results = yield* Effect.all(
-        paths.map((path) =>
-          readTraceFile(fileSystem, path).pipe(
-            Effect.tapError((cause) =>
-              Effect.logWarning("Failed to read local trace file.").pipe(
-                Effect.annotateLogs({
-                  traceFilePath: cause.traceFilePath,
-                  errorTag: cause._tag,
-                  causeTag: cause.causeTag,
-                }),
-              ),
+      const newestFirst = paths.toReversed();
+      const loaded: Array<{ readonly path: string; readonly text: string }> = [];
+      const results: Array<Result.Result<TraceFileReadResult, TraceFileReadError>> = [];
+      let budgetRemaining = TRACE_READ_BYTE_BUDGET;
+      const scannedFilePaths: Array<string> = [];
+      for (const path of newestFirst) {
+        if (budgetRemaining <= 0) break;
+        scannedFilePaths.push(path);
+        const result = yield* readTraceFile(fileSystem, path).pipe(
+          Effect.tapError((cause) =>
+            Effect.logWarning("Failed to read local trace file.").pipe(
+              Effect.annotateLogs({
+                traceFilePath: cause.traceFilePath,
+                errorTag: cause._tag,
+                causeTag: cause.causeTag,
+              }),
             ),
-            Effect.result,
           ),
-        ),
-        {
-          concurrency: 1,
-        },
-      );
-      const files = results.flatMap((result) =>
-        Result.isSuccess(result) && result.success._tag === "Loaded"
-          ? [{ path: result.success.path, text: result.success.text }]
-          : [],
-      );
+          Effect.result,
+        );
+        results.push(result);
+        if (Result.isSuccess(result) && result.success._tag === "Loaded") {
+          loaded.push({ path: result.success.path, text: result.success.text });
+          budgetRemaining -= result.success.text.length;
+        }
+      }
+      // Oldest first again, which is the order the aggregation was written for.
+      const files = loaded.toReversed();
       const readFailure = results.find(Result.isFailure);
       const readFailureError = readFailure
         ? ({
@@ -454,7 +471,7 @@ export const make = Effect.gen(function* () {
       if (files.length === 0) {
         return makeEmptyDiagnostics({
           traceFilePath: options.traceFilePath,
-          scannedFilePaths: paths,
+          scannedFilePaths,
           readAt,
           slowSpanThresholdMs,
           error:
@@ -469,7 +486,7 @@ export const make = Effect.gen(function* () {
       return aggregateTraceDiagnostics({
         traceFilePath: options.traceFilePath,
         files,
-        scannedFilePaths: paths,
+        scannedFilePaths: scannedFilePaths.toReversed(),
         readAt,
         slowSpanThresholdMs,
         ...(readFailureError ? { partialFailure: true, error: readFailureError } : {}),

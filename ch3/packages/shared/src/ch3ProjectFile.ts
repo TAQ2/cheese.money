@@ -13,7 +13,7 @@ export const CH3ProjectFileFromJson = fromLenientJson(CH3ProjectFile);
 /**
  * Build the publishable JSON Schema document for `ch3.json` (draft 2020-12).
  *
- * Served from the marketing site at {@link CH3_PROJECT_FILE_SCHEMA_URL} so
+ * Published in this repository at {@link CH3_PROJECT_FILE_SCHEMA_URL} so
  * editors get LSP support via a `$schema` reference.
  */
 export function buildCH3ProjectFileJsonSchema(): Record<string, unknown> {

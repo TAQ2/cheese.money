@@ -15,11 +15,18 @@ build/
 release/
 release-mock/
 .ch3
+# An extracted sealed bundle is payload plaintext. It belongs under the CH3
+# home, never in the repository — only the sealed blob is ever committed.
+/repo-bundles/
 .idea/
-apps/web/.playwright
-apps/web/playwright-report
+# The e2e suite (playwright.config.ts): stack home, traces, report, stack.json.
+artifacts/e2e/
 apps/web/src/components/__screenshots__
 .vitest-*
+
+# Coverage output. Written at the repo root by `npm run test:coverage`, and
+# under a package when coverage is run from inside one.
+coverage/
 __screenshots__/
 .tanstack
 squashfs-root/
@@ -37,3 +44,14 @@ node_modules/
 *.log
 .env*
 !.env.example
+# Apple signing material lives in 1Password and GitHub Actions secrets only.
+# These patterns are a backstop against a fat-fingered `git add` of a
+# certificate export or notary key downloaded into the worktree.
+*.p12
+*.p8
+*.provisionprofile
+ch3-devid*
+
+# Transient bundle emitted by claude-sign-in-flow-harness.cjs; deleted after load,
+# ignored so a crashed run cannot leave it staged.
+apps/desktop/.claude-sign-in-flow-harness.bundle.cjs

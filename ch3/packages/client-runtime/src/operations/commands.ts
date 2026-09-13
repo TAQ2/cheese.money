@@ -45,10 +45,12 @@ export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
 export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
 export type StartThreadTurnInput = CommandInput<"thread.turn.start">;
 export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
+export type RetryThreadTurnInput = CommandInput<"thread.turn.retry">;
 export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond">;
 export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
 export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert">;
 export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
+export type StartThreadSessionInput = CommandInput<"thread.session.start">;
 
 type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
 type CommandEffect = Effect.Effect<
@@ -265,6 +267,18 @@ export const interruptThreadTurn: (input: InterruptThreadTurnInput) => CommandEf
   });
 });
 
+export const retryThreadTurn: (input: RetryThreadTurnInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.retryThreadTurn",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.turn.retry",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
 export const respondToThreadApproval: (input: RespondToThreadApprovalInput) => CommandEffect =
   Effect.fn("EnvironmentCommands.respondToThreadApproval")(function* (input) {
     const metadata = yield* timestampedCommandMetadata(input);
@@ -305,6 +319,18 @@ export const stopThreadSession: (input: StopThreadSessionInput) => CommandEffect
   return yield* dispatch({
     ...input,
     type: "thread.session.stop",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const startThreadSession: (input: StartThreadSessionInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.startThreadSession",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.session.start",
     commandId: metadata.commandId,
     createdAt: metadata.createdAt,
   });

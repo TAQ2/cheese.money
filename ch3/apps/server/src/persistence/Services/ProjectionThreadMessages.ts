@@ -79,6 +79,17 @@ export interface ProjectionThreadMessageRepositoryShape {
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadMessage>, ProjectionRepositoryError>;
 
   /**
+   * When this thread last heard from the person using it, or null.
+   *
+   * An aggregate rather than a list: the shell summary wants one timestamp, and
+   * reading every message of a thread to find the newest was most of the cost
+   * of recomputing it on every event.
+   */
+  readonly latestUserMessageAt: (
+    input: ListProjectionThreadMessagesInput,
+  ) => Effect.Effect<string | null, ProjectionRepositoryError>;
+
+  /**
    * Delete projected thread messages by thread.
    */
   readonly deleteByThreadId: (

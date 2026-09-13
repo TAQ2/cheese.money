@@ -4,7 +4,6 @@ import {
   ArrowLeftIcon,
   BotIcon,
   FlaskConicalIcon,
-  GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
   PaletteIcon,
@@ -48,7 +47,8 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
   { label: "Providers", to: "/settings/providers", icon: BotIcon },
   { label: "Accounts", to: "/settings/accounts", icon: UserRoundIcon },
-  { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
+  // Source Control deliberately removed from the nav: the route still exists
+  // for deep links, but the section is not offered in the rollout build.
   { label: "Connections", to: "/settings/connections", icon: Link2Icon },
   { label: "Beta", to: "/settings/beta", icon: FlaskConicalIcon },
   { label: "Archive", to: "/settings/archived", icon: ArchiveIcon },

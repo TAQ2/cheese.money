@@ -56,7 +56,9 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
 
     return Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-provider-cache-invalid-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "ch3-provider-cache-invalid-",
+      });
       const cachePath = `${tempDir}/provider.json`;
       const secretCacheValue = "secret-cache-value";
       yield* fs.writeFileString(cachePath, `{ "token": "${secretCacheValue}" }`);
@@ -143,7 +145,13 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
         },
       ],
     });
+    // The boot fallback is the pending snapshot: no probe has run yet, so it
+    // cannot speak for models it does not list and the cache fills the gap.
     const fallbackCodex = makeProvider(CODEX_DRIVER, {
+      installed: false,
+      version: null,
+      status: "warning",
+      auth: { status: "unknown" },
       models: [
         {
           slug: "gpt-5.4",
@@ -180,6 +188,46 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
         skills: cachedCodex.skills,
         message: cachedCodex.message,
       },
+    );
+  });
+
+  it("drops cached models a probed fallback no longer lists", () => {
+    const cachedCodex = makeProvider(CODEX_DRIVER, {
+      checkedAt: "2026-04-10T12:00:00.000Z",
+      models: [
+        {
+          slug: "gpt-5.4",
+          name: "GPT-5.4",
+          isCustom: false,
+          capabilities: emptyCapabilities,
+        },
+        {
+          slug: "gpt-5-retired",
+          name: "GPT-5 Retired",
+          isCustom: false,
+          capabilities: emptyCapabilities,
+        },
+      ],
+    });
+    // A probed fallback knows its own catalog, so a model the current build
+    // dropped stays dropped instead of being resurrected from the cache.
+    const probedCodex = makeProvider(CODEX_DRIVER, {
+      models: [
+        {
+          slug: "gpt-5.4",
+          name: "GPT-5.4",
+          isCustom: false,
+          capabilities: emptyCapabilities,
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(
+      hydrateCachedProvider({
+        cachedProvider: cachedCodex,
+        fallbackProvider: probedCodex,
+      }).models,
+      [...probedCodex.models],
     );
   });
 

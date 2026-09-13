@@ -7,6 +7,8 @@ import {
   ThreadId,
   TurnId,
   type OrchestrationThread,
+  type OrchestrationThreadActivitiesPage,
+  type OrchestrationThreadActivity,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
 } from "@ch3tools/contracts";
@@ -33,6 +35,7 @@ import * as RpcSession from "../rpc/session.ts";
 import {
   EMPTY_ENVIRONMENT_THREAD_STATE,
   makeEnvironmentThreadState,
+  runLoadOlderThreadActivities,
   ThreadSnapshotLoader,
   type EnvironmentThreadState,
 } from "./threads.ts";
@@ -95,6 +98,7 @@ const ACTIVE_THREAD: OrchestrationThread = {
     runtimeMode: "full-access",
     activeTurnId: TurnId.make("turn-1"),
     lastError: null,
+    lastErrorClass: null,
     updatedAt: "2026-04-01T00:01:00.000Z",
   },
 };
@@ -132,6 +136,9 @@ function awaitThreadState(
 const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (options?: {
   readonly cached?: OrchestrationThread;
   readonly httpSnapshot?: Option.Option<OrchestrationThreadDetailSnapshot>;
+  readonly activitiesPage?: (
+    beforeSequence: number,
+  ) => Option.Option<OrchestrationThreadActivitiesPage>;
   readonly completionMarker?: boolean;
 }) {
   const inputs = yield* Queue.unbounded<TestThreadInput>();
@@ -178,6 +185,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   const prepared = yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(
     Option.some(PREPARED),
   );
+  const activitiesPageCalls = yield* Ref.make<ReadonlyArray<number>>([]);
   const snapshotLoader = ThreadSnapshotLoader.of({
     load: (_prepared, threadId) =>
       Ref.update(loaderCalls, (count) => count + 1).pipe(
@@ -185,6 +193,15 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
           threadId === THREAD_ID
             ? (options?.httpSnapshot ?? Option.none<OrchestrationThreadDetailSnapshot>())
             : Option.none<OrchestrationThreadDetailSnapshot>(),
+        ),
+      ),
+    loadActivitiesPage: (_prepared, threadId, beforeSequence) =>
+      Ref.update(activitiesPageCalls, (calls) => [...calls, beforeSequence]).pipe(
+        Effect.as(
+          threadId === THREAD_ID
+            ? (options?.activitiesPage?.(beforeSequence) ??
+                Option.none<OrchestrationThreadActivitiesPage>())
+            : Option.none<OrchestrationThreadActivitiesPage>(),
         ),
       ),
   });
@@ -251,6 +268,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
     savedThreads,
     removedThreads,
     wakeups,
+    activitiesPageCalls,
     replaceSession: SubscriptionRef.set(
       supervisorSession,
       Option.some(
@@ -261,6 +279,17 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
       ),
     ),
   };
+});
+
+const activityWithSequence = (sequence: number): OrchestrationThreadActivity => ({
+  id: EventId.make(`activity-${sequence}`),
+  tone: "info",
+  kind: "runtime.note",
+  summary: `activity ${sequence}`,
+  payload: {},
+  turnId: null,
+  sequence,
+  createdAt: "2026-04-01T00:00:00.000Z",
 });
 
 const snapshot = (thread: OrchestrationThread): OrchestrationThreadStreamItem => ({
@@ -709,6 +738,80 @@ describe("EnvironmentThreads", () => {
         yield* Effect.yieldNow;
       }
       expect(yield* Ref.get(harness.subscriptionCount)).toBe(3);
+    }),
+  );
+
+  it.effect("prepends an older activities page and updates the windowing flag", () =>
+    Effect.gen(function* () {
+      const windowedThread: OrchestrationThread = {
+        ...BASE_THREAD,
+        activities: [activityWithSequence(11), activityWithSequence(12)],
+        hasMoreActivities: true,
+      };
+      const harness = yield* makeHarness({
+        cached: windowedThread,
+        activitiesPage: (beforeSequence) =>
+          beforeSequence === 11
+            ? Option.some({
+                activities: [activityWithSequence(9), activityWithSequence(10)],
+                hasMoreBefore: false,
+              })
+            : Option.none<OrchestrationThreadActivitiesPage>(),
+      });
+      yield* awaitThreadState(harness.observed, (value) => Option.isSome(value.data));
+
+      yield* runLoadOlderThreadActivities(TARGET.environmentId, THREAD_ID);
+
+      const state = yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && value.data.value.activities.length === 4,
+      );
+      const thread = Option.getOrThrow(state.data);
+      expect(thread.activities.map((activity) => activity.sequence)).toEqual([9, 10, 11, 12]);
+      expect(thread.hasMoreActivities).toBe(false);
+      expect(yield* Ref.get(harness.activitiesPageCalls)).toEqual([11]);
+
+      // Fully loaded now: another request never leaves the client.
+      yield* runLoadOlderThreadActivities(TARGET.environmentId, THREAD_ID);
+      expect(yield* Ref.get(harness.activitiesPageCalls)).toEqual([11]);
+    }),
+  );
+
+  it.effect("does not page when the snapshot carries the full history", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        cached: { ...BASE_THREAD, activities: [activityWithSequence(1)] },
+      });
+      yield* awaitThreadState(harness.observed, (value) => Option.isSome(value.data));
+
+      yield* runLoadOlderThreadActivities(TARGET.environmentId, THREAD_ID);
+
+      expect(yield* Ref.get(harness.activitiesPageCalls)).toEqual([]);
+    }),
+  );
+
+  it.effect("keeps the more-flag when the page fetch fails so the reader can retry", () =>
+    Effect.gen(function* () {
+      const windowedThread: OrchestrationThread = {
+        ...BASE_THREAD,
+        activities: [activityWithSequence(11)],
+        hasMoreActivities: true,
+      };
+      const harness = yield* makeHarness({
+        cached: windowedThread,
+        activitiesPage: () => Option.none<OrchestrationThreadActivitiesPage>(),
+      });
+      yield* awaitThreadState(harness.observed, (value) => Option.isSome(value.data));
+
+      yield* runLoadOlderThreadActivities(TARGET.environmentId, THREAD_ID);
+      expect(yield* Ref.get(harness.activitiesPageCalls)).toEqual([11]);
+
+      const latest = yield* Ref.get(harness.latest);
+      expect(Option.getOrThrow(latest.data).hasMoreActivities).toBe(true);
+
+      // The failed fetch released the in-flight guard: a retry fetches again.
+      yield* runLoadOlderThreadActivities(TARGET.environmentId, THREAD_ID);
+      expect(yield* Ref.get(harness.activitiesPageCalls)).toEqual([11, 11]);
     }),
   );
 });

@@ -14,6 +14,7 @@ import type {
 } from "@ch3tools/contracts";
 
 import { previewAnnotationStyles } from "./AnnotationStyles.generated.ts";
+import { sealOverlayKeyEvents } from "./PickOverlayKeys.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
   ANNOTATION_THEME_CHANNEL,
@@ -1231,6 +1232,13 @@ function startAnnotation(): void {
     event.preventDefault();
     submit.click();
   });
+
+  // A key typed into the annotation UI belongs to the annotation UI, and must
+  // not also reach the page underneath. `onKeyDown` below already recognises
+  // these events — it returns early so the tool shortcuts (v/r/d/e) stay out of
+  // the way while somebody is writing — but returning let them carry on to the
+  // page, which is how a space became "next slide". See PickOverlayKeys.
+  sealOverlayKeyEvents(root);
 
   window.addEventListener("pointermove", onPointerMove, { capture: true, passive: false });
   window.addEventListener("pointerdown", onPointerDown, { capture: true, passive: false });

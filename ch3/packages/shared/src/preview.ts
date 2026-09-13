@@ -69,10 +69,12 @@ function previewUrlProtocol(rawUrl: string): string | undefined {
 }
 
 /**
- * Normalise a free-form URL string into a fully-qualified `http(s)://` URL.
+ * Normalise a free-form URL string into a fully-qualified `http(s)://` or
+ * `file://` URL.
  *
  * - Bare loopback hosts (`localhost`, `localhost:5173`) become `http://...`.
  * - Bare public hosts (`example.com`) become `https://...`.
+ * - Absolute filesystem paths (`/Users/me/report.html`) become `file:///...`.
  * - Already-qualified URLs are validated and returned as `URL.href`.
  *
  * Throws `PreviewUrlNormalizationError` for empty, unparseable, or
@@ -82,6 +84,16 @@ export function normalizePreviewUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (trimmed.length === 0) {
     throw new PreviewUrlNormalizationError({ inputLength: rawUrl.length, reason: "empty" });
+  }
+  // One leading slash is a filesystem path; `//host` stays a protocol-relative URL. Assigning
+  // `pathname` percent-encodes the spaces, `#` and `?` a real filename carries. The two characters
+  // it will not encode have to go first, because both would otherwise resolve to a different file:
+  // `%` is read as the start of an escape (`Report%20final.pdf` would open `Report final.pdf`), and
+  // `file:` is a special scheme, so a backslash is rewritten to a separator.
+  if (/^\/(?!\/)/.test(trimmed)) {
+    const fileUrl = new URL("file:///");
+    fileUrl.pathname = trimmed.replaceAll("%", "%25").replaceAll("\\", "%5C");
+    return fileUrl.href;
   }
   const useHttp = LOOPBACK_PREFIX_PATTERN.test(trimmed);
   const candidate = trimmed.includes("://")
@@ -97,6 +109,17 @@ export function normalizePreviewUrl(rawUrl: string): string {
       protocol: previewUrlProtocol(candidate),
       cause,
     });
+  }
+  if (parsed.protocol === "file:") {
+    // A file URL that kept a host is UNC (`file://server/share`), which names no local path.
+    if (parsed.host !== "") {
+      throw new PreviewUrlNormalizationError({
+        inputLength: rawUrl.length,
+        reason: "parse",
+        protocol: parsed.protocol,
+      });
+    }
+    return parsed.href;
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new PreviewUrlNormalizationError({

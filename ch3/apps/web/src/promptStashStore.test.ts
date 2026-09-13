@@ -1,4 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+// Node >=24 defines a `localStorage` global even with no `--localstorage-file`,
+// and what it defines is an empty object: `typeof localStorage` is "object" but
+// there is no `setItem` on it. `promptStashStore` resolves its storage once at
+// import time by testing exactly that `typeof`, so under Node it binds the
+// counterfeit and every write throws "setItem is not a function".
+//
+// Hoisted, because the module under test reads the global while it is being
+// imported — a `beforeEach` would run far too late. Removing it puts the store
+// on its own in-memory fallback, which is the branch a browser with storage
+// blocked takes too.
+vi.hoisted(() => {
+  delete (globalThis as { localStorage?: unknown }).localStorage;
+});
 
 import { removeLocalStorageItem } from "./hooks/useLocalStorage";
 

@@ -150,7 +150,7 @@ describe("environment shell synchronization", () => {
     }),
   );
 
-  it.effect("replaces a warm shell cache with an authoritative HTTP snapshot", () =>
+  it.effect("resumes a warm shell cache via afterSequence without an HTTP fetch", () =>
     Effect.gen(function* () {
       const cachedSnapshot: OrchestrationShellSnapshot = {
         snapshotSequence: 5,
@@ -225,12 +225,14 @@ describe("environment shell synchronization", () => {
         Stream.runHead,
       );
 
-      expect(yield* SubscriptionRef.get(capturedAfterSequence)).toBe(9);
+      // The cursor is the cached snapshot's sequence: the server replays the
+      // delta after it instead of the client re-downloading the whole shell.
+      expect(yield* SubscriptionRef.get(capturedAfterSequence)).toBe(5);
       expect(yield* Ref.get(capturedCompletionMarker)).toBe(true);
-      expect(yield* SubscriptionRef.get(loaderCalls)).toBe(1);
+      expect(yield* SubscriptionRef.get(loaderCalls)).toBe(0);
       const synchronizing = yield* SubscriptionRef.get(shellState);
       expect(synchronizing.status).toBe("synchronizing");
-      expect(Option.getOrThrow(synchronizing.snapshot)).toEqual(httpSnapshot);
+      expect(Option.getOrThrow(synchronizing.snapshot)).toEqual(cachedSnapshot);
 
       yield* Queue.offer(events, { kind: "synchronized" });
       yield* SubscriptionRef.changes(shellState).pipe(
@@ -240,16 +242,20 @@ describe("environment shell synchronization", () => {
     }),
   );
 
-  it.effect("refreshes the authoritative shell snapshot when the app becomes active", () =>
+  it.effect("resubscribes on wakeup by cursor without re-downloading the shell", () =>
     Effect.gen(function* () {
       const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
       const wakeups = yield* Queue.unbounded<ConnectionWakeups.ConnectionWakeup>();
       const loaderCalls = yield* Ref.make(0);
       const subscriptionCount = yield* Ref.make(0);
+      const afterSequences = yield* Ref.make<ReadonlyArray<number | undefined>>([]);
       const client = {
-        [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
+        [ORCHESTRATION_WS_METHODS.subscribeShell]: (input: { readonly afterSequence?: number }) =>
           Stream.unwrap(
             Ref.update(subscriptionCount, (count) => count + 1).pipe(
+              Effect.andThen(
+                Ref.update(afterSequences, (current) => [...current, input.afterSequence]),
+              ),
               Effect.as(Stream.fromQueue(events)),
             ),
           ),
@@ -264,8 +270,10 @@ describe("environment shell synchronization", () => {
         disconnect: Effect.void,
         retryNow: Effect.void,
       } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+      // Cold start: nothing cached, so the first subscription downloads the
+      // snapshot over HTTP — and only the first.
       const cache = Persistence.EnvironmentCacheStore.of({
-        loadShell: () => Effect.succeed(Option.some(LIVE_SHELL_SNAPSHOT)),
+        loadShell: () => Effect.succeed(Option.none()),
         saveShell: () => Effect.void,
         loadThread: () => Effect.succeed(Option.none()),
         saveThread: () => Effect.void,
@@ -310,39 +318,32 @@ describe("environment shell synchronization", () => {
         Stream.filter((value) => value.status === "live"),
         Stream.runHead,
       );
+      expect(yield* Ref.get(loaderCalls)).toBe(1);
 
+      // A wakeup resubscribes with the held cursor instead of re-fetching the
+      // whole shell snapshot over HTTP.
       yield* Queue.offer(wakeups, "application-active");
-      yield* SubscriptionRef.changes(shellState).pipe(
-        Stream.filter(
-          (value) =>
-            value.status === "synchronizing" &&
-            Option.isSome(value.snapshot) &&
-            value.snapshot.value.snapshotSequence === 20,
-        ),
-        Stream.runHead,
-      );
-
       for (let attempt = 0; attempt < 100; attempt += 1) {
         if ((yield* Ref.get(subscriptionCount)) >= 2) break;
         yield* Effect.yieldNow;
       }
-
-      expect(yield* Ref.get(loaderCalls)).toBe(2);
       expect(yield* Ref.get(subscriptionCount)).toBe(2);
+      expect(yield* Ref.get(loaderCalls)).toBe(1);
 
       yield* Queue.offer(wakeups, "application-active-probe");
       for (let attempt = 0; attempt < 100; attempt += 1) {
         if ((yield* Ref.get(subscriptionCount)) >= 3) break;
         yield* Effect.yieldNow;
       }
-      expect(yield* Ref.get(loaderCalls)).toBe(3);
       expect(yield* Ref.get(subscriptionCount)).toBe(3);
+      expect(yield* Ref.get(loaderCalls)).toBe(1);
+      expect(yield* Ref.get(afterSequences)).toEqual([10, 10, 10]);
 
       yield* Queue.offer(wakeups, "application-active-reconnect");
       for (let attempt = 0; attempt < 10; attempt += 1) {
         yield* Effect.yieldNow;
       }
-      expect(yield* Ref.get(loaderCalls)).toBe(3);
+      expect(yield* Ref.get(loaderCalls)).toBe(1);
       expect(yield* Ref.get(subscriptionCount)).toBe(3);
     }),
   );

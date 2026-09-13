@@ -206,6 +206,32 @@ it.effect("rejects command fields that become empty after trim", () =>
   }),
 );
 
+it.effect("starts new threads in auto access, building, unless settings say otherwise", () =>
+  Effect.gen(function* () {
+    // One answer for both questions: what a fresh thread starts as with nothing
+    // configured, and what an absent field on the wire means. A user who wants
+    // something else sets `defaultRuntimeMode` / `defaultInteractionMode` in
+    // settings; those override the constants, they do not replace them.
+    assert.strictEqual(DEFAULT_RUNTIME_MODE, "auto");
+    assert.strictEqual(DEFAULT_PROVIDER_INTERACTION_MODE, "default");
+
+    const parsed = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-absent-modes",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-absent-modes",
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
+    assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
+  }),
+);
+
 it.effect("decodes thread.turn.start defaults for provider and runtime mode", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({
@@ -785,9 +811,30 @@ it.effect("decodes orchestration session runtime mode defaults", () =>
       providerThreadId: null,
       activeTurnId: null,
       lastError: null,
+      lastErrorClass: null,
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
+  }),
+);
+
+it.effect("decodes a session recorded before the error class existed", () =>
+  Effect.gen(function* () {
+    // The shape every event written before migration 041 carries: the field is
+    // ABSENT, not null. A projection rebuild replays those, so a required
+    // field here would fail the whole decode and take the rebuild with it.
+    const parsed = yield* decodeOrchestrationSession({
+      threadId: "thread-1",
+      status: "error",
+      providerName: null,
+      providerSessionId: null,
+      providerThreadId: null,
+      activeTurnId: null,
+      lastError: "OAuth session expired",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.lastErrorClass, undefined);
+    assert.strictEqual(parsed.lastError, "OAuth session expired");
   }),
 );
 

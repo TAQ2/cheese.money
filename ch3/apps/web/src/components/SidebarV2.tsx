@@ -31,6 +31,7 @@ import type { ScopedThreadRef, SidebarProjectGroupingMode } from "@ch3tools/cont
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
+  BotIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
@@ -65,7 +66,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { useParams, useRouter, useRouterState } from "@tanstack/react-router";
 
 import {
   isAtomCommandInterrupted,
@@ -83,6 +84,7 @@ import {
 } from "../keybindings";
 import { useShortcutModifierState } from "../shortcutModifierState";
 import { isTerminalFocused } from "../lib/terminalFocus";
+import { subscribeToSecondTicker } from "../lib/secondTicker";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { isMacPlatform } from "~/lib/utils";
@@ -103,9 +105,11 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { openCommandPalette } from "../commandPaletteBus";
+import { openKanbanNewThread } from "../kanbanNewThreadBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings, useUpdateClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+import { ThreadIdChip } from "./ThreadIdChip";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useProjects, useThreadShells } from "../state/entities";
@@ -115,6 +119,7 @@ import { threadEnvironment } from "../state/threads";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
+import { useCopyConversationId, useCopyThreadId } from "../hooks/useCopyConversationId";
 import {
   buildThreadRouteParams,
   resolveActiveThreadRouteRef,
@@ -126,6 +131,7 @@ import { cn } from "~/lib/utils";
 import {
   buildBulkTitleRegenerationContextMenuItem,
   formatWorkingDurationLabel,
+  statusShowsWorkingDuration,
   firstValidTimestampMs,
   hasUnseenCompletion,
   isContextMenuPointerDown,
@@ -149,6 +155,8 @@ import {
   resolveThreadPr,
   settledPrHoverColorClass,
   terminalStatusFromRunningIds,
+  ThreadQueuedSendIndicator,
+  useThreadQueuedSendCount,
   type TerminalStatusIndicator,
 } from "./ThreadStatusIndicators";
 import {
@@ -157,8 +165,10 @@ import {
   snoozeWakeLabel,
   type SnoozePreset,
 } from "./Sidebar.snooze";
+import { SnoozeCustomDialog } from "./SnoozeCustomDialog";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { SidebarModeToggle } from "./SidebarModeToggle";
+import { useInboxShuffleStore } from "../inboxShuffleStore";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
@@ -181,6 +191,7 @@ import { Kbd } from "./ui/kbd";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
+import { SidebarDraftRow, useDraftProjectRefs } from "./sidebar/SidebarDraftRow";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -231,18 +242,24 @@ function JumpHintBadge(props: { label: string }) {
   );
 }
 
-// Self-ticking so only this span re-renders each second, not the whole row.
+// Each working row shows one of these, so it joins the shared 1 Hz ticker
+// and writes its own text node — no React commit per row per second.
 function WorkingDuration(props: { startedAt: string | null }) {
   const startedMs = props.startedAt !== null ? Date.parse(props.startedAt) : Number.NaN;
-  const [, setTick] = useState(0);
+  const textRef = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     if (Number.isNaN(startedMs)) return;
-    const id = window.setInterval(() => setTick((tick) => tick + 1), 1_000);
-    return () => window.clearInterval(id);
+    const updateText = () => {
+      if (textRef.current) {
+        textRef.current.textContent = formatWorkingDurationLabel(Date.now() - startedMs);
+      }
+    };
+    updateText();
+    return subscribeToSecondTicker(updateText);
   }, [startedMs]);
   if (Number.isNaN(startedMs)) return null;
   return (
-    <span className="font-mono tabular-nums">
+    <span ref={textRef} className="font-mono tabular-nums">
       {formatWorkingDurationLabel(Date.now() - startedMs)}
     </span>
   );
@@ -363,8 +380,9 @@ function SnoozePopoverButton(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSnooze: (preset: SnoozePreset) => void;
+  onPickCustom: () => void;
 }) {
-  const { open, onOpenChange, onSnooze } = props;
+  const { open, onOpenChange, onPickCustom, onSnooze } = props;
   // Presets resolve at open time so "In 1 hour" is relative to the click,
   // not to when the row mounted.
   const presets = useMemo(() => (open ? resolveSnoozePresets(new Date()) : []), [open]);
@@ -401,6 +419,17 @@ function SnoozePopoverButton(props: {
             </span>
           </button>
         ))}
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenChange(false);
+            onPickCustom();
+          }}
+          className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground/90 hover:bg-accent hover:text-foreground"
+        >
+          <span className="flex-1">Pick date and time…</span>
+        </button>
       </PopoverPopup>
     </Popover>
   );
@@ -491,7 +520,8 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   onUnsettle: (threadRef: ScopedThreadRef) => void;
   /** Sets or clears the hand-made unread mark; marking also floats the row. */
   onToggleManualUnread: (threadRef: ScopedThreadRef, unread: boolean) => void;
-  onSnooze: (threadRef: ScopedThreadRef, preset: SnoozePreset) => void;
+  onSnooze: (threadRef: ScopedThreadRef, snoozedUntil: string) => void;
+  onCustomSnooze: (threadRef: ScopedThreadRef, title: string) => void;
   onUnsnooze: (threadRef: ScopedThreadRef) => void;
   onChangeRequestState: (threadKey: string, state: "open" | "closed" | "merged" | null) => void;
 }) {
@@ -501,6 +531,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
     onCancelRename,
     onCommitRename,
     onContextMenu,
+    onCustomSnooze,
     onRenameTitleChange,
     onSettle,
     onSnooze,
@@ -533,6 +564,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const terminalProcessCount = runningTerminalIds.length;
+  const queuedSendCount = useThreadQueuedSendCount(threadRef);
 
   // Same semantics as v1 (never-visited counts as read): flipping the beta
   // flag must not light up every historical thread as unread.
@@ -556,7 +588,8 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   // findable. In-flight rows recede the same as read-ready ones (inbox-zero:
   // working threads aren't your problem yet) — only the colored status label
   // stands out.
-  const isInFlight = status === "working" || status === "approval" || status === "input";
+  const isInFlight =
+    status === "working" || status === "delegating" || status === "approval" || status === "input";
   const shouldRecede =
     (status === "ready" || isInFlight) && !isUnread && !isWoke && !props.isActive && !isSelected;
   // Status hues follow the system-wide convention set by sidebar v1 and the
@@ -570,37 +603,46 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
           className:
             "animate-sidebar-working-text text-sky-600 motion-reduce:animate-none dark:text-sky-400",
         }
-      : status === "approval"
+      : status === "delegating"
         ? {
-            label: "Approval",
-            icon: null,
-            className: "text-amber-700 dark:text-amber-300",
+            // The agent is working through sub-agents, so the row must not
+            // read as a finished thread. Yellow with a robot, deliberately
+            // distinct from the emerald "Done" check it replaces.
+            label: "Agents",
+            icon: "delegating" as const,
+            className: "text-yellow-600 dark:text-yellow-400",
           }
-        : status === "input"
+        : status === "approval"
           ? {
-              label: "Input",
+              label: "Approval",
               icon: null,
-              className: "text-indigo-600 dark:text-indigo-300",
+              className: "text-amber-700 dark:text-amber-300",
             }
-          : status === "failed"
+          : status === "input"
             ? {
-                label: "Failed",
+                label: "Input",
                 icon: null,
-                className: "text-red-700 dark:text-red-300",
+                className: "text-indigo-600 dark:text-indigo-300",
               }
-            : isWoke
+            : status === "failed"
               ? {
-                  label: "Woke",
-                  icon: "woke" as const,
-                  className: "text-amber-700 dark:text-amber-300",
+                  label: "Failed",
+                  icon: null,
+                  className: "text-red-700 dark:text-red-300",
                 }
-              : isUnread
+              : isWoke
                 ? {
-                    label: "Done",
-                    icon: "done" as const,
-                    className: "text-emerald-700 dark:text-emerald-300",
+                    label: "Woke",
+                    icon: "woke" as const,
+                    className: "text-amber-700 dark:text-amber-300",
                   }
-                : null;
+                : isUnread
+                  ? {
+                      label: "Done",
+                      icon: "done" as const,
+                      className: "text-emerald-700 dark:text-emerald-300",
+                    }
+                  : null;
 
   const gitCwd = thread.worktreePath ?? props.projectCwd;
   const gitStatus = useEnvironmentQuery(
@@ -623,8 +665,9 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   });
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
   const settledPrHoverClass = pr ? settledPrHoverColorClass(pr.state) : undefined;
-  // Report the PR state up: the parent partitions rows with effectiveSettled,
-  // and a merged/closed PR auto-settles a thread — data only rows have.
+  // Report the PR state up for the parent's partition input. Note a
+  // merged/closed PR deliberately does NOT auto-settle a thread anymore —
+  // settling is the user's call; the state still feeds the row's PR badge.
   const prState = pr?.state ?? null;
   useEffect(() => {
     onChangeRequestState(threadKey, prState);
@@ -749,10 +792,13 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   );
   const handleSnoozePreset = useCallback(
     (preset: SnoozePreset) => {
-      onSnooze(threadRef, preset);
+      onSnooze(threadRef, preset.snoozedUntil);
     },
     [onSnooze, threadRef],
   );
+  const handlePickCustomSnooze = useCallback(() => {
+    onCustomSnooze(threadRef, thread.title);
+  }, [onCustomSnooze, thread.title, threadRef]);
   // While the snooze popover is open the pointer leaves the row, which
   // would fade the hover actions out from under the open menu; pin them.
   const [snoozeMenuOpenRaw, setSnoozeMenuOpen] = useState(false);
@@ -867,6 +913,12 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
       <TerminalIcon className={cn("size-3.5", terminalStatus.pulse && "animate-status-pulse")} />
     </span>
   ) : null;
+  // Orthogonal to the row's status, so it renders beside the badges rather
+  // than inside the status chain: a Working row with a message behind the
+  // turn still reads Working. Renders null when nothing is queued.
+  const queuedSendIndicator = (
+    <ThreadQueuedSendIndicator threadId={thread.id} queuedCount={queuedSendCount} />
+  );
 
   if (variant === "slim") {
     return (
@@ -908,6 +960,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
             </span>
             {title}
             {terminalStatusIcon}
+            {queuedSendIndicator}
             {isRegeneratingTitle ? (
               <>
                 {/* Renaming shells out to a model, so it is slow enough that a
@@ -1077,6 +1130,11 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                     >
                       {topStatus.icon === "working" ? (
                         <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+                      ) : topStatus.icon === "delegating" ? (
+                        <BotIcon
+                          aria-hidden
+                          className="size-4 shrink-0 animate-status-pulse motion-reduce:animate-none"
+                        />
                       ) : topStatus.icon === "done" ? (
                         <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
                       ) : topStatus.icon === "woke" ? (
@@ -1086,7 +1144,14 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                           wrapper around the ticking duration would make
                           screen readers announce every second. */}
                       <span role="status">{topStatus.label}</span>
-                      {status === "working" ? (
+                      {/* Delegating counts too. A row that says "Agents" is
+                          reporting the same fact as one that says "Working" —
+                          this turn is still going — and the first question
+                          anybody asks a running row is how long it has been
+                          running. Both read the turn's own start, so the
+                          number does not jump when a turn starts delegating
+                          halfway through. */}
+                      {statusShowsWorkingDuration(status) ? (
                         <span aria-hidden>
                           <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
                         </span>
@@ -1123,6 +1188,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                       open={snoozeMenuOpen}
                       onOpenChange={setSnoozeMenuOpen}
                       onSnooze={handleSnoozePreset}
+                      onPickCustom={handlePickCustomSnooze}
                     />
                   ) : null}
                   {props.settlementSupported ? (
@@ -1159,7 +1225,9 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
               ) : (
                 <span className="flex-1" />
               )}
+              <ThreadIdChip threadId={thread.id} />
               {terminalStatusIcon}
+              {queuedSendIndicator}
               {prBadge}
               {diff ? (
                 <span className="shrink-0 font-mono">
@@ -1227,7 +1295,8 @@ export default function SidebarV2() {
     deleteThread,
     archiveThread,
   } = useThreadActions();
-  const getProviderSessionId = useAtomCommand(threadEnvironment.getProviderSessionId);
+  const copyConversationId = useCopyConversationId();
+  const copyThreadId = useCopyThreadId();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -1238,26 +1307,6 @@ export default function SidebarV2() {
     reportFailure: false,
   });
   const updateSettings = useUpdateClientSettings();
-  const { copyToClipboard: copyConversationIdToClipboard } = useCopyToClipboard<{
-    sessionId: string;
-  }>({
-    onCopy: (ctx) => {
-      toastManager.add({
-        type: "success",
-        title: "Conversation ID copied",
-        description: ctx.sessionId,
-      });
-    },
-    onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to copy conversation ID",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    },
-  });
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -1324,6 +1373,7 @@ export default function SidebarV2() {
   const routeDraftThread = useComposerDraftStore((store) =>
     routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
   );
+  const draftProjectRefs = useDraftProjectRefs();
   const routeThreadRef = useMemo(
     () => resolveActiveThreadRouteRef(routeTarget, routeDraftThread),
     [routeDraftThread, routeTarget],
@@ -1461,6 +1511,18 @@ export default function SidebarV2() {
             ),
           ),
     [scopedProjectGroup],
+  );
+  // Draft rows obey the project scope for the same reason thread rows do: a
+  // scoped inbox that still lists another project's draft sends you out of the
+  // scope you chose, with nothing on the row saying where it goes.
+  const scopedDraftProjectRefs = useMemo(
+    () =>
+      scopedProjectKeys === null
+        ? draftProjectRefs
+        : draftProjectRefs.filter((projectRef) =>
+            scopedProjectKeys.has(`${projectRef.environmentId}:${projectRef.projectId}`),
+          ),
+    [draftProjectRefs, scopedProjectKeys],
   );
   useEffect(() => {
     if (projectScopeKey !== null && scopedProjectGroup === null) {
@@ -1720,15 +1782,27 @@ export default function SidebarV2() {
   // agree with what is on screen.
   const threadOrder = useUiStateStore((store) => store.threadOrder);
   const reorderThreads = useUiStateStore((store) => store.reorderThreads);
-  const activeThreads = useMemo(
-    () =>
-      orderThreadsByManualOrder({
-        threads: sortedActiveThreads,
-        manualOrder: threadOrder,
-        getKey: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      }),
-    [sortedActiveThreads, threadOrder],
-  );
+  // The Easter egg: hold the Inbox chip and the open cards land in a random
+  // order. Applied ON TOP of the manual order and through the same function,
+  // so a thread created since the shuffle arrives where new threads always
+  // arrive — at the top — instead of hiding in the middle of a jumble nobody
+  // can reason about. Null means the inbox is sane and this costs nothing.
+  const inboxShuffleOrder = useInboxShuffleStore((store) => store.order);
+  const activeThreads = useMemo(() => {
+    const arranged = orderThreadsByManualOrder({
+      threads: sortedActiveThreads,
+      manualOrder: threadOrder,
+      getKey: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+    });
+    if (inboxShuffleOrder === null) {
+      return arranged;
+    }
+    return orderThreadsByManualOrder({
+      threads: arranged,
+      manualOrder: inboxShuffleOrder,
+      getKey: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+    });
+  }, [inboxShuffleOrder, sortedActiveThreads, threadOrder]);
   const activeThreadKeys = useMemo(
     () =>
       activeThreads.map((thread) =>
@@ -1756,6 +1830,31 @@ export default function SidebarV2() {
   const allScopesActiveThreadKeysRef = useRef(allScopesActiveThreadKeys);
   allScopesActiveThreadKeysRef.current = allScopesActiveThreadKeys;
 
+  /**
+   * Jumble the inbox, or put it back.
+   *
+   * Works from every open thread rather than the scoped slice, for the reason
+   * the manual order does: ranking only what is on screen leaves every other
+   * project's threads unranked, which sorts them above the ones just placed.
+   * Snoozed and settled rows are not in this list and are never touched — the
+   * shelves answer "when does this come back" and "what is done", and neither
+   * question has a random answer.
+   *
+   * Reads the keys through the ref and the state through `getState` so the
+   * callback is stable: it is handed to a chip that must not re-render on
+   * every shell update.
+   */
+  const shuffleInbox = useInboxShuffleStore((store) => store.shuffle);
+  const floatShuffledToTop = useInboxShuffleStore((store) => store.floatToTop);
+  const restoreInbox = useInboxShuffleStore((store) => store.restore);
+  const toggleInboxShuffle = useCallback(() => {
+    if (useInboxShuffleStore.getState().order !== null) {
+      restoreInbox();
+      return;
+    }
+    shuffleInbox(allScopesActiveThreadKeysRef.current);
+  }, [restoreInbox, shuffleInbox]);
+
   // True from the moment a card starts moving until it is dropped; the click
   // synthesized by that same gesture must not open the thread.
   const threadDragInProgressRef = useRef(false);
@@ -1781,8 +1880,12 @@ export default function SidebarV2() {
         moveThreadToTopOfOrder(threadKey, visibleOrder);
         visibleOrder = [threadKey, ...visibleOrder.filter((key) => key !== threadKey)];
       }
+      // The jumble is a lens over the same inbox, not a freeze of it. Without
+      // this a thread that finished while the user was elsewhere stayed at its
+      // random rank and the shuffle became somewhere work could hide.
+      floatShuffledToTop(threadKeys);
     },
-    [moveThreadToTopOfOrder],
+    [floatShuffledToTop, moveThreadToTopOfOrder],
   );
 
   // A thread that finishes while the user is elsewhere floats to the head of
@@ -2258,7 +2361,7 @@ export default function SidebarV2() {
   const attemptSnooze = useCallback(
     (
       threadRef: ScopedThreadRef,
-      preset: SnoozePreset,
+      snoozedUntil: string,
       opts: { coSnoozingKeys?: ReadonlySet<string> } = {},
     ) => {
       void (async () => {
@@ -2269,7 +2372,7 @@ export default function SidebarV2() {
           // Snoozing the open thread moves you forward, same as settle —
           // both park the thread you're done with for now.
           const navigateAfterSnooze = planForwardNavigation(threadKey, opts.coSnoozingKeys);
-          const result = await snoozeThread(threadRef, preset.snoozedUntil);
+          const result = await snoozeThread(threadRef, snoozedUntil);
           if (result._tag === "Failure") {
             // Never navigate away from a thread that did not snooze.
             if (!isAtomCommandInterrupted(result)) {
@@ -2289,7 +2392,7 @@ export default function SidebarV2() {
           toastManager.add(
             stackedThreadToast({
               type: "success",
-              title: `Snoozed until ${snoozeWakeDescription(preset.snoozedUntil, new Date())}`,
+              title: `Snoozed until ${snoozeWakeDescription(snoozedUntil, new Date())}`,
               timeout: 5_000,
               actionProps: {
                 children: "Undo",
@@ -2310,6 +2413,19 @@ export default function SidebarV2() {
     [attemptUnsnooze, planForwardNavigation, snoozeThread],
   );
 
+  const [customSnooze, setCustomSnooze] = useState<{
+    subject: string;
+    snooze: (snoozedUntil: string) => void;
+  } | null>(null);
+  const handleCustomSnoozeRequest = useCallback(
+    (threadRef: ScopedThreadRef, title: string) => {
+      setCustomSnooze({
+        subject: title,
+        snooze: (snoozedUntil) => attemptSnooze(threadRef, snoozedUntil),
+      });
+    },
+    [attemptSnooze],
+  );
   const removeFromSelection = useThreadSelectionStore((s) => s.removeFromSelection);
   const handleMultiSelectContextMenu = useCallback(
     async (position: { x: number; y: number }) => {
@@ -2358,10 +2474,13 @@ export default function SidebarV2() {
                   {
                     id: "snooze",
                     label: `Snooze (${count})`,
-                    children: snoozePresets.map((preset) => ({
-                      id: `snooze:${preset.id}`,
-                      label: `${preset.label} (${preset.whenLabel})`,
-                    })),
+                    children: [
+                      ...snoozePresets.map((preset) => ({
+                        id: `snooze:${preset.id}`,
+                        label: `${preset.label} (${preset.whenLabel})`,
+                      })),
+                      { id: "snooze:custom", label: "Pick date and time…" },
+                    ],
                   },
                 ]
               : []),
@@ -2374,20 +2493,28 @@ export default function SidebarV2() {
       );
       if (clicked._tag === "Failure") return;
       if (clicked.value?.startsWith("snooze:")) {
-        const preset = snoozePresets.find(
-          (candidate) => `snooze:${candidate.id}` === clicked.value,
-        );
-        if (preset) {
-          // Post-snooze navigation must skip threads snoozing in this same
-          // batch — they are all leaving the card block together.
+        // Post-snooze navigation must skip threads snoozing in this same
+        // batch — they are all leaving the card block together.
+        const snoozeSelection = (snoozedUntil: string) => {
           const coSnoozingKeys = new Set(threadKeys);
           for (const thread of selectedThreads) {
-            attemptSnooze(scopeThreadRef(thread.environmentId, thread.id), preset, {
+            attemptSnooze(scopeThreadRef(thread.environmentId, thread.id), snoozedUntil, {
               coSnoozingKeys,
             });
           }
           clearSelection();
+        };
+        if (clicked.value === "snooze:custom") {
+          setCustomSnooze({
+            subject: count === 1 ? "1 thread" : `${count} threads`,
+            snooze: snoozeSelection,
+          });
+          return;
         }
+        const preset = snoozePresets.find(
+          (candidate) => `snooze:${candidate.id}` === clicked.value,
+        );
+        if (preset) snoozeSelection(preset.snoozedUntil);
         return;
       }
       if (clicked.value === "regenerate-title") {
@@ -2442,7 +2569,12 @@ export default function SidebarV2() {
         // topmost. The selection itself is insertion-ordered — ctrl-clicking
         // bottom-to-top, or dragging a shift-range upward, hands them over in
         // the opposite order to the one on screen.
-        const visibleOrder = allScopesActiveThreadKeysRef.current;
+        //
+        // While the inbox is jumbled the visible order IS the jumble, not the
+        // durable one: sorting by the durable order would lift the rows in a
+        // sequence that has nothing to do with what is on screen.
+        const shuffledOrder = useInboxShuffleStore.getState().order;
+        const visibleOrder = shuffledOrder ?? allScopesActiveThreadKeysRef.current;
         floatThreadKeysToTop(
           markedKeys
             .toSorted((left, right) => visibleOrder.indexOf(left) - visibleOrder.indexOf(right))
@@ -2565,10 +2697,13 @@ export default function SidebarV2() {
                           id: "snooze",
                           label: "Snooze",
                           disabled: !canSnooze(thread, { now: new Date().toISOString() }),
-                          children: snoozePresets.map((preset) => ({
-                            id: `snooze:${preset.id}`,
-                            label: `${preset.label} (${preset.whenLabel})`,
-                          })),
+                          children: [
+                            ...snoozePresets.map((preset) => ({
+                              id: `snooze:${preset.id}`,
+                              label: `${preset.label} (${preset.whenLabel})`,
+                            })),
+                            { id: "snooze:custom", label: "Pick date and time…" },
+                          ],
                         },
                   ]
                 : []),
@@ -2593,6 +2728,7 @@ export default function SidebarV2() {
                 : []),
               { id: "copy-path", label: "Copy path", icon: "copy" },
               ...(thread.branch ? [{ id: "copy-branch", label: "Copy branch", icon: "copy" }] : []),
+              { id: "copy-thread-id", label: "Copy Thread ID", icon: "copy" },
               { id: "copy-conversation-id", label: "Copy Conversation ID", icon: "copy" },
               { id: "delete", label: "Delete", destructive: true, icon: "trash" },
             ],
@@ -2601,10 +2737,17 @@ export default function SidebarV2() {
         );
         if (clicked._tag === "Failure") return;
         if (clicked.value?.startsWith("snooze:")) {
+          if (clicked.value === "snooze:custom") {
+            setCustomSnooze({
+              subject: thread.title,
+              snooze: (snoozedUntil) => attemptSnooze(threadRef, snoozedUntil),
+            });
+            return;
+          }
           const preset = snoozePresets.find(
             (candidate) => `snooze:${candidate.id}` === clicked.value,
           );
-          if (preset) attemptSnooze(threadRef, preset);
+          if (preset) attemptSnooze(threadRef, preset.snoozedUntil);
           return;
         }
         switch (clicked.value) {
@@ -2713,37 +2856,12 @@ export default function SidebarV2() {
               copyBranchToClipboard(thread.branch, { branch: thread.branch });
             }
             return;
+          case "copy-thread-id": {
+            copyThreadId(thread.id);
+            return;
+          }
           case "copy-conversation-id": {
-            // The provider CLI's own id (what `claude --resume` takes), which
-            // lives in the thread's resume cursor rather than the read model.
-            const sessionResult = await getProviderSessionId({
-              environmentId: threadRef.environmentId,
-              input: { threadId: threadRef.threadId },
-            });
-            if (sessionResult._tag === "Failure") {
-              if (isAtomCommandInterrupted(sessionResult)) return;
-              const error = squashAtomCommandFailure(sessionResult);
-              toastManager.add(
-                stackedThreadToast({
-                  type: "error",
-                  title: "Could not read conversation ID",
-                  description: error instanceof Error ? error.message : "An error occurred.",
-                }),
-              );
-              return;
-            }
-            const sessionId = sessionResult.value.sessionId;
-            if (sessionId === null) {
-              toastManager.add(
-                stackedThreadToast({
-                  type: "error",
-                  title: "No conversation ID yet",
-                  description: "This thread has not started a provider session.",
-                }),
-              );
-              return;
-            }
-            copyConversationIdToClipboard(sessionId, { sessionId });
+            await copyConversationId(threadRef);
             return;
           }
           case "delete": {
@@ -2943,11 +3061,27 @@ export default function SidebarV2() {
     }
   }, []);
 
+  const onKanbanRoute = useRouterState({
+    select: (state) =>
+      state.location.pathname === "/kanban" || state.location.pathname.startsWith("/kanban/"),
+  });
   // New thread defaults to the project you're in (active thread's project,
   // falling back to the top project) — same resolution the command palette
   // uses. The command palette already offers a "New thread in..." submenu
   // for multi-project setups.
   const handleNewThreadClick = useCallback(() => {
+    // On the board, a new thread is filed onto the board: the same project
+    // picker, then the board's own dialog for lane, priority and prompt —
+    // instead of a draft that replaces the board with a conversation.
+    if (onKanbanRoute) {
+      if (isMobile) setOpenMobile(false);
+      if (projectGroups.length <= 1 && newThreadContext.defaultProjectRef) {
+        openKanbanNewThread(newThreadContext.defaultProjectRef);
+        return;
+      }
+      openCommandPalette({ open: "new-thread-in", newThreadTarget: "kanban" });
+      return;
+    }
     // One project: nothing to pick, create immediately.
     if (projectGroups.length <= 1) {
       if (isMobile) setOpenMobile(false);
@@ -2961,7 +3095,7 @@ export default function SidebarV2() {
     }
     if (isMobile) setOpenMobile(false);
     openCommandPalette({ open: "new-thread-in" });
-  }, [isMobile, newThreadContext, projectGroups.length, setOpenMobile]);
+  }, [isMobile, newThreadContext, onKanbanRoute, projectGroups.length, setOpenMobile]);
 
   const commandPaletteShortcutLabel = shortcutLabelForCommand(keybindings, "commandPalette.toggle");
   // Same resolution as v1: prefer the local-thread binding, fall back to
@@ -3022,7 +3156,10 @@ export default function SidebarV2() {
             </div>
             {projectGroups.length > 0 ? (
               <div className="flex items-center gap-1">
-                <SidebarModeToggle />
+                <SidebarModeToggle
+                  inboxShuffled={inboxShuffleOrder !== null}
+                  onInboxHold={toggleInboxShuffle}
+                />
                 <Menu open={projectScopeMenuOpen} onOpenChange={setProjectScopeMenuOpen}>
                   <MenuTrigger
                     render={
@@ -3145,6 +3282,18 @@ export default function SidebarV2() {
                 className="flex flex-col gap-px"
                 onPointerDownCapture={handleThreadListPointerDownCapture}
               >
+                {/*
+                  Unsent drafts sit above the threads and outside the sortable
+                  context: they are the newest thing in the list by definition,
+                  and they carry no thread key for the drag ordering to hold.
+                */}
+                {scopedDraftProjectRefs.map((projectRef) => (
+                  <SidebarDraftRow
+                    key={`${projectRef.environmentId}\u0000${projectRef.projectId}`}
+                    projectRef={projectRef}
+                    renderItem={(row) => <li className="w-full">{row}</li>}
+                  />
+                ))}
                 <SortableContext items={activeThreadKeys} strategy={verticalListSortingStrategy}>
                   {(() => {
                     const renderThreadRow = (
@@ -3228,6 +3377,7 @@ export default function SidebarV2() {
                           onUnsettle={attemptUnsettle}
                           onToggleManualUnread={toggleThreadManualUnread}
                           onSnooze={attemptSnooze}
+                          onCustomSnooze={handleCustomSnoozeRequest}
                           onUnsnooze={attemptUnsnooze}
                           onChangeRequestState={handleChangeRequestState}
                         />
@@ -3247,7 +3397,12 @@ export default function SidebarV2() {
                           threadKey={threadKey}
                           // A row being renamed is a text field: dragging inside
                           // it has to select text, not move the card.
-                          disabled={renamingThreadKey === threadKey}
+                          // Not while the list is jumbled. A drag writes the
+                          // order it can SEE into the durable manual order,
+                          // which is persisted, so one drag inside a shuffle
+                          // would bake the random order in permanently and
+                          // leave nothing to restore to.
+                          disabled={renamingThreadKey === threadKey || inboxShuffleOrder !== null}
                         >
                           {(dragHandle) => renderThreadRow(thread, "active", dragHandle)}
                         </SortableThreadRow>
@@ -3551,6 +3706,14 @@ export default function SidebarV2() {
           </DialogFooter>
         </DialogPopup>
       </Dialog>
+      <SnoozeCustomDialog
+        open={customSnooze !== null}
+        onOpenChange={(open) => {
+          if (!open) setCustomSnooze(null);
+        }}
+        subject={customSnooze?.subject ?? ""}
+        onConfirm={(snoozedUntil) => customSnooze?.snooze(snoozedUntil)}
+      />
       <SidebarChromeFooter />
     </>
   );

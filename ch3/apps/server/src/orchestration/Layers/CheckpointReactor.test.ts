@@ -113,6 +113,7 @@ function createProviderServiceHarness(
     mcpServerAction: () => unsupported(),
     listRewindTargets: () => unsupported(),
     rewindFiles: () => unsupported(),
+    reattachSessions: () => Effect.succeed([]),
     listSessions,
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     getInstanceInfo: (instanceId) =>
@@ -141,6 +142,20 @@ function createProviderServiceHarness(
     rollbackConversation,
     emit,
   };
+}
+
+/**
+ * Run one command against the engine.
+ *
+ * The manual runtime is the harness's, not a per-test choice — this file drives
+ * a real reactor through a real engine — so it lives in one helper rather than
+ * at every call site.
+ */
+async function dispatch(
+  engine: OrchestrationEngineShape,
+  command: Parameters<OrchestrationEngineShape["dispatch"]>[0],
+) {
+  return Effect.runPromise(engine.dispatch(command));
 }
 
 async function waitForThread(
@@ -428,23 +443,22 @@ describe("CheckpointReactor", () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const createdAt = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-capture"),
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-capture"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
         threadId: ThreadId.make("thread-1"),
-        session: {
-          threadId: ThreadId.make("thread-1"),
-          status: "ready",
-          providerName: "codex",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      }),
-    );
+        status: "ready",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        lastErrorClass: null,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
 
     harness.provider.emit({
       type: "turn.started",
@@ -500,6 +514,69 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
+  // A turn that changed nothing still has to produce its checkpoint and its
+  // turn diff — that is what makes every turn a restore point. Guarded because
+  // the workspace rescan that used to run unconditionally here now runs only
+  // when the diff names a file, and the cheapest way to get that wrong is to
+  // skip the whole tail on a quiet turn.
+  it("captures a checkpoint and an empty diff for a turn that changed no files", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-quiet-turn"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "ready",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        lastErrorClass: null,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-quiet"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-quiet"),
+    });
+    await waitForGitRefExists(
+      harness.cwd,
+      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+    );
+
+    // Nothing is written between the baseline and the completion.
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-quiet"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-quiet"),
+      payload: { state: "completed" },
+    });
+
+    const events = await waitForEvent(
+      harness.engine,
+      (event) => event.type === "thread.turn-diff-completed",
+    );
+    const diffEvent = events.findLast((event) => event.type === "thread.turn-diff-completed");
+    expect(
+      (diffEvent?.payload as { readonly files: ReadonlyArray<unknown> } | undefined)?.files,
+    ).toHaveLength(0);
+    expect(
+      gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1)),
+    ).toBe(true);
+  });
+
   it("refreshes local git status state on turn completion using the session cwd", async () => {
     const gitStatusRefreshCalls: string[] = [];
     const harness = await createHarness({
@@ -526,23 +603,22 @@ describe("CheckpointReactor", () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const createdAt = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-primary-running"),
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-primary-running"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
         threadId: ThreadId.make("thread-1"),
-        session: {
-          threadId: ThreadId.make("thread-1"),
-          status: "running",
-          providerName: "codex",
-          runtimeMode: "approval-required",
-          activeTurnId: asTurnId("turn-main"),
-          lastError: null,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      }),
-    );
+        status: "running",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-main"),
+        lastError: null,
+        lastErrorClass: null,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
 
     harness.provider.emit({
       type: "turn.started",
@@ -601,23 +677,22 @@ describe("CheckpointReactor", () => {
     });
     const createdAt = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-capture-claude"),
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-capture-claude"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
         threadId: ThreadId.make("thread-1"),
-        session: {
-          threadId: ThreadId.make("thread-1"),
-          status: "ready",
-          providerName: "claudeAgent",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      }),
-    );
+        status: "ready",
+        providerName: "claudeAgent",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        lastErrorClass: null,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
 
     harness.provider.emit({
       type: "turn.started",
@@ -671,6 +746,7 @@ describe("CheckpointReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: createdAt,
         },
         createdAt,
@@ -759,6 +835,7 @@ describe("CheckpointReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: asTurnId("turn-missing-cwd"),
           lastError: null,
+          lastErrorClass: null,
           updatedAt: createdAt,
         },
         createdAt,
@@ -806,6 +883,7 @@ describe("CheckpointReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: createdAt,
         },
         createdAt,
@@ -856,6 +934,7 @@ describe("CheckpointReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: createdAt,
         },
         createdAt,
@@ -908,6 +987,7 @@ describe("CheckpointReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: createdAt,
         },
         createdAt,
@@ -989,6 +1069,7 @@ describe("CheckpointReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: createdAt,
         },
         createdAt,
@@ -1058,6 +1139,7 @@ describe("CheckpointReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: createdAt,
         },
         createdAt,

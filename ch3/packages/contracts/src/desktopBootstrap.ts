@@ -19,6 +19,19 @@ export const DesktopBackendBootstrap = Schema.Struct({
   desktopTelemetryFd: Schema.optionalKey(PositiveInt),
   desktopTelemetryControlFd: Schema.optionalKey(PositiveInt),
   resourceMonitorPath: Schema.optionalKey(TrimmedNonEmptyString),
+  // Both native binaries the app ships are resolved by the desktop shell and
+  // named here, because only it knows where its own resources live: the
+  // server runs from inside `app.asar` and cannot see beside it.
+  // The Workspace OAuth client, for the one catalogue entry that has to present
+  // a pre-registered client (Google Drive). Carried here and NOT in the
+  // server's environment, because the server hands `process.env` to every
+  // terminal and agent it spawns, and a secret there ends up in a transcript
+  // the first time an agent runs `env`. The bootstrap is read once from a file
+  // descriptor and never inherited by anything. Both absent on a build with no
+  // client; the install then refuses rather than adding a server that cannot
+  // sign in.
+  googleWorkspaceClientId: Schema.optionalKey(TrimmedNonEmptyString),
+  googleWorkspaceClientSecret: Schema.optionalKey(TrimmedNonEmptyString),
 });
 
 export type DesktopBackendBootstrap = typeof DesktopBackendBootstrap.Type;

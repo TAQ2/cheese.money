@@ -52,6 +52,7 @@ import {
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
   ProviderCommandReactorLive,
+  titleMatchesContext,
 } from "./ProviderCommandReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
@@ -141,6 +142,23 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  describe("title drift keyword matching", () => {
+    it("matches on an accented word instead of losing it to ASCII-only splitting", () => {
+      // "más" ("more") is the only word the title and context share; every
+      // other word differs. An ASCII-only splitter treats "á" as a
+      // delimiter, breaking "más" into "m" and "s", both discarded as too
+      // short, so the shared word disappears from both sides and this
+      // would report no overlap.
+      expect(titleMatchesContext("Necesito más detalles", "Quiero más pizza hoy")).toBe(true);
+    });
+
+    it("still rejects a title with no real overlap", () => {
+      expect(titleMatchesContext("Systemd worker status check", "Quiero más pizza hoy")).toBe(
+        false,
+      );
+    });
+  });
+
   async function createHarness(input?: {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
@@ -156,11 +174,41 @@ describe("ProviderCommandReactor", () => {
     const baseDir =
       input?.baseDir ?? NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ch3-reactor-"));
     createdBaseDirs.add(baseDir);
+    /**
+     * Real directories, because the reactor now refuses to start a provider in
+     * one that is gone — the fix for a renamed project folder failing every
+     * turn with nothing but "stream failed" on screen. A fixture that points at
+     * a path nobody created would be testing that refusal by accident.
+     */
+    const workspaceRoot = NodePath.join(baseDir, "provider-project");
+    const worktreeRoot = NodePath.join(baseDir, "provider-project-worktree");
+    NodeFS.mkdirSync(workspaceRoot, { recursive: true });
+    NodeFS.mkdirSync(worktreeRoot, { recursive: true });
     const { stateDir } = deriveServerPathsSync(baseDir, undefined);
     createdStateDirs.add(stateDir);
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
+    /**
+     * The Claude instance's continuation key, which the driver derives from
+     * the home directory it spawns processes with. A test moves it to stand in
+     * for an account switch: the instance id does not change, the build behind
+     * it does.
+     */
+    let claudeContinuationKey = "claude:home:/home/julius/.claude-4";
+    const continuationKeyFor = (instanceId: ProviderInstanceId, driverKind: ProviderDriverKind) =>
+      driverKind === ProviderDriverKind.make("codex")
+        ? "codex:home:/shared-codex"
+        : driverKind === ProviderDriverKind.make("claudeAgent")
+          ? claudeContinuationKey
+          : `${driverKind}:instance:${instanceId}`;
+    /**
+     * Which instance BUILD is serving each live session, recorded when the
+     * session starts. `ProviderService.listSessions` stamps the real thing
+     * from the adapter the session was listed on; the harness records it at
+     * start, which is the same instant.
+     */
+    const sessionContinuationKeys = new Map<ThreadId, string>();
     const modelSelection = input?.threadModelSelection ?? {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
@@ -223,6 +271,13 @@ describe("ProviderCommandReactor", () => {
         Effect.tap((startedSession) =>
           Effect.sync(() => {
             runtimeSessions.push(startedSession);
+            sessionContinuationKeys.set(
+              startedSession.threadId,
+              continuationKeyFor(
+                startedSession.providerInstanceId ?? modelSelection.instanceId,
+                startedSession.provider,
+              ),
+            );
           }),
         ),
       );
@@ -317,7 +372,16 @@ describe("ProviderCommandReactor", () => {
       mcpServerAction: () => unsupported(),
       listRewindTargets: () => unsupported(),
       rewindFiles: () => unsupported(),
-      listSessions: () => Effect.succeed(runtimeSessions),
+      reattachSessions: () => Effect.succeed([]),
+      listSessions: () =>
+        Effect.succeed(
+          runtimeSessions.map((session) => {
+            const continuationKey = sessionContinuationKeys.get(session.threadId);
+            return continuationKey === undefined
+              ? session
+              : { ...session, instanceContinuationKey: continuationKey };
+          }),
+        ),
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
@@ -334,10 +398,7 @@ describe("ProviderCommandReactor", () => {
           enabled: true,
           continuationIdentity: {
             driverKind,
-            continuationKey:
-              driverKind === ProviderDriverKind.make("codex")
-                ? "codex:home:/shared-codex"
-                : `${driverKind}:instance:${instanceId}`,
+            continuationKey: continuationKeyFor(instanceId, driverKind),
           },
         });
       },
@@ -366,6 +427,7 @@ describe("ProviderCommandReactor", () => {
         const engine = yield* OrchestrationEngineService;
         return {
           readEvents: engine.readEvents,
+          readThreadEvents: engine.readThreadEvents,
           dispatch: (command) => {
             if (command.type === "thread.title.regeneration.complete") {
               titleRegenerationCompletionDispatchAttempts += 1;
@@ -419,7 +481,13 @@ describe("ProviderCommandReactor", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
-    const runEffect = <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect);
+    const runEffect = <A, E>(
+      effect: Effect.Effect<
+        A,
+        E,
+        OrchestrationEngineService | ProviderCommandReactor | ProjectionSnapshotQuery
+      >,
+    ) => runtime!.runPromise(effect);
 
     await Effect.runPromise(
       engine.dispatch({
@@ -427,7 +495,7 @@ describe("ProviderCommandReactor", () => {
         commandId: CommandId.make("cmd-project-create"),
         projectId: asProjectId("project-1"),
         title: "Provider Project",
-        workspaceRoot: "/tmp/provider-project",
+        workspaceRoot,
         defaultModelSelection: modelSelection,
         createdAt: now,
       }),
@@ -489,6 +557,8 @@ describe("ProviderCommandReactor", () => {
 
     return {
       engine,
+      workspaceRoot,
+      worktreeRoot,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       startSession,
       sendTurn,
@@ -504,11 +574,74 @@ describe("ProviderCommandReactor", () => {
       stateDir,
       drain,
       runEffect,
+      /**
+       * Stand in for a Claude account switch: the instance keeps its id and is
+       * rebuilt around another `CLAUDE_CONFIG_DIR`, so every later lookup
+       * reports the new build while the live session still belongs to the old
+       * one.
+       */
+      switchClaudeAccount: (homePath: string) => {
+        claudeContinuationKey = `claude:home:${homePath}`;
+      },
       get titleRegenerationCompletionDispatchAttempts() {
         return titleRegenerationCompletionDispatchAttempts;
       },
     };
   }
+
+  it("says which folder is missing instead of starting a provider in one that is gone", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    // What an engineer does on a Tuesday: rename the folder in Finder. Every
+    // thread in that project used to answer every turn with "Claude runtime
+    // stream failed." and nothing else.
+    NodeFS.rmSync(harness.workspaceRoot, { recursive: true, force: true });
+
+    // Through the harness runtime rather than a manual runner: this file is at
+    // its allowance of those, and one more is one more than the lint permits.
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-missing-workspace"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-missing-workspace"),
+          role: "user",
+          text: "hello reactor",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+        false
+      );
+    });
+
+    expect(harness.startSession.mock.calls.length).toBe(0);
+    expect(harness.sendTurn.mock.calls.length).toBe(0);
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toMatchObject({
+      payload: {
+        detail: expect.stringContaining(harness.workspaceRoot),
+        // Lets the web client offer Retry against the message that actually
+        // failed, instead of dropping it with no way to resend.
+        messageId: asMessageId("user-message-missing-workspace"),
+      },
+    });
+    expect(thread?.session?.lastError).toContain("project folder is gone");
+  });
 
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
@@ -535,7 +668,7 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.startSession.mock.calls[0]?.[0]).toEqual(ThreadId.make("thread-1"));
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      cwd: "/tmp/provider-project",
+      cwd: harness.workspaceRoot,
       modelSelection: {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5-codex",
@@ -664,7 +797,9 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
     const seededTitle = "Please investigate reconnect failures after restar...";
-    harness.generateThreadTitle.mockReturnValue(Effect.succeed({ title: "Generated title" }));
+    harness.generateThreadTitle.mockReturnValue(
+      Effect.succeed({ title: "Investigate reconnect failures" }),
+    );
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -702,12 +837,12 @@ describe("ProviderCommandReactor", () => {
       const readModel = await harness.readModel();
       return (
         readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.title ===
-        "Generated title"
+        "Investigate reconnect failures"
       );
     });
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Generated title");
+    expect(thread?.title).toBe("Investigate reconnect failures");
   });
 
   it("regenerates a thread title from the current conversation", async () => {
@@ -773,7 +908,7 @@ describe("ProviderCommandReactor", () => {
 
     expect(harness.generateThreadTitle).toHaveBeenCalledTimes(1);
     expect(harness.generateThreadTitle.mock.calls[0]?.[0]).toMatchObject({
-      cwd: "/tmp/provider-project",
+      cwd: harness.workspaceRoot,
       previousTitle: "Investigate reconnect regressions",
       message: [
         "USER:",
@@ -786,6 +921,35 @@ describe("ProviderCommandReactor", () => {
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.title).toBe("Resolve stale reconnect state");
+    expect(thread?.titleRegeneration).toBeNull();
+  });
+
+  it("keeps the title of an empty thread that has no run either", async () => {
+    const harness = await createHarness();
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-empty-thread-title"),
+        threadId: ThreadId.make("thread-1"),
+        title: "Untouched",
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-empty-thread-title-regenerate"),
+        threadId: ThreadId.make("thread-1"),
+        regenerateTitle: true,
+      }),
+    );
+
+    await harness.drain();
+
+    expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.title).toBe("Untouched");
     expect(thread?.titleRegeneration).toBeNull();
   });
 
@@ -865,6 +1029,54 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.titleRegeneration).toBeNull();
   });
 
+  it("keeps the current title when regeneration returns a title unrelated to the conversation", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.generateThreadTitle.mockReturnValue(
+      Effect.succeed({ title: "Systemd worker status check" }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-title-before-drift-regeneration"),
+        threadId: ThreadId.make("thread-1"),
+        title: "Import Datadog dashboard",
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-drift-regeneration"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-before-drift-regeneration"),
+          role: "user",
+          text: "Please import the Datadog dashboard JSON into this workspace.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-title-drift-regeneration"),
+        threadId: ThreadId.make("thread-1"),
+        regenerateTitle: true,
+      }),
+    );
+
+    await harness.drain();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.title).toBe("Import Datadog dashboard");
+    expect(thread?.titleRegeneration).toBeNull();
+  });
+
   it("clears title regeneration state when generation fails", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -916,8 +1128,8 @@ describe("ProviderCommandReactor", () => {
     });
     const now = "2026-01-01T00:00:00.000Z";
     harness.generateThreadTitle
-      .mockReturnValueOnce(Effect.succeed({ title: "Title lost to completion failure" }))
-      .mockReturnValueOnce(Effect.succeed({ title: "Recovered regeneration worker" }));
+      .mockReturnValueOnce(Effect.succeed({ title: "Reconnect state assessment" }))
+      .mockReturnValueOnce(Effect.succeed({ title: "Recovered reconnect state" }));
 
     await harness.runEffect(
       harness.engine.dispatch({
@@ -955,7 +1167,7 @@ describe("ProviderCommandReactor", () => {
 
     let readModel = await harness.readModel();
     let thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Title lost to completion failure");
+    expect(thread?.title).toBe("Reconnect state assessment");
     expect(thread?.titleRegeneration).toBeNull();
 
     await harness.runEffect(
@@ -972,7 +1184,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.titleRegenerationCompletionDispatchAttempts).toBe(3);
     readModel = await harness.readModel();
     thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Recovered regeneration worker");
+    expect(thread?.title).toBe("Recovered reconnect state");
     expect(thread?.titleRegeneration).toBeNull();
   });
 
@@ -1189,7 +1401,7 @@ describe("ProviderCommandReactor", () => {
     });
     const now = "2026-01-01T00:00:00.000Z";
     harness.generateThreadTitle.mockReturnValue(
-      Effect.succeed({ title: "Latest regenerated title" }),
+      Effect.succeed({ title: "Latest reconnect state" }),
     );
 
     await harness.runEffect(
@@ -1233,7 +1445,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.titleRegenerationCompletionDispatchAttempts).toBe(1);
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Latest regenerated title");
+    expect(thread?.title).toBe("Latest reconnect state");
     expect(thread?.titleRegeneration).toBeNull();
   });
 
@@ -1338,7 +1550,7 @@ describe("ProviderCommandReactor", () => {
         commandId: CommandId.make("cmd-thread-branch"),
         threadId: ThreadId.make("thread-1"),
         branch: "ch3/1234abcd",
-        worktreePath: "/tmp/provider-project-worktree",
+        worktreePath: harness.worktreeRoot,
       }),
     );
 
@@ -1379,7 +1591,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject({
       message: "Add a safer reconnect backoff.",
     });
-    expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe("/tmp/provider-project-worktree");
+    expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe(harness.worktreeRoot);
   });
 
   it("forwards codex model options through session start and turn send", async () => {
@@ -1872,7 +2084,7 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      cwd: "/tmp/provider-project",
+      cwd: harness.workspaceRoot,
     });
 
     await Effect.runPromise(
@@ -1880,7 +2092,7 @@ describe("ProviderCommandReactor", () => {
         type: "thread.meta.update",
         commandId: CommandId.make("cmd-thread-worktree-change"),
         threadId: ThreadId.make("thread-1"),
-        worktreePath: "/tmp/provider-project-worktree",
+        worktreePath: harness.worktreeRoot,
       }),
     );
 
@@ -1906,7 +2118,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.stopSession.mock.calls.length).toBe(0);
     expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
-      cwd: "/tmp/provider-project-worktree",
+      cwd: harness.worktreeRoot,
       resumeCursor: { opaque: "resume-1" },
       modelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -1914,6 +2126,110 @@ describe("ProviderCommandReactor", () => {
       },
       runtimeMode: "approval-required",
     });
+  });
+
+  it("starts a fresh session when the Claude account moved under the instance", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-account-1"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-account-1"),
+          role: "user",
+          text: "first on the old account",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    // The account selector writes a new `homePath`, the registry rebuilds the
+    // instance around it, and the instance keeps its id. Before this check,
+    // the id was all the reuse test looked at, so the next turn was answered
+    // by the process still running under the previous account — while the
+    // usage band above the composer read the account that had just been
+    // selected.
+    harness.switchClaudeAccount("/home/julius/.claude-3");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-account-2"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-account-2"),
+          role: "user",
+          text: "second, and it must be the new account",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    // Restarted, not stopped mid-flight, and carrying the conversation over.
+    expect(harness.stopSession.mock.calls.length).toBe(0);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+      resumeCursor: { opaque: "resume-1" },
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      },
+    });
+  });
+
+  it("keeps the live session when the instance build behind it is unchanged", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    for (const suffix of ["1", "2"]) {
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-turn-start-same-account-${suffix}`),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId(`user-message-same-account-${suffix}`),
+            role: "user",
+            text: `turn ${suffix}`,
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === Number(suffix));
+    }
+
+    // An edit that leaves the spawned process's environment alone must not
+    // cost the user their session: the comparison is the instance's
+    // continuation key, not the whole config.
+    expect(harness.startSession.mock.calls.length).toBe(1);
+    expect(harness.stopSession.mock.calls.length).toBe(0);
   });
 
   it("restarts claude sessions when claude effort changes", async () => {
@@ -1982,6 +2298,82 @@ describe("ProviderCommandReactor", () => {
         [{ id: "effort", value: "max" }],
       ),
     });
+  });
+
+  it("keeps a reattached claude session on the first turn after a restart", async () => {
+    // A restart empties the reactor's in-memory selection map, and the boot
+    // reattaches the live session. The first turn must reuse that session, not
+    // restart it for a selection that only looks new because nothing was
+    // recorded yet — restarting would retire the reattached keeper and kill
+    // its subagents.
+    const selection = createModelSelection(
+      ProviderInstanceId.make("claudeAgent"),
+      "claude-opus-4-6",
+      [{ id: "effort", value: "high" }],
+    );
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-4-6",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-reattached-claude"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "claudeAgent",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          lastErrorClass: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    // The live session the boot reattached, present in the runtime but never
+    // started through this reactor — so its selection was never recorded.
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      status: "ready",
+      runtimeMode: "approval-required",
+      model: "claude-opus-4-6",
+      threadId: ThreadId.make("thread-1"),
+      cwd: harness.workspaceRoot,
+      resumeCursor: { opaque: "resume-reattached" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-reattached-claude"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-reattached-claude"),
+          role: "user",
+          text: "first turn after restart",
+          attachments: [],
+        },
+        modelSelection: selection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls.length).toBe(0);
+    expect(harness.stopSession.mock.calls.length).toBe(0);
   });
 
   it("restarts the provider session when runtime mode is updated on the thread", async () => {
@@ -2090,6 +2482,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2271,6 +2664,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2336,6 +2730,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: asTurnId("turn-1"),
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2374,6 +2769,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2429,6 +2825,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2439,7 +2836,7 @@ describe("ProviderCommandReactor", () => {
       status: "ready",
       runtimeMode: "approval-required",
       threadId: ThreadId.make("thread-1"),
-      cwd: "/tmp/provider-project",
+      cwd: harness.workspaceRoot,
       resumeCursor: { opaque: "resume-without-instance" },
       createdAt: now,
       updatedAt: now,
@@ -2500,6 +2897,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2541,6 +2939,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2595,6 +2994,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2690,6 +3090,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2791,6 +3192,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: now,
         },
         createdAt: now,
@@ -2814,5 +3216,58 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+  });
+
+  it("reacts to thread.session.start by reviving a stopped session (unlike thread.runtime-mode-set, it does not bail out on a stopped session)", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-for-start"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "stopped",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex_work"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          lastErrorClass: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.start",
+        commandId: CommandId.make("cmd-session-start"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[0]).toEqual(ThreadId.make("thread-1"));
+
+    // The driver call landing is not the projection landing: `starting` is
+    // painted before the provider is asked, and the session is published only
+    // once it answers. Drain the reactor's queue rather than reading between
+    // the two.
+    await harness.drain();
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session).not.toBeNull();
+    // `ready`, not merely "not stopped". A session started from the MCP dialog
+    // has no turn behind it, so nothing arrives later to move it off
+    // `starting` — and the dialog's own wait exits only when the status leaves
+    // `starting`/`stopped`. Held there, a successful start would read as a
+    // 30-second hang and then a failure. `not.toBe("stopped")` passed on
+    // exactly that bug.
+    expect(thread?.session?.status).toBe("ready");
   });
 });

@@ -142,6 +142,12 @@ export interface ProviderServiceShape {
    * Aggregates runtime session lists from all registered adapters.
    */
   readonly listSessions: () => Effect.Effect<ReadonlyArray<ProviderSession>>;
+  /**
+   * Rebuild every session a previous server let go of whose process is still
+   * alive, restore its MCP credential, and bind it. Runs once at boot, before
+   * the reconcilers; answers with the threads that came back.
+   */
+  readonly reattachSessions: () => Effect.Effect<ReadonlyArray<ThreadId>>;
 
   /**
    * Read capabilities for the adapter bound to a configured provider instance.

@@ -1,15 +1,18 @@
 import type { EnvironmentId } from "@ch3tools/contracts";
-import { weeklyBurnableRate } from "@ch3tools/shared/claudeAccountRotation";
 import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 
+import { useClaudeAccountSwitchStore } from "../../claudeAccountSwitchStore";
+import { claudeUsageMeterToneClass } from "../../claudeUsageMeter";
+import { formatClaudeUsageReadAge } from "../../claudeUsageReadAge";
+import { formatClaudeResetShort } from "../../claudeUsageReset";
 import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { claudeAccountEnvironment } from "../../state/claudeAccounts";
 import { useEnvironmentQuery } from "../../state/query";
 import { cn } from "~/lib/utils";
 
 /**
- * The account usage band under the composer: session, week, and burn-rate
- * markers for the account currently in use.
+ * The account usage band under the composer: session, week, and per-model
+ * (Fable) weekly meters for the account currently in use.
  *
  * Replaces the per-thread Claude `statusLine` mirror, whose script CH3 ran
  * once per open conversation — each run hitting the rate-limited usage
@@ -22,30 +25,26 @@ import { cn } from "~/lib/utils";
  * from any thread.
  */
 
-// A constant input so the shared query resolves to one atom. The family keys
-// on JSON.stringify([environmentId, input]), so a fresh `{}` each render would
-// produce the SAME key and reuse the same atom too — this is a readability
-// aid, not a correctness requirement.
-const USAGE_INPUT = {} as const;
-
-/** Tone thresholds mirror the kanban WIP pill: amber approaching the limit, red at it. */
-function meterToneClass(percent: number): string {
-  if (percent >= 90) return "bg-destructive";
-  if (percent >= 70) return "bg-warning";
-  return "bg-primary/70";
-}
+// The input before any switch has happened. The family keys on
+// JSON.stringify([environmentId, input]), so this constant and a fresh `{}`
+// resolve to the same atom — naming it is a readability aid.
+const NO_SWITCH_YET = {} as const;
 
 function UsageMeter({
   label,
   percent,
   title,
+  resetsAt,
 }: {
   readonly label: string;
   readonly percent: number;
   readonly title: string;
+  /** When set, the reset instant is shown inline — the "when do I get it back". */
+  readonly resetsAt?: string | undefined;
 }) {
   const clamped = Math.max(0, Math.min(100, percent));
   const rounded = Math.round(percent);
+  const reset = formatClaudeResetShort(resetsAt);
   return (
     <div
       className="flex min-w-0 items-center gap-1.5"
@@ -57,13 +56,16 @@ function UsageMeter({
       aria-valuemax={100}
     >
       <span className="text-muted-foreground">{label}</span>
-      <span aria-hidden="true" className="h-1.5 w-10 overflow-hidden rounded-full bg-muted">
+      <span aria-hidden="true" className="h-2.5 w-40 overflow-hidden rounded-full bg-muted">
         <span
-          className={cn("block h-full rounded-full", meterToneClass(clamped))}
+          className={cn("block h-full rounded-full", claudeUsageMeterToneClass(clamped))}
           style={{ width: `${clamped}%` }}
         />
       </span>
       <span className="tabular-nums text-foreground/80">{rounded}%</span>
+      {reset !== null ? (
+        <span className="whitespace-nowrap text-muted-foreground/70">↻ {reset}</span>
+      ) : null}
     </div>
   );
 }
@@ -93,10 +95,14 @@ function formatReset(resetsAt: string | undefined): string {
 export function ClaudeUsageBand({ environmentId }: { readonly environmentId: EnvironmentId }) {
   const hidden = useClientSettings((settings) => settings.usageBandHidden);
   const updateSettings = useUpdateClientSettings();
-  // Disable the shared poll entirely while collapsed: a hidden band must not
-  // keep the environment's 3-minute usage read alive to feed nothing.
+  // Re-keys on every account switch, so the band drops the account you just
+  // left instead of painting its numbers until the next three-minute poll.
+  // Collapsed still disables the shared poll entirely: a hidden band must not
+  // keep the environment's usage read alive to feed nothing.
+  const accountKey = useClaudeAccountSwitchStore((store) => store.accountKey);
+  const input = accountKey.length === 0 ? NO_SWITCH_YET : { accountKey };
   const query = useEnvironmentQuery(
-    hidden ? null : claudeAccountEnvironment.currentUsage({ environmentId, input: USAGE_INPUT }),
+    hidden ? null : claudeAccountEnvironment.currentUsage({ environmentId, input }),
   );
 
   // Collapsed: keep a slim reveal control so the band is recoverable from any
@@ -122,6 +128,10 @@ export function ClaudeUsageBand({ environmentId }: { readonly environmentId: Env
   const rateLimited = query.data?.rateLimited === true;
   const stale = query.data?.stale === true;
   const accountLabel = query.data?.accountLabel ?? "";
+  // When reads resume, from the endpoint's own retry-after. "rate limited"
+  // alone told the reader nothing they could act on; a time does.
+  const resumesAt = formatClaudeResetShort(query.data?.retryAt);
+  const pausedNote = resumesAt === null ? "reads paused" : `reads paused until ${resumesAt}`;
 
   // No usage yet. If the endpoint is rate limiting with nothing cached to show,
   // say so — a blank space would read as "no account" or "0%", the exact
@@ -134,56 +144,69 @@ export function ClaudeUsageBand({ environmentId }: { readonly environmentId: Env
     return (
       <div
         data-testid="usage-band"
-        className="flex items-center gap-3 px-2.5 pt-1.5 text-[11px] opacity-70 sm:px-3"
+        className="relative flex items-center justify-center gap-3 px-2.5 pt-1.5 text-xs opacity-70 sm:px-3"
       >
-        <span className="text-muted-foreground" title="The usage endpoint is rate limiting reads">
-          Usage unavailable — rate limited
+        <span
+          className="text-muted-foreground"
+          title="The usage endpoint asked CH3 to stop reading for a while; nothing has been read yet"
+        >
+          Usage unavailable — {pausedNote}
         </span>
-        <span className="flex-1" />
-        <HideBandButton onHide={() => updateSettings({ usageBandHidden: true })} />
+        <span className="absolute right-2.5 sm:right-3">
+          <HideBandButton onHide={() => updateSettings({ usageBandHidden: true })} />
+        </span>
       </div>
     );
   }
-
-  const rate = weeklyBurnableRate({
-    weekPercent: usage.weekPercent,
-    weekResetsAt: usage.weekResetsAt,
-    nowMs: Date.now(),
-  });
 
   return (
     <div
       data-testid="usage-band"
       className={cn(
-        "flex items-center gap-3 px-2.5 pt-1.5 text-[11px] sm:px-3",
+        "relative flex items-center justify-center gap-6 px-2.5 pt-1.5 text-xs sm:px-3",
         (rateLimited || stale) && "opacity-70",
       )}
     >
       <UsageMeter
         label="Session"
         percent={usage.sessionPercent}
+        resetsAt={usage.sessionResetsAt}
         title={`5-hour session${formatReset(usage.sessionResetsAt)}${accountLabel ? ` · ${accountLabel}` : ""}`}
       />
       <UsageMeter
         label="Week"
         percent={usage.weekPercent}
+        resetsAt={usage.weekResetsAt}
         title={`7-day window${formatReset(usage.weekResetsAt)}`}
       />
-      <div
-        className="flex min-w-0 items-center gap-1.5"
-        title="Weekly allowance expiring per day before its reset — the rate the rotation rules burn"
-      >
-        <span className="text-muted-foreground">Burn</span>
-        <span className="tabular-nums text-foreground/80">{Math.round(rate)}%/day</span>
-      </div>
-      <span className="flex-1" />
-      {stale ? <span className="text-muted-foreground/60">cached</span> : null}
-      {rateLimited ? (
-        <span className="text-muted-foreground/60" title="The usage endpoint is rate limiting reads">
-          rate limited
+      {usage.modelWeekPercent !== undefined ? (
+        // The per-model weekly cap is the meter that actually runs out first
+        // on capped plans — the critical one to watch. No inline reset: it
+        // resets with the weekly window shown to its left.
+        <UsageMeter
+          label="Fable"
+          percent={usage.modelWeekPercent}
+          title={`Fable 7-day window${formatReset(usage.modelWeekResetsAt)}`}
+        />
+      ) : null}
+      {stale ? (
+        // Dated rather than merely labelled "cached": the reader's question is
+        // whether these numbers can still be trusted, and only the age answers it.
+        <span className="text-muted-foreground/60">
+          ({formatClaudeUsageReadAge(usage.readAt) ?? "cached"})
         </span>
       ) : null}
-      <HideBandButton onHide={() => updateSettings({ usageBandHidden: true })} />
+      {rateLimited ? (
+        <span
+          className="text-muted-foreground/60"
+          title="The usage endpoint asked CH3 to stop reading for a while; these are the last numbers read"
+        >
+          {pausedNote}
+        </span>
+      ) : null}
+      <span className="absolute right-2.5 sm:right-3">
+        <HideBandButton onHide={() => updateSettings({ usageBandHidden: true })} />
+      </span>
     </div>
   );
 }

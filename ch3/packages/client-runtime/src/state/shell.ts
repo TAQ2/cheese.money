@@ -187,6 +187,19 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
         yield* setSynchronizing;
 
+        // Warm data — a cached snapshot or a previous subscription's state —
+        // resumes by cursor: the server replays the delta after it (gap-capped
+        // with a snapshot fallback) instead of this client re-downloading the
+        // whole shell. Mirrors the thread-state guard; before it, every
+        // cmd-tab back into the app cost a full shell snapshot fetch.
+        const current = yield* SubscriptionRef.get(state);
+        if (Option.isSome(current.snapshot)) {
+          return {
+            afterSequence: current.snapshot.value.snapshotSequence,
+            ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+          };
+        }
+
         const prepared = yield* SubscriptionRef.get(supervisor.prepared).pipe(
           Effect.flatMap(
             Option.match({

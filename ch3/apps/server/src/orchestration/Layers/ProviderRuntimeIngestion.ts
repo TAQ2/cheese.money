@@ -7,6 +7,7 @@ import {
   type OrchestrationMessage,
   type OrchestrationProposedPlanId,
   CheckpointRef,
+  EventId,
   isToolLifecycleItemType,
   ThreadId,
   type ThreadTokenUsageSnapshot,
@@ -20,6 +21,7 @@ import {
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -28,6 +30,7 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@ch3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { BackgroundShellPidLookup } from "../../resourceTelemetry/BackgroundShellPidLookup.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -91,6 +94,15 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY = 10_000;
 const TASK_DESCRIPTION_BY_TASK_TTL = Duration.minutes(120);
+/** What the CLIs call a shell they are keeping alive for the agent. */
+const LOCAL_SHELL_TASK_TYPE = "local_bash";
+/**
+ * How many times, and how far apart, to look for the shell behind a task that
+ * just started. It is usually up before its `task.started` is; a slow spawn is
+ * covered by the retries and nothing waits on them.
+ */
+const SHELL_PID_LOOKUP_ATTEMPTS = 4;
+const SHELL_PID_LOOKUP_RETRY_DELAY = Duration.millis(250);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.CH3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
@@ -692,11 +704,102 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const backgroundShellPidLookup = yield* BackgroundShellPidLookup;
+  // Pid lookups fork here, off the worker, and end with the layer.
+  const lookupScope = yield* Effect.scope;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
     );
+
+  /**
+   * Background tasks still open per thread, and when each thread's ownership
+   * lease was last written.
+   *
+   * A task launched detached — `nohup ... & disown`, tmux, a queued run —
+   * leaves nothing CH3 can observe: it reparents to pid 1, holds no terminal,
+   * and the session falls to `ready` between the agent's polls, so the kanban
+   * card dropped into the human lane while the machine was busy. The runtime
+   * DOES tell us the task started and finished, so the server holds the lease
+   * on the thread's behalf and nothing has to cooperate.
+   *
+   * In memory on purpose. A restart empties it, which is exactly right: the
+   * processes those tasks belonged to died with the server, and the lease they
+   * left behind expires on its own rather than pinning a card forever.
+   */
+  const openBackgroundTasksByThread = new Map<string, Set<string>>();
+  const leaseWrittenAtByThread = new Map<string, number>();
+  /** Long enough to cover a quiet stretch, short enough that a crash heals. */
+  const AGENT_WORKING_LEASE_MS = 30 * 60 * 1000;
+  /** Tasks report no heartbeat, so the lease is refreshed off other traffic. */
+  const AGENT_WORKING_REFRESH_MS = 10 * 60 * 1000;
+
+  const writeAgentWorkingLease = Effect.fn("writeAgentWorkingLease")(function* (
+    event: ProviderRuntimeEvent,
+    threadId: ThreadId,
+    until: string | null,
+  ) {
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.kanban.update",
+        commandId: yield* providerCommandId(event, "agent-working-lease"),
+        threadId,
+        agentWorkingUntil: until,
+        // Not "classifier": the decider refuses a lease from the classifier,
+        // which only reads the conversation and cannot see a detached run.
+        source: "user",
+      })
+      .pipe(Effect.ignore);
+  });
+
+  /**
+   * Keep the thread's lease in step with its open background tasks.
+   *
+   * Called for every runtime event, because a background task emits no
+   * progress of its own: the only way to keep a lease alive across a run that
+   * outlasts it is to refresh off whatever other traffic the thread produces,
+   * throttled so a busy thread does not rewrite the board constantly.
+   */
+  const syncAgentWorkingLease = Effect.fn("syncAgentWorkingLease")(function* (
+    event: ProviderRuntimeEvent,
+    threadId: ThreadId,
+  ) {
+    const key = String(threadId);
+    const open = openBackgroundTasksByThread.get(key) ?? new Set<string>();
+    let forceWrite = false;
+
+    if (event.type === "task.started") {
+      open.add(String(event.payload.taskId));
+      openBackgroundTasksByThread.set(key, open);
+      forceWrite = true;
+    } else if (event.type === "task.completed") {
+      open.delete(String(event.payload.taskId));
+      if (open.size === 0) {
+        openBackgroundTasksByThread.delete(key);
+        leaseWrittenAtByThread.delete(key);
+        // Released the moment the last task ends, rather than left to lapse:
+        // the card belongs back with the user immediately.
+        return yield* writeAgentWorkingLease(event, threadId, null);
+      }
+      openBackgroundTasksByThread.set(key, open);
+      forceWrite = true;
+    }
+
+    if (open.size === 0) return;
+
+    const now = yield* DateTime.now;
+    const nowMs = DateTime.toEpochMillis(now);
+    const writtenAt = leaseWrittenAtByThread.get(key) ?? 0;
+    if (!forceWrite && nowMs - writtenAt < AGENT_WORKING_REFRESH_MS) return;
+
+    leaseWrittenAtByThread.set(key, nowMs);
+    yield* writeAgentWorkingLease(
+      event,
+      threadId,
+      DateTime.formatIso(DateTime.addDuration(now, `${AGENT_WORKING_LEASE_MS} millis`)),
+    );
+  });
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -745,6 +848,66 @@ const make = Effect.gen(function* () {
         Option.filter(description, (value) => value.length > 0).pipe(Option.getOrUndefined),
       ),
     );
+
+  /**
+   * Name the OS process behind a shell task the CLI just announced.
+   *
+   * `task.started` carries the CLI's task id and nothing about a process, and
+   * the CLI never will: the pid is CH3's to find. The lookup joins on the
+   * output file the CLI names after the task id (see
+   * `BackgroundShellPidLookup`), which is exact, so the only thing to wait for
+   * is the shell itself. Runs off the ingestion worker so an `lsof` never
+   * holds the next event, and lands as its own `task.progress` row carrying
+   * only the pid, which the client merges onto the row already on screen.
+   *
+   * Nothing found is silent: the row is still a row without a pid, and a
+   * guessed one would be worse.
+   */
+  const attachBackgroundShellPid = Effect.fn("attachBackgroundShellPid")(function* (
+    threadId: ThreadId,
+    event: Extract<ProviderRuntimeEvent, { type: "task.started" }>,
+  ) {
+    const taskId = event.payload.taskId;
+    let pid: number | undefined;
+    for (let attempt = 0; attempt < SHELL_PID_LOOKUP_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) yield* Effect.sleep(SHELL_PID_LOOKUP_RETRY_DELAY);
+      pid = yield* backgroundShellPidLookup.resolve(taskId);
+      if (pid !== undefined) break;
+    }
+    if (pid === undefined) return;
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const commandId = yield* providerCommandId(event, "shell-pid");
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.activity.append",
+        commandId,
+        threadId,
+        createdAt,
+        activity: {
+          // Its own id, not the event's: two activities sharing one id would
+          // have the projection keep whichever landed last.
+          id: EventId.make(`${event.eventId}:shell-pid`),
+          createdAt,
+          tone: "info",
+          kind: "task.progress",
+          summary: `pid ${pid}`,
+          payload: { taskId, pid },
+          turnId: toTurnId(event.turnId) ?? null,
+        },
+      })
+      .pipe(
+        // A thread deleted between the lookup and the append is the ordinary
+        // failure here, and not one worth more than a line in the log.
+        Effect.catch((error) =>
+          Effect.logWarning("background shell pid could not be recorded", {
+            threadId,
+            taskId,
+            pid,
+            error,
+          }),
+        ),
+      );
+  });
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
@@ -1295,6 +1458,8 @@ const make = Effect.gen(function* () {
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 
+      yield* syncAgentWorkingLease(event, thread.id);
+
       let loadedThreadDetail: OrchestrationThread | null | undefined;
       const getLoadedThreadDetail = () =>
         Effect.gen(function* () {
@@ -1443,9 +1608,21 @@ const make = Effect.gen(function* () {
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
-              runtimeMode: thread.session?.runtimeMode ?? "full-access",
+              runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
               activeTurnId: nextActiveTurnId,
               lastError,
+              // Carried, not cleared. `thread.session.set` replaces the whole
+              // session, and a failed turn always emits `runtime.error` first
+              // and `turn.completed` a moment later — so nulling the class here
+              // erased the classification the error event had just recorded,
+              // milliseconds after it landed. Kept only while the error text is
+              // the SAME one it was recorded against: a new failure arriving as
+              // a lifecycle event alone has no classification of its own, and
+              // wearing the last one would be worse than wearing none.
+              lastErrorClass:
+                lastError !== null && lastError === (thread.session?.lastError ?? null)
+                  ? (thread.session?.lastErrorClass ?? null)
+                  : null,
               updatedAt: now,
             },
             createdAt: now,
@@ -1693,9 +1870,10 @@ const make = Effect.gen(function* () {
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
-              runtimeMode: thread.session?.runtimeMode ?? "full-access",
+              runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
               activeTurnId: eventTurnId ?? null,
               lastError: runtimeErrorMessage,
+              lastErrorClass: event.payload.class ?? null,
               updatedAt: now,
             },
             createdAt: now,
@@ -1778,6 +1956,13 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+      // Only for a shell task, and only as it starts: a pid answers "what is
+      // this and how do I look at it", which is a question about something
+      // still running. After the row is appended, so the pid always lands on a
+      // row that exists.
+      if (event.type === "task.started" && event.payload.taskType === LOCAL_SHELL_TASK_TYPE) {
+        yield* attachBackgroundShellPid(thread.id, event).pipe(Effect.forkIn(lookupScope));
+      }
     });
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;

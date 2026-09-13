@@ -3,9 +3,16 @@ import {
   scopedThreadKey,
   scopeThreadRef,
 } from "@ch3tools/client-runtime/environment";
-import type { VcsStatusResult } from "@ch3tools/contracts";
-import { CloudIcon, FolderGit2Icon, GitPullRequestIcon, TerminalIcon } from "lucide-react";
+import type { ScopedThreadRef, ThreadId, VcsStatusResult } from "@ch3tools/contracts";
+import {
+  ClockIcon,
+  CloudIcon,
+  FolderGit2Icon,
+  GitPullRequestIcon,
+  TerminalIcon,
+} from "lucide-react";
 import { useMemo } from "react";
+import { selectQueuedSends, useQueuedSendStore } from "../queuedSendStore";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { useProject } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
@@ -173,6 +180,77 @@ export function ThreadWorktreeIndicator({
   );
 }
 
+/**
+ * How many sends this thread is holding.
+ *
+ * Selects the *count*, never the map: `refresh` re-freezes the tracking tail on
+ * every keystroke, so a row subscribed to `entriesByThreadKey` would re-render
+ * — along with every other row in the sidebar — for each character typed into a
+ * queued draft. A number changes only when this thread's queue does.
+ */
+export function useThreadQueuedSendCount(threadRef: ScopedThreadRef): number {
+  return useQueuedSendStore(
+    (state) => selectQueuedSends(state.entriesByThreadKey, threadRef).length,
+  );
+}
+
+/**
+ * The queue is per-tab and in-memory, so this speaks only for this window: it
+ * is honest about what the user armed here and says nothing about another
+ * device. That is the same promise the composer's queue button makes.
+ */
+export function threadQueuedSendLabel(queuedCount: number): string {
+  return queuedCount === 1
+    ? "1 message queued — sends when the agent finishes"
+    : `${queuedCount} messages queued — send when the agent finishes`;
+}
+
+/**
+ * A thread holding queued sends, for a sidebar row the user is not looking at.
+ *
+ * Orthogonal to the row's status, not a replacement for it: a thread can be
+ * Working *and* have a message waiting behind the turn in flight, and the
+ * status chain is exclusive. `ClockIcon` because the composer's queue button
+ * already carries it — one symbol for one concept. Static, deliberately: a
+ * per-row animation repaints forever on every row of a long sidebar.
+ */
+export function ThreadQueuedSendIndicator({
+  threadId,
+  queuedCount,
+}: {
+  threadId: ThreadId;
+  queuedCount: number;
+}) {
+  if (queuedCount < 1) {
+    return null;
+  }
+
+  const label = threadQueuedSendLabel(queuedCount);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            role="img"
+            aria-label={label}
+            data-testid={`thread-queued-sends-${threadId}`}
+            className="inline-flex shrink-0 items-center gap-0.5 text-muted-foreground/70"
+          />
+        }
+      >
+        <ClockIcon className="size-3" />
+        {/* One queued message is fully told by the icon; the number earns its
+            pixels only once the queue is deeper than the badge implies. */}
+        {queuedCount > 1 ? (
+          <span className="text-[10px] leading-none tabular-nums">{queuedCount}</span>
+        ) : null}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{label}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
 export function ThreadStatusLabel({
   status,
   compact = false,
@@ -292,8 +370,10 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
 
 /**
  * Non-interactive trailing status icons for a thread row in compact contexts
- * like the command palette. Shows a terminal-running indicator and a remote
- * environment indicator, matching the sidebar's trailing indicators.
+ * like the command palette. Shows a terminal-running indicator, a remote
+ * environment indicator and a queued-send badge, matching the sidebar's
+ * trailing indicators — the palette is a thread list too, and a row that
+ * reads differently there than in the sidebar is a row the user cannot trust.
  */
 export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSummary }) {
   const runningTerminalIds = useThreadRunningTerminalIds({
@@ -307,13 +387,15 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
   const remoteEnvLabel = environment?.label ?? null;
   const threadEnvironmentLabel = isRemoteThread ? (remoteEnvLabel ?? "Remote") : null;
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
+  const queuedSendCount = useThreadQueuedSendCount(scopeThreadRef(thread.environmentId, thread.id));
 
-  if (!terminalStatus && !isRemoteThread) {
+  if (!terminalStatus && !isRemoteThread && queuedSendCount < 1) {
     return null;
   }
 
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5">
+      <ThreadQueuedSendIndicator threadId={thread.id} queuedCount={queuedSendCount} />
       {terminalStatus ? (
         <Tooltip>
           <TooltipTrigger

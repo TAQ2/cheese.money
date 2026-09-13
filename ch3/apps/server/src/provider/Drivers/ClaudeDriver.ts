@@ -61,6 +61,7 @@ import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
 } from "./ClaudeHome.ts";
+import { ensureBundledClaudeOutputStyles } from "./BundledOutputStyles.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -152,6 +153,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       // And the assets the user wrote — skills, commands, agents, hooks —
       // which a profile otherwise starts without.
       yield* ensureSharedClaudeUserAssets(effectiveConfig);
+      // The response styles CH3 ships. Written into the default config
+      // directory, which the line above has just pointed every profile at, so
+      // one write serves every account. Never overwrites a file the user
+      // already has — see the module header.
+      yield* ensureBundledClaudeOutputStyles();
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
       const stampIdentity = withInstanceIdentity({
         instanceId,

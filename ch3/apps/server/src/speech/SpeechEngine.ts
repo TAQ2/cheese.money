@@ -8,10 +8,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import { SPEECH_MAX_RAW_TEXT_CHARS, SPEECH_MAX_TEXT_CHARS } from "@ch3tools/contracts";
+import { prepareSpokenText } from "@ch3tools/shared/spokenText";
 
 import { synthesizeWithEdgeTts } from "./EdgeTtsClient.ts";
 import type { SpeechLanguage } from "./speechLanguage.ts";
-import { prepareSpokenText } from "./spokenText.ts";
 
 /**
  * Text to speech, synthesized natively by this server.

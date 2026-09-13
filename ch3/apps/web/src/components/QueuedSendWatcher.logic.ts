@@ -16,16 +16,31 @@ export interface BackgroundQueuedEntry {
 }
 
 /**
- * The armed threads the watcher owns: everything except the one on screen,
- * whose composer releases it itself.
+ * The queued sends the watcher owns: the head of every thread's queue, except
+ * the one the on-screen composer is about to send itself.
+ *
+ * Only one entry per thread, because sending it starts a turn — everything
+ * behind it has to wait for that turn to end, exactly as it waited for the
+ * one before.
+ *
+ * The active thread is normally left alone: its composer releases the message
+ * with an optimistic bubble and a scroll anchor, which a background send has
+ * no way to produce. That only holds while the head still *is* that composer's
+ * draft. A stacked entry is a frozen message the composer no longer carries,
+ * so nobody else would ever send it.
  */
 export function selectBackgroundQueuedEntries(
-  entriesByThreadKey: Record<string, QueuedSendEntry>,
+  entriesByThreadKey: Record<string, ReadonlyArray<QueuedSendEntry>>,
   activeThreadKey: string | null,
 ): BackgroundQueuedEntry[] {
-  return Object.entries(entriesByThreadKey)
-    .filter(([threadKey]) => threadKey !== activeThreadKey)
-    .map(([threadKey, entry]) => ({ threadKey, entry }));
+  const background: BackgroundQueuedEntry[] = [];
+  for (const [threadKey, entries] of Object.entries(entriesByThreadKey)) {
+    const head = entries[0];
+    if (!head) continue;
+    if (threadKey === activeThreadKey && head.tracksDraft) continue;
+    background.push({ threadKey, entry: head });
+  }
+  return background;
 }
 
 export type QueuedSendDecision =
@@ -44,6 +59,15 @@ export type QueuedSendDecision =
 export function decideQueuedSend(input: {
   hasShell: boolean;
   phase: SessionPhase;
+  /**
+   * An entry claimed for this thread has not reached the server yet.
+   *
+   * `phase` cannot answer this: it only leaves `ready` once a server event has
+   * come back, and the next entry's watcher mounts in the same synchronous
+   * pass the claim happened in. Waiting on it is what keeps a stacked queue in
+   * order instead of firing every entry at once.
+   */
+  dispatchInFlight: boolean;
   text: string;
   images: ReadonlyArray<{ sizeBytes: number }>;
   /**
@@ -58,6 +82,7 @@ export function decideQueuedSend(input: {
   // drop a message the user is owed.
   if (!input.hasShell) return { kind: "wait" };
   if (input.phase === "running" || input.phase === "connecting") return { kind: "wait" };
+  if (input.dispatchInFlight) return { kind: "wait" };
   if (!input.hasSendableContent) {
     return { kind: "drop", reason: null };
   }
@@ -92,11 +117,14 @@ export function decideQueuedSend(input: {
  * a send persists it, so reading the server's copy would silently downgrade a
  * queued plan-mode turn into one that edits.
  *
- * Deliberately does not persist those choices back to the thread record the
- * way an on-screen send does. The turn runs with what the user picked; the
- * record keeps its previous values until the next visible send. Writing
- * thread metadata from a background release would change a thread the user is
- * not looking at, which is a bigger surprise than the drift.
+ * The turn input alone cannot carry them, which is why `dispatchQueuedSend`
+ * persists the modes to the thread record immediately before starting the
+ * turn: `decider.ts` reads `targetThread.runtimeMode`, not the command's,
+ * because the command's modes have a decoding default and honouring them
+ * would let any caller that omits them reset the thread. Writing thread
+ * metadata from a background release does change a thread the user is not
+ * looking at — and that is the lesser surprise. The alternative shipped a
+ * message queued in Plan mode as a turn that edited files.
  */
 export function buildQueuedTurnInput(input: {
   entry: QueuedSendEntry;
@@ -126,11 +154,17 @@ export function buildQueuedTurnInput(input: {
  * Only what was actually sent gets cleared. A draft edited after the snapshot
  * froze — a pasted image that finished compressing once the thread went
  * off-screen, say — was never sent, so deleting it would be data loss.
+ *
+ * A stacked entry never clears anything. Stacking already cleared the draft it
+ * came from, and the composer holds the *next* message now: a signature that
+ * happened to match again (the same text retyped) would delete a message the
+ * user is still writing.
  */
 export function shouldClearDraftAfterQueuedSend(
   entry: QueuedSendEntry,
   liveDraft: ComposerThreadDraftState | null,
 ): boolean {
+  if (!entry.tracksDraft) return false;
   if (liveDraft === null) return true;
   return composerDraftSignature(liveDraft) === entry.snapshot.draftSignature;
 }

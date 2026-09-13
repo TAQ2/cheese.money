@@ -60,6 +60,7 @@ import {
   readDesktopSecondaryBootstrapsResult,
   type DesktopSecondaryBootstrapsRead,
 } from "./desktopLocal";
+import { shouldEmitVisibilityWakeup } from "./visibilityWakeup";
 import { connectionStorageLayer } from "./storage";
 
 let nextObservedRpcRequestId = 0;
@@ -92,27 +93,56 @@ const connectivityLayer = Connectivity.layer({
 });
 
 const wakeupsLayer = Wakeups.layer({
-  changes: Stream.merge(
-    Stream.callback<"application-active">((queue) =>
-      Effect.acquireRelease(
-        Effect.sync(() => {
-          const listener = () => {
-            if (document.visibilityState === "visible") {
-              Queue.offerUnsafe(queue, "application-active");
-            }
-          };
-          document.addEventListener("visibilitychange", listener);
-          return listener;
-        }),
-        (listener) =>
+  changes: Stream.mergeAll(
+    [
+      Stream.callback<"application-active">((queue) =>
+        Effect.acquireRelease(
           Effect.sync(() => {
-            document.removeEventListener("visibilitychange", listener);
+            // Floored: cmd-tab returns arrive many times a minute and each
+            // emission rebuilds every live subscription downstream.
+            let lastEmittedAtMs: number | null = null;
+            const listener = () => {
+              if (document.visibilityState !== "visible") {
+                return;
+              }
+              const nowMs = Date.now();
+              if (!shouldEmitVisibilityWakeup(lastEmittedAtMs, nowMs)) {
+                return;
+              }
+              lastEmittedAtMs = nowMs;
+              Queue.offerUnsafe(queue, "application-active");
+            };
+            document.addEventListener("visibilitychange", listener);
+            return listener;
           }),
-      ).pipe(Effect.asVoid),
-    ),
-    managedRelayAccountChanges(appAtomRegistry).pipe(
-      Stream.map(() => "credentials-changed" as const),
-    ),
+          (listener) =>
+            Effect.sync(() => {
+              document.removeEventListener("visibilitychange", listener);
+            }),
+        ).pipe(Effect.asVoid),
+      ),
+      // The desktop shell announces wake-from-sleep. Sleep leaves sockets
+      // half-open, so this is a reconnect (replace the lease, skip backoff)
+      // rather than the gentler probe a cmd-tab return gets.
+      Stream.callback<"application-active-reconnect">((queue) =>
+        Effect.acquireRelease(
+          Effect.sync(
+            () =>
+              window.desktopBridge?.onPowerResume?.(() => {
+                Queue.offerUnsafe(queue, "application-active-reconnect");
+              }) ?? null,
+          ),
+          (unsubscribe) =>
+            Effect.sync(() => {
+              unsubscribe?.();
+            }),
+        ).pipe(Effect.asVoid),
+      ),
+      managedRelayAccountChanges(appAtomRegistry).pipe(
+        Stream.map(() => "credentials-changed" as const),
+      ),
+    ],
+    { concurrency: "unbounded" },
   ),
 });
 

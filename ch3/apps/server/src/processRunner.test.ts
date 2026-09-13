@@ -319,6 +319,60 @@ describe("runProcess", () => {
     }),
   );
 
+  it.effect("a child that exits without reading its stdin is not a failure", () =>
+    Effect.gen(function* () {
+      // What Linux reports when `sh -c 'printf global'` is gone before the
+      // payload lands: the write fails with EPIPE, the process itself ran fine.
+      const readerGone = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "ChildProcess",
+        method: "fromWritable(stdin)",
+        syscall: "write",
+        pathOrDescriptor: "/bin/sh -c printf global",
+        cause: Object.assign(new Error("write EPIPE"), { code: "EPIPE", errno: -32 }),
+      });
+      const spawner = makeSpawner(() =>
+        Effect.succeed(makeHandle({ stdout: "global", stdin: Sink.fail(readerGone) })),
+      );
+
+      const result = yield* runWith(spawner)({
+        command: "fake",
+        args: ["ignores-stdin"],
+        stdin: '{"cwd":"/tmp"}',
+      });
+
+      expect(result.stdout).toBe("global");
+      expect(result.code).toBe(0);
+    }),
+  );
+
+  it.effect("any other stdin write failure is still reported", () =>
+    Effect.gen(function* () {
+      const spawner = makeSpawner(() =>
+        Effect.succeed(
+          makeHandle({
+            stdin: Sink.fail(
+              PlatformError.systemError({
+                _tag: "Unknown",
+                module: "ChildProcess",
+                method: "fromWritable(stdin)",
+                cause: Object.assign(new Error("write EIO"), { code: "EIO" }),
+              }),
+            ),
+          }),
+        ),
+      );
+
+      const error = yield* runWith(spawner)({
+        command: "fake",
+        args: ["stdin-eio"],
+        stdin: "payload",
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("ProcessStdinError");
+    }),
+  );
+
   it.effect("returns output for non-zero exit codes", () =>
     Effect.gen(function* () {
       const spawner = makeSpawner(() => Effect.succeed(makeHandle({ stderr: "boom", code: 2 })));

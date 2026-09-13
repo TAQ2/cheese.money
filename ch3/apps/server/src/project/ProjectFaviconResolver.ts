@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -95,6 +96,16 @@ export class ProjectFaviconResolver extends Context.Service<
   }
 >()("ch3/project/ProjectFaviconResolver") {}
 
+/**
+ * How long a resolved icon is trusted.
+ *
+ * `AssetAccess` resolves one per asset URL it issues, which on a busy client is
+ * a couple a second, and each miss walks a dozen candidate paths. A minute is
+ * short enough that dropping an icon into a checkout shows up while somebody is
+ * still looking at it.
+ */
+const FAVICON_CACHE_TTL_MS = 60_000;
+
 function extractIconHref(source: string): string | null {
   const htmlMatch = source.match(LINK_ICON_HTML_RE);
   if (htmlMatch?.[1]) return htmlMatch[1];
@@ -166,6 +177,21 @@ export const make = Effect.gen(function* () {
     return null;
   });
 
+  /**
+   * What the last scan found for a workspace, and when.
+   *
+   * The scan is a dozen filesystem probes down a fixed candidate list, and
+   * `AssetAccess` runs it for **every asset URL it issues** — which on a busy
+   * client is a couple a second, so the same directory was being asked the same
+   * question thousands of times an hour. A project's icon does not change at
+   * that rate. Held for a minute, so dropping an icon into a checkout still
+   * shows up while somebody is looking at it, and keyed by the normalised root
+   * so two spellings of one path share an answer.
+   */
+  const cache = yield* Ref.make<
+    ReadonlyMap<string, { readonly at: number; readonly path: string | null }>
+  >(new Map());
+
   const resolvePath: ProjectFaviconResolver["Service"]["resolvePath"] = Effect.fn(
     "ProjectFaviconResolver.resolvePath",
   )(function* (cwd) {
@@ -179,11 +205,21 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
+    const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+    const remembered = (yield* Ref.get(cache)).get(projectCwd);
+    if (remembered !== undefined && now - remembered.at < FAVICON_CACHE_TTL_MS) {
+      return remembered.path;
+    }
+
+    const remember = (found: string | null) =>
+      Ref.update(cache, (held) => new Map(held).set(projectCwd, { at: now, path: found }));
+
     // A ch3.json iconPath takes precedence over the well-known locations.
     const projectFile = yield* projectFileLoader.load(projectCwd);
     if (Option.isSome(projectFile) && projectFile.value.iconPath !== undefined) {
       const existing = yield* findExistingFile(projectCwd, [projectFile.value.iconPath]);
       if (existing) {
+        yield* remember(existing);
         return existing;
       }
     }
@@ -191,6 +227,7 @@ export const make = Effect.gen(function* () {
     for (const candidate of FAVICON_CANDIDATES) {
       const existing = yield* findExistingFile(projectCwd, [candidate]);
       if (existing) {
+        yield* remember(existing);
         return existing;
       }
     }
@@ -235,10 +272,14 @@ export const make = Effect.gen(function* () {
       }
       const existing = yield* findExistingFile(projectCwd, resolveIconHref(href));
       if (existing) {
+        yield* remember(existing);
         return existing;
       }
     }
 
+    // "There is no icon here" is worth remembering too: it is the answer that
+    // costs the most to reach, because it is the one that tried every candidate.
+    yield* remember(null);
     return null;
   });
 

@@ -93,7 +93,7 @@ describe("VcsDriverRegistry", () => {
     }).pipe(Effect.provide(layer));
   });
 
-  it.effect("detects a repository created after a negative lookup", () => {
+  it.effect("detects a repository created after a negative lookup is invalidated", () => {
     let insideWorkTreeChecks = 0;
     const layer = Layer.effect(VcsDriverRegistry.VcsDriverRegistry, VcsDriverRegistry.make).pipe(
       Layer.provide(NodeServices.layer),
@@ -133,6 +133,16 @@ describe("VcsDriverRegistry", () => {
       const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
 
       assert.equal(yield* registry.detect({ cwd: "/repo" }), null);
+      // "Not a repository" is now held briefly rather than re-probed on every
+      // request: a plain folder open in the app used to re-pay three git
+      // subprocesses per call, forever.
+      assert.equal(yield* registry.detect({ cwd: "/repo" }), null);
+      assert.equal(insideWorkTreeChecks, 1);
+
+      // Which is why the operations that create a repository say so. Without
+      // this, a folder that just became a checkout would look empty until the
+      // short negative lifetime ran out.
+      yield* registry.invalidate("/repo");
       assert.equal((yield* registry.detect({ cwd: "/repo" }))?.repository.rootPath, "/repo");
       assert.equal(insideWorkTreeChecks, 2);
     }).pipe(Effect.provide(layer));

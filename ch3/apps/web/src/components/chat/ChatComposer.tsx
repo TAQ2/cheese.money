@@ -16,7 +16,6 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
-  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@ch3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@ch3tools/client-runtime/connection";
 import { scopeThreadRef, scopedThreadKey } from "@ch3tools/client-runtime/environment";
@@ -34,6 +33,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useShallow } from "zustand/react/shallow";
 import {
   clampCollapsedComposerCursor,
   type ComposerTrigger,
@@ -54,6 +54,7 @@ import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
 } from "./composerMentionDrag";
+import { takeFilesFromInput } from "./composerFilePicker";
 import { composerInsertSeparator, type ComposerInsertBoundary } from "./composerInsert";
 import { composerTextForDroppedPaths, resolveDroppedFilePaths } from "./droppedFilePaths";
 import {
@@ -67,9 +68,15 @@ import {
 } from "../../composerDraftStore";
 import {
   claimQueuedSend,
+  selectDraftQueueCancelled,
+  selectHandledReleaseCount,
+  selectQueuedDispatchInFlight,
   composerDraftSignature,
+  selectDraftQueuedSend,
+  selectQueuedSends,
   useQueuedSendStore,
   type QueuedSendSnapshot,
+  type QueuedSendEntry,
 } from "../../queuedSendStore";
 import {
   MAX_STASH_ENTRIES,
@@ -79,7 +86,7 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
-import { compressImageForStash, compressImageToByteLimit } from "../../lib/imageCompression";
+import { compressImageForStash } from "../../lib/imageCompression";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { getTerminalFocusOwner } from "../../lib/terminalFocus";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../../keybindings";
@@ -120,6 +127,7 @@ import {
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../pierre-icons";
+import { acceptComposerImageFiles, compressComposerImageFiles } from "~/composerImageAttachments";
 import { cn, randomUUID } from "~/lib/utils";
 import { Separator } from "../ui/separator";
 
@@ -184,18 +192,21 @@ import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
+import { useThreadShell } from "~/state/entities";
+import { ComposerQueuedSends } from "./ComposerQueuedSends";
+import {
+  canComposerReleaseQueuedDraft,
+  shouldRearmDraftAfterQueueDrain,
+  shouldStackDraftOnEnter,
+} from "./composerQueuedSends.logic";
 import {
   BookmarkIcon,
   BotIcon,
   CircleAlertIcon,
   ListTodoIcon,
   PanelBottomIcon,
+  PaperclipIcon,
   PencilRulerIcon,
-  type LucideIcon,
-  LockIcon,
-  LockOpenIcon,
-  PenLineIcon,
-  SparklesIcon,
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
@@ -224,34 +235,8 @@ import { formatProviderSkillDisplayName } from "../../providerSkillPresentation"
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
+import { interactionModeConfig, runtimeModeConfig, runtimeModeOptions } from "./threadModes";
 
-const runtimeModeConfig: Record<
-  RuntimeMode,
-  { label: string; description: string; icon: LucideIcon }
-> = {
-  "approval-required": {
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
-    icon: LockIcon,
-  },
-  "auto-accept-edits": {
-    label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    icon: PenLineIcon,
-  },
-  auto: {
-    label: "Auto",
-    description: "An AI reviewer approves routine actions; risky ones still ask.",
-    icon: SparklesIcon,
-  },
-  "full-access": {
-    label: "Full access",
-    description: "Allow commands and edits without prompts.",
-    icon: LockOpenIcon,
-  },
-};
-
-const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-slot="popover-popup"]',
   '[data-slot="menu-popup"]',
@@ -304,14 +289,22 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   onTogglePlanSidebar: () => void;
   showTerminalToggle: boolean;
   terminalOpen: boolean;
+  /**
+   * Work is running underneath this thread — a terminal subprocess, or a
+   * background task the agent launched. Pulses the control so a run is
+   * visible without opening the drawer.
+   */
+  terminalBusy: boolean;
   terminalShortcutLabel: string | null;
   onToggleTerminal: () => void;
+  onAttachFiles: () => void;
 }) {
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
   const RuntimeModeIcon = runtimeModeOption.icon;
   const terminalTooltip = `${props.terminalOpen ? "Hide" : "Open"} terminal pane${
-    props.terminalShortcutLabel ? ` (${props.terminalShortcutLabel})` : ""
-  }`;
+    props.terminalBusy ? " — something is running" : ""
+  }${props.terminalShortcutLabel ? ` (${props.terminalShortcutLabel})` : ""}`;
+  const attachTooltip = "Attach files — images attach, other files add their path";
   const interactionModeTooltip =
     props.interactionMode === "plan"
       ? "Plan mode — click to return to normal build mode"
@@ -345,7 +338,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             <ComposerControlIcon icon={BotIcon} opticalSize="large" />
           )}
           <span className="sr-only sm:not-sr-only">
-            {props.interactionMode === "plan" ? "Plan" : "Build"}
+            {interactionModeConfig[props.interactionMode].label}
           </span>
         </TooltipTrigger>
         <TooltipPopup side="top">{interactionModeTooltip}</TooltipPopup>
@@ -436,7 +429,11 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
                     "shrink-0 whitespace-nowrap",
                     props.terminalOpen
                       ? "bg-blue-500/10 text-blue-400 hover:bg-blue-500/15 hover:text-blue-300"
-                      : "text-muted-foreground/70 hover:text-foreground/80",
+                      : props.terminalBusy
+                        ? // Same teal the sidebar uses for a running terminal,
+                          // so one colour means "running" everywhere.
+                          "text-teal-600 hover:text-teal-500 dark:text-teal-300/90"
+                        : "text-muted-foreground/70 hover:text-foreground/80",
                   )}
                   type="button"
                   onClick={props.onToggleTerminal}
@@ -446,7 +443,10 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             >
               <ComposerControlIcon
                 icon={PanelBottomIcon}
-                className={props.terminalOpen ? "text-current opacity-100" : undefined}
+                className={cn(
+                  props.terminalOpen ? "text-current opacity-100" : undefined,
+                  props.terminalBusy ? "animate-status-pulse" : undefined,
+                )}
               />
               <span className="sr-only sm:not-sr-only">Terminal</span>
             </TooltipTrigger>
@@ -454,6 +454,24 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
           </Tooltip>
         </>
       ) : null}
+
+      <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <ComposerControl
+              className="shrink-0 whitespace-nowrap text-muted-foreground/70 hover:text-foreground/80"
+              type="button"
+              onClick={props.onAttachFiles}
+              aria-label={attachTooltip}
+            />
+          }
+        >
+          <ComposerControlIcon icon={PaperclipIcon} />
+          <span className="sr-only sm:not-sr-only">Attach</span>
+        </TooltipTrigger>
+        <TooltipPopup side="top">{attachTooltip}</TooltipPopup>
+      </Tooltip>
     </>
   );
 });
@@ -472,6 +490,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   } | null;
   isRunning: boolean;
   isQueued: boolean;
+  canStackQueuedSend: boolean;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -483,6 +502,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onQueue: () => void;
+  onStackQueuedSend: () => void;
   onImplementPlanInNewThread: () => void;
 }) {
   return (
@@ -501,6 +521,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         pendingAction={props.pendingAction}
         isRunning={props.isRunning}
         isQueued={props.isQueued}
+        canStackQueuedSend={props.canStackQueuedSend}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
         isSendBusy={props.isSendBusy}
@@ -513,6 +534,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
         onQueue={props.onQueue}
+        onStackQueuedSend={props.onStackQueuedSend}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
       />
     </>
@@ -630,7 +652,8 @@ export interface ChatComposerProps {
   providerStatuses: ServerProvider[];
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
-
+  /** Whether this thread has already run a turn (it has a session). */
+  activeThreadHasStarted?: boolean;
   // Context window
   activeThreadActivities: Thread["activities"] | undefined;
 
@@ -639,6 +662,9 @@ export interface ChatComposerProps {
   settings: UnifiedSettings;
   keybindings: ResolvedKeybindingsConfig;
   terminalOpen: boolean;
+  /** Something is running under this thread: a terminal subprocess, or a
+      background task the agent launched. */
+  terminalBusy?: boolean | undefined;
   gitCwd: string | null;
   /** Opens the terminal drawer, mirroring the window-level panel control so the
    * pane is reachable from the composer instead of only a keyboard shortcut. */
@@ -732,11 +758,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     providerStatuses,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
+    activeThreadHasStarted,
     activeThreadActivities,
     resolvedTheme,
     settings,
     keybindings,
     terminalOpen,
+    terminalBusy = false,
     gitCwd,
     onToggleTerminal,
     promptRef,
@@ -807,6 +835,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const clearComposerDraftPromptAndImages = useComposerDraftStore(
     (store) => store.clearComposerPromptAndImages,
   );
+  const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const syncComposerDraftPersistedAttachments = useComposerDraftStore(
     (store) => store.syncPersistedAttachments,
   );
@@ -917,6 +946,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     requestedDriverKind,
   ]);
 
+  /**
+   * The Claude account the composer's own picker is deciding for.
+   *
+   * Without it the picker asks `isMeteredModelChoice` with no account, and
+   * "not known" is metered by design — so the Fable confirmation and its
+   * badge appeared on a personal account that shares no quota with anyone.
+   * `ChatView` had been resolving this for its own checks; the picker in the
+   * composer, which is the surface people actually use, was never handed it.
+   */
+
   // Resolve the active instance's snapshot by `instanceId` so a custom
   // instance gets its own slash commands, skills, and model list — not
   // the first snapshot for the same driver kind.
@@ -937,6 +976,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProvider,
     selectedInstanceId,
     threadModelSelection: activeThreadModelSelection,
+    threadHasStarted: activeThreadHasStarted ?? false,
     projectModelSelection: activeProjectDefaultModelSelection,
     settings,
   });
@@ -1015,6 +1055,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => deriveLatestContextWindowSnapshot(activeThreadActivities ?? []),
     [activeThreadActivities],
   );
+
+  /**
+   * The thread-level reasons a model is out of reach, on top of the ones
+   * ChatView already supplies.
+   *
+   * The context ceiling on the metered model is composed in here rather than
+   * in ChatView because this is where the context reading is derived — sending
+   * it upwards only to have the answer sent back down would put the two out of
+   * step for a render on every turn.
+   */
+  const getComposerModelDisabledReason = useCallback(
+    (instanceId: ProviderInstanceId, model: string): string | null => {
+      const inherited = getModelDisabledReason(instanceId, model);
+      if (inherited) return inherited;
+      return null;
+    },
+    [getModelDisabledReason],
+  );
   const activeThreadProviderDisplayName = useMemo(() => {
     if (!activeThreadModelSelection) return null;
     const entry = providerStatuses.find(
@@ -1060,6 +1118,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const composerSurfaceRef = useRef<HTMLDivElement>(null);
+  const composerAttachInputRef = useRef<HTMLInputElement>(null);
   const composerSelectLockRef = useRef(false);
   const composerMenuOpenRef = useRef(false);
   const composerMenuItemsRef = useRef<ComposerCommandItem[]>([]);
@@ -2022,14 +2081,68 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const armQueuedSend = useQueuedSendStore((store) => store.arm);
   const refreshQueuedSend = useQueuedSendStore((store) => store.refresh);
-  const disarmQueuedSend = useQueuedSendStore((store) => store.disarm);
+  const stackQueuedSend = useQueuedSendStore((store) => store.stack);
+  const removeQueuedSend = useQueuedSendStore((store) => store.remove);
+  const noteDraftQueueCancelled = useQueuedSendStore((store) => store.noteDraftQueueCancelled);
+  const replaceQueuedSnapshot = useQueuedSendStore((store) => store.replaceSnapshot);
+  const draftQueueCancelled = useQueuedSendStore((store) =>
+    selectDraftQueueCancelled(store.cancelledDraftByThreadKey, queuedSendRef),
+  );
+  /**
+   * The session reading the queue's dispatch gate is measured against. `phase`
+   * alone cannot do it: it is derived from the same projection and so carries
+   * the same lag, and the lag is exactly the window a queued message slips
+   * through.
+   */
+  const queuedSendSessionUpdatedAt = useThreadShell(queuedSendRef)?.session?.updatedAt ?? null;
+  const queuedDispatchInFlight = useQueuedSendStore((store) =>
+    selectQueuedDispatchInFlight(
+      store.dispatchingByThreadKey,
+      queuedSendRef,
+      queuedSendSessionUpdatedAt,
+    ),
+  );
   // Subscribing to the boolean rather than the entry keeps a refresh per
   // keystroke from re-rendering the composer.
-  const isSendQueued = useQueuedSendStore((store) =>
-    queuedSendRef === null
-      ? false
-      : store.entriesByThreadKey[scopedThreadKey(queuedSendRef)] !== undefined,
+  const isSendQueued = useQueuedSendStore(
+    (store) => selectDraftQueuedSend(store.entriesByThreadKey, queuedSendRef) !== null,
   );
+  /**
+   * The messages frozen ahead of this composer, drawn as their own rows above
+   * it. The live draft's entry is deliberately filtered out: `refresh`
+   * rewrites it on every keystroke, so keeping it here would mean a second
+   * render per character typed — `useShallow` only holds because what is left
+   * changes on stack, remove and release, and not on typing.
+   */
+  const stackedQueuedSends = useQueuedSendStore(
+    useShallow((store) =>
+      selectQueuedSends(store.entriesByThreadKey, queuedSendRef).filter(
+        (entry) => !entry.tracksDraft,
+      ),
+    ),
+  );
+  /**
+   * Bumped only by a claim, never by a cancel — which is the whole reason the
+   * store counts releases instead of watching the queue empty out. See the
+   * drain effect below.
+   */
+  const queuedSendReleaseCount = useQueuedSendStore((store) =>
+    queuedSendRef === null
+      ? 0
+      : (store.releaseCountByThreadKey[scopedThreadKey(queuedSendRef)] ?? 0),
+  );
+  /**
+   * What the drain effect has already reacted to for this thread.
+   *
+   * In the store, per thread, and not in a ref: a ref is reset on a thread
+   * switch and lost on unmount, and both of the things that read this outlive
+   * the composer. The cancel guard moved for the same reason, one bug earlier.
+   */
+  const handledReleaseCount = useQueuedSendStore((store) =>
+    selectHandledReleaseCount(store.handledReleaseByThreadKey, queuedSendRef),
+  );
+  const noteQueueReleaseHandled = useQueuedSendStore((store) => store.noteQueueReleaseHandled);
+  const hasQueuedSends = isSendQueued || stackedQueuedSends.length > 0;
   /**
    * The builtin CH3 would intercept rather than send — mirroring `onSend`'s
    * guard exactly, both halves of it.
@@ -2076,6 +2189,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         models: selectedProviderModels,
         effort: selectedPromptEffort,
       }),
+      prompt,
       images: composerImages,
       modelSelection: selectedModelSelection,
       runtimeMode,
@@ -2104,12 +2218,133 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const toggleQueuedSend = useCallback(() => {
     if (!queuedSendRef) return;
-    if (isSendQueued) {
-      disarmQueuedSend(queuedSendRef);
+    const draftEntry = selectDraftQueuedSend(
+      useQueuedSendStore.getState().entriesByThreadKey,
+      queuedSendRef,
+    );
+    if (draftEntry !== null) {
+      // A cancel has to stick. The drain effect re-arms whatever is in the
+      // composer when the queue empties, and without this flag it would put
+      // back the very message the user just clicked out of the queue.
+      noteDraftQueueCancelled(queuedSendRef);
+      removeQueuedSend(queuedSendRef, draftEntry.id);
       return;
     }
     armQueuedSend(queuedSendRef, buildQueuedSendSnapshot());
-  }, [armQueuedSend, buildQueuedSendSnapshot, disarmQueuedSend, isSendQueued, queuedSendRef]);
+  }, [
+    armQueuedSend,
+    buildQueuedSendSnapshot,
+    noteDraftQueueCancelled,
+    queuedSendRef,
+    removeQueuedSend,
+  ]);
+
+  /**
+   * Take a queued message back into the composer, rather than destroy it.
+   *
+   * The X on a queued row used to delete the message outright, with no undo —
+   * the one control on a row people press to EDIT what they wrote. It now
+   * hands the message back to the composer. If the composer is holding
+   * something of its own, that draft takes the vacated slot in the queue, so
+   * the click costs nothing either way and the queue keeps its order.
+   */
+  const restoreQueuedSendToComposer = useCallback(
+    (entry: QueuedSendEntry) => {
+      if (queuedSendRef === null || composerDraftTarget === null) return;
+      // Read before the write: the swap overwrites this entry's snapshot.
+      const restored = entry.snapshot;
+      if (composerSendState.hasSendableContent) {
+        replaceQueuedSnapshot(queuedSendRef, entry.id, buildQueuedSendSnapshot());
+      } else {
+        removeQueuedSend(queuedSendRef, entry.id);
+      }
+      // The whole draft, not just the prompt — the same clear stacking runs,
+      // and for the same reason. The snapshot that just took this slot carries
+      // the composer's images, terminal and element contexts, preview
+      // annotations and review comments baked into its outgoing text, so
+      // leaving them in the composer would send every one of them twice.
+      promptRef.current = restored.prompt;
+      clearComposerDraftContent(composerDraftTarget);
+      setComposerHighlightedItemId(null);
+      setComposerDraftPrompt(composerDraftTarget, restored.prompt);
+      // Caret at the END, and the box focused. Taking a message back is the
+      // start of editing it: a clear leaves the cursor at 0, so without this
+      // the user lands in front of their own sentence and types into its
+      // opening. Same tail `setPromptFromTraits` runs for the same reason.
+      const restoredCursor = collapseExpandedComposerCursor(
+        restored.prompt,
+        restored.prompt.length,
+      );
+      setComposerCursor(restoredCursor);
+      setComposerTrigger(detectComposerTrigger(restored.prompt, restoredCursor));
+      scheduleComposerFocus();
+      // Images come back too. The row renders them as chips, so handing back
+      // the text alone destroys attachments the user can see — the deletion
+      // this button was changed to stop doing.
+      if (restored.images.length > 0) {
+        addComposerDraftImages(composerDraftTarget, [...restored.images]);
+      }
+    },
+    [
+      addComposerDraftImages,
+      buildQueuedSendSnapshot,
+      clearComposerDraftContent,
+      composerDraftTarget,
+      composerSendState.hasSendableContent,
+      promptRef,
+      queuedSendRef,
+      removeQueuedSend,
+      replaceQueuedSnapshot,
+      scheduleComposerFocus,
+      setComposerDraftPrompt,
+    ],
+  );
+
+  /**
+   * Freezes what is in the composer as one more queued message and hands the
+   * composer back empty for the next one, splitting the box: frozen rows on
+   * top, each with its own spinner, a live editor underneath.
+   *
+   * Repeatable, and deliberately uncapped — the composer gets visibly cramped
+   * as rows pile up, and that is a better deterrent than a number telling
+   * someone "no".
+   */
+  const stackDraftQueuedSend = useCallback(() => {
+    if (!queuedSendRef || !composerSendState.hasSendableContent) return;
+    // `stack` freezes the tail, so the draft has to *be* the tail first. It
+    // already is when the user queued this message before pressing +; it is
+    // not on the second press, which starts from a composer the first press
+    // left unqueued.
+    if (
+      selectDraftQueuedSend(useQueuedSendStore.getState().entriesByThreadKey, queuedSendRef) ===
+      null
+    ) {
+      armQueuedSend(queuedSendRef, buildQueuedSendSnapshot());
+    }
+    stackQueuedSend(queuedSendRef);
+    // The same clear a send runs (ChatView's onSend path). It has to be the
+    // whole draft, not just the prompt: the frozen entry already carries the
+    // terminal and element contexts, preview annotations and review comments
+    // baked into its outgoing text, so leaving them behind would attach them
+    // to the next message as well.
+    promptRef.current = "";
+    clearComposerDraftContent(composerDraftTarget);
+    setComposerHighlightedItemId(null);
+    setComposerCursor(0);
+    setComposerTrigger(null);
+    // Stacking is the opposite of a cancel, and `arm` above has already
+    // retired it: the user is asking for more in the queue, so the drain
+    // effect is welcome to arm what they type next.
+  }, [
+    armQueuedSend,
+    buildQueuedSendSnapshot,
+    clearComposerDraftContent,
+    composerDraftTarget,
+    composerSendState.hasSendableContent,
+    promptRef,
+    queuedSendRef,
+    stackQueuedSend,
+  ]);
 
   useEffect(() => {
     if (!queuedSendRef || !isSendQueued) return;
@@ -2120,26 +2355,114 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // a turn can end — completed, interrupted, or failed — so a queued message
   // is never stranded by a turn that stopped without finishing cleanly.
   useEffect(() => {
-    if (!queuedSendRef || !isSendQueued || phase === "running") return;
+    if (!queuedSendRef || phase === "running") return;
     if (isSendBusy || isConnecting) return;
+    // An entry claimed ahead of this draft has not reached the server yet.
+    // `stackedCount` goes to zero the instant the watcher claims the last
+    // frozen entry, and `phase` is still `ready` until a server event comes
+    // back — so without this the composer fires its own message alongside the
+    // one that just went out, which is the concurrency the gate exists to stop.
+    if (queuedDispatchInFlight) return;
+    if (
+      !canComposerReleaseQueuedDraft({
+        draftIsQueued: isSendQueued,
+        stackedCount: stackedQueuedSends.length,
+      })
+    ) {
+      return;
+    }
     if (!composerSendState.hasSendableContent) {
       // Nothing left to send (the draft was cleared): drop the queue rather
       // than sit armed forever.
-      disarmQueuedSend(queuedSendRef);
+      const draftEntry = selectDraftQueuedSend(
+        useQueuedSendStore.getState().entriesByThreadKey,
+        queuedSendRef,
+      );
+      if (draftEntry !== null) removeQueuedSend(queuedSendRef, draftEntry.id);
       return;
     }
-    // Claim disarms in the same tick, so the watcher can never also send this.
-    if (claimQueuedSend(queuedSendRef) === null) return;
-    submitComposer();
+    // Claim removes the entry in the same tick, so the watcher can never also
+    // send this. It carries the session reading this send is about to
+    // invalidate, so nothing queued behind it goes out until the server has
+    // reported past it.
+    if (claimQueuedSend(queuedSendRef, queuedSendSessionUpdatedAt) === null) return;
+    // Our own release. Booking it here keeps the drain effect from reading a
+    // draft that `submitComposer` has not cleared yet and queueing the message
+    // a second time.
+    noteQueueReleaseHandled(
+      queuedSendRef,
+      useQueuedSendStore.getState().releaseCountByThreadKey[scopedThreadKey(queuedSendRef)] ?? 0,
+    );
+    // The claim marked this thread as dispatching so nothing queued behind it
+    // could go out alongside it. That mark is released by the server moving
+    // past it, NOT here — a send that worked and a `phase` that has not caught
+    // up are indistinguishable, and releasing on the former is what let a
+    // three-deep queue go out as three turns in 175 ms.
+    //
+    // A throw is the one case that must release by hand: `submitComposer` is
+    // synchronous and can throw, and a send that never happened will never
+    // move the session, so the thread would gate forever and silently strand
+    // every message behind this one.
+    try {
+      submitComposer();
+    } catch (error) {
+      useQueuedSendStore.getState().finishQueuedDispatch(queuedSendRef);
+      throw error;
+    }
   }, [
     composerSendState.hasSendableContent,
-    disarmQueuedSend,
     isConnecting,
     isSendBusy,
     isSendQueued,
     phase,
+    queuedDispatchInFlight,
     queuedSendRef,
+    queuedSendSessionUpdatedAt,
+    removeQueuedSend,
+    stackedQueuedSends.length,
     submitComposer,
+  ]);
+
+  /**
+   * When the queue empties, whatever is in the composer takes its place in it.
+   *
+   * Without this a stack built with + strands its own last message: + freezes
+   * the message above and hands back an *unqueued* composer, so the bottom one
+   * would sit there watching everything above it go out. Reacting to
+   * `releaseCountByThreadKey` rather than to "the queue is empty" is what
+   * separates a send from a cancel — a cancel empties the queue too, and
+   * re-arming after one would make the queue button look broken.
+   */
+  useEffect(() => {
+    if (queuedSendRef === null) return;
+    if (handledReleaseCount === null) {
+      // Never seen in this tab: adopt this thread's history rather than
+      // reading its first render as a release.
+      noteQueueReleaseHandled(queuedSendRef, queuedSendReleaseCount);
+      return;
+    }
+    const rearm = shouldRearmDraftAfterQueueDrain({
+      releaseCount: queuedSendReleaseCount,
+      handledReleaseCount,
+      cancelledDraftQueue: draftQueueCancelled,
+      draftIsQueued: isSendQueued,
+      stackedCount: stackedQueuedSends.length,
+      hasSendableContent: composerSendState.hasSendableContent,
+    });
+    noteQueueReleaseHandled(queuedSendRef, queuedSendReleaseCount);
+    if (!rearm) return;
+    armQueuedSend(queuedSendRef, buildQueuedSendSnapshot());
+  }, [
+    armQueuedSend,
+    buildQueuedSendSnapshot,
+    composerSendState.hasSendableContent,
+    draftQueueCancelled,
+    handledReleaseCount,
+    isSendQueued,
+    noteQueueReleaseHandled,
+    queuedSendReleaseCount,
+    queuedSendRef,
+    stackedQueuedSends.length,
   ]);
 
   const expandMobileComposer = useCallback(() => {
@@ -2210,6 +2533,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       key === "Enter" &&
       shouldSubmitComposerOnEnter({ isMobileViewport, shiftKey: event.shiftKey })
     ) {
+      // With a queue already up, Enter joins it rather than jumps it.
+      //
+      // The messages above are waiting on the running turn; sending this one
+      // straight out delivers it BEFORE them, which is the opposite of what a
+      // queue is for — and the two arrive in the same breath, so the agent
+      // reads them as one message. Reaching for + on every line to avoid that
+      // is not a queue either. Enter is what people press.
+      if (
+        shouldStackDraftOnEnter({
+          hasQueuedSends,
+          hasSendableContent: composerSendState.hasSendableContent,
+          sendBlocked:
+            isSendDisabled ||
+            isConnecting ||
+            (activeThreadId !== null &&
+              (pendingImageCompressionsRef.current.get(activeThreadId) ?? 0) > 0),
+        })
+      ) {
+        stackDraftQueuedSend();
+        return true;
+      }
       submitComposer();
       return true;
     }
@@ -2611,51 +2955,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // accepted files reserve their attachment slots (via the pending counter)
     // before the first await, keeping the total under the limit.
     const pendingCount = pendingImageCompressionsRef.current.get(threadId) ?? 0;
-    let reservedCount = composerImagesRef.current.length + pendingCount;
-    const acceptedFiles: File[] = [];
-    let error: string | null = null;
-    for (const file of files) {
-      if (!file.type.startsWith("image/")) {
-        error = `Unsupported file type for '${file.name}'. Please attach image files only.`;
-        continue;
-      }
-      if (reservedCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
-        break;
-      }
-      acceptedFiles.push(file);
-      reservedCount += 1;
-    }
+    const { accepted: acceptedFiles, error } = acceptComposerImageFiles({
+      files,
+      alreadyReserved: composerImagesRef.current.length + pendingCount,
+    });
     setThreadError(threadId, error);
     if (acceptedFiles.length === 0) return;
 
     pendingImageCompressionsRef.current.set(threadId, pendingCount + acceptedFiles.length);
     try {
-      const nextImages: ComposerImageAttachment[] = [];
-      let compressionError: string | null = null;
-      for (const file of acceptedFiles) {
-        // Images over the wire cap are downscaled to fit rather than
-        // refused; files already within it pass through byte-for-byte.
-        const compressed = await compressImageToByteLimit(file, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES);
-        if (!compressed.ok) {
-          compressionError =
-            compressed.reason === "unreadable"
-              ? `'${file.name}' could not be read as an image.`
-              : `'${file.name}' is too large to attach, even after compression.`;
-          continue;
-        }
-        const attachmentFile = compressed.file;
-        const previewUrl = URL.createObjectURL(attachmentFile);
-        nextImages.push({
-          type: "image",
-          id: randomUUID(),
-          name: attachmentFile.name || "image",
-          mimeType: attachmentFile.type,
-          sizeBytes: attachmentFile.size,
-          previewUrl,
-          file: attachmentFile,
-        });
-      }
+      const { images: nextImages, error: compressionError } =
+        await compressComposerImageFiles(acceptedFiles);
       if (nextImages.length === 1 && nextImages[0]) {
         addComposerImage(nextImages[0]);
       } else if (nextImages.length > 1) {
@@ -2720,12 +3030,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
   };
 
-  const onComposerDrop = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!event.dataTransfer.types.includes("Files")) return;
-    event.preventDefault();
-    dragDepthRef.current = 0;
-    setIsDragOverComposer(false);
-    const files = Array.from(event.dataTransfer.files);
+  /**
+   * Files into the composer, from a drop or from the Attach picker — one body
+   * so the button cannot drift from the drag it makes discoverable. False when
+   * the input yielded neither an image nor a path; only the drop can say what
+   * the payload actually was, so it owns that message.
+   */
+  const addComposerFiles = (files: ReadonlyArray<File>, uriList: string): boolean => {
     // Images attach; anything else contributes its PATH to the prompt. Dragging
     // a document in used to be answered with "Unsupported file type … attach
     // image files only", which refused the one thing the drag was asking for.
@@ -2734,6 +3045,59 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (imageFiles.length > 0) {
       void addComposerImages(imageFiles);
     }
+    if (otherFiles.length === 0 && (imageFiles.length > 0 || uriList.length === 0)) {
+      return imageFiles.length > 0;
+    }
+    // Wrapped so an unexpected failure is named rather than swallowed: a
+    // throw inside a React event handler leaves no UI trace at all.
+    try {
+      const { paths, unresolved } = resolveDroppedFilePaths({
+        files: otherFiles,
+        uriList,
+        ...(window.desktopBridge?.getPathForFile
+          ? { getPathForFile: window.desktopBridge.getPathForFile }
+          : {}),
+      });
+      if (paths.length > 0) {
+        const inserted = insertComposerTextAtEnd(composerTextForDroppedPaths(paths), {
+          ensureLeadingBoundary: "space",
+        });
+        // A rejected insert means the composer is mid-approval, connecting, or
+        // waiting on plan input. Saying so beats a drop that appears to work
+        // and leaves the prompt untouched.
+        if (!inserted) {
+          toastManager.add({
+            type: "error",
+            title: "Unable to add to chat",
+            description: "The composer is busy; try again once it is ready.",
+          });
+        }
+      } else if (unresolved.length > 0) {
+        toastManager.add({
+          type: "error",
+          title: "Could not read a path for that file",
+          description:
+            unresolved.length === 1
+              ? `'${unresolved[0]}' carried no filesystem path. Paste its path instead.`
+              : `${unresolved.length} files carried no filesystem path.`,
+        });
+      }
+    } catch (cause) {
+      toastManager.add({
+        type: "error",
+        title: "Could not read that file",
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+    return true;
+  };
+
+  const onComposerDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDragOverComposer(false);
+    const files = Array.from(event.dataTransfer.files);
     // The DataTransfer is neutered the moment this handler returns, so every
     // read of it happens here, synchronously. `text/plain` is consulted too:
     // some sources publish the file URL only there.
@@ -2743,49 +3107,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ]
       .filter((value) => value.length > 0)
       .join("\n");
-    if (otherFiles.length > 0 || (imageFiles.length === 0 && uriList.length > 0)) {
-      // Wrapped so an unexpected failure is named rather than swallowed: a
-      // throw inside a React drop handler leaves no UI trace at all.
-      try {
-        const { paths, unresolved } = resolveDroppedFilePaths({
-          files: otherFiles,
-          uriList,
-          ...(window.desktopBridge?.getPathForFile
-            ? { getPathForFile: window.desktopBridge.getPathForFile }
-            : {}),
-        });
-        if (paths.length > 0) {
-          const inserted = insertComposerTextAtEnd(composerTextForDroppedPaths(paths), {
-            ensureLeadingBoundary: "space",
-          });
-          // A rejected insert means the composer is mid-approval, connecting, or
-          // waiting on plan input. Saying so beats a drop that appears to work
-          // and leaves the prompt untouched.
-          if (!inserted) {
-            toastManager.add({
-              type: "error",
-              title: "Unable to add to chat",
-              description: "The composer is busy; try again once it is ready.",
-            });
-          }
-        } else if (unresolved.length > 0) {
-          toastManager.add({
-            type: "error",
-            title: "Could not read a path for that file",
-            description:
-              unresolved.length === 1
-                ? `'${unresolved[0]}' carried no filesystem path. Paste its path instead.`
-                : `${unresolved.length} dropped files carried no filesystem path.`,
-          });
-        }
-      } catch (cause) {
-        toastManager.add({
-          type: "error",
-          title: "Could not read the dropped file",
-          description: cause instanceof Error ? cause.message : String(cause),
-        });
-      }
-    } else if (imageFiles.length === 0) {
+    if (!addComposerFiles(files, uriList)) {
       // The drag announced files (the guard above) yet exposed neither a File
       // nor a URL. Naming what it DID carry is the only way to tell that apart
       // from a handler that never ran.
@@ -2803,6 +3125,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // this drop just inserted, in the same tick, leaving no error and no clue.
     // composerMentionDrag.ts:35-40 documents this trap; the mention drop path
     // never focuses synchronously for exactly this reason.
+    scheduleComposerFocus();
+  };
+
+  // Stable identity: every other prop this memoized footer takes is stable, so
+  // an inline arrow here would re-render the whole control row on each
+  // keystroke. The ref it closes over never changes.
+  const openComposerAttachPicker = useCallback(() => {
+    composerAttachInputRef.current?.click();
+  }, []);
+
+  const onComposerAttachInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = takeFilesFromInput(event.currentTarget);
+    // Cancelling the picker is not an error and gets no toast.
+    if (files.length === 0) return;
+    // No uri-list: a file input carries File objects and nothing else.
+    addComposerFiles(files, "");
+    // Deferred for the same reason the drop defers — see onComposerDrop.
     scheduleComposerFocus();
   };
 
@@ -3042,9 +3381,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     <form
       ref={composerFormRef}
       onSubmit={submitComposer}
-      className="mx-auto w-full min-w-0 max-w-3xl"
+      className="mx-auto w-full min-w-0 max-w-5xl"
       data-chat-composer-form="true"
     >
+      {/* The Attach button's picker. No `accept`: a document is as welcome as
+          an image here, it just contributes its path instead of attaching. */}
+      <input
+        ref={composerAttachInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        data-chat-composer-attach-input="true"
+        onChange={onComposerAttachInputChange}
+      />
       <div
         className={cn(
           "group rounded-[22px] p-px transition-colors duration-200",
@@ -3174,6 +3525,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       pendingAction={pendingPrimaryAction}
                       isRunning={false}
                       isQueued={false}
+                      canStackQueuedSend={false}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
                       isSendBusy={isSendBusy}
@@ -3190,6 +3542,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
                       onQueue={toggleQueuedSend}
+                      onStackQueuedSend={stackDraftQueuedSend}
                       onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                     />
                   ) : null}
@@ -3287,6 +3640,30 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 />
               </ComposerCommandMenuLayer>
             )}
+
+            {/* Above the live composer, oldest first: the messages already
+                frozen behind the running turn. The draft's own queued entry is
+                not here — this composer *is* that entry.
+
+                Deliberately NOT hidden behind an approval prompt or a pending
+                input the way the annotation and command layers are. Each row's
+                X is the only way to take a message back out of the queue, and
+                an approval is exactly when the user wants it: they have just
+                watched the agent ask to do something they may not want, and
+                the messages stacked behind it are about to fire the moment the
+                turn ends. Hiding the way out at that moment is the one-way
+                door CLAUDE.md forbids. */}
+            {!isComposerCollapsedMobile &&
+              queuedSendRef !== null &&
+              stackedQueuedSends.length > 0 && (
+                <ComposerQueuedSends
+                  entries={stackedQueuedSends}
+                  threadRef={queuedSendRef}
+                  onRestore={restoreQueuedSendToComposer}
+                  skills={selectedProviderStatus?.skills ?? []}
+                  className="mb-3"
+                />
+              )}
 
             {!isComposerCollapsedMobile &&
               !isComposerApprovalState &&
@@ -3459,6 +3836,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     pendingAction={pendingPrimaryAction}
                     isRunning={false}
                     isQueued={false}
+                    canStackQueuedSend={false}
                     showPlanFollowUpPrompt={false}
                     promptHasText={false}
                     isSendBusy={isSendBusy}
@@ -3475,6 +3853,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
                     onQueue={toggleQueuedSend}
+                    onStackQueuedSend={stackDraftQueuedSend}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                   />
                 </div>
@@ -3552,7 +3931,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onOpenChange={(open) => {
                       setIsComposerModelPickerOpen(open);
                     }}
-                    getModelDisabledReason={getModelDisabledReason}
+                    getModelDisabledReason={getComposerModelDisabledReason}
                     onInstanceModelChange={onProviderModelSelect}
                   />
                 )}
@@ -3590,11 +3969,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       onTogglePlanSidebar={togglePlanSidebar}
                       showTerminalToggle={onToggleTerminal !== undefined}
                       terminalOpen={terminalOpen}
+                      terminalBusy={terminalBusy}
                       terminalShortcutLabel={shortcutLabelForCommand(
                         keybindings,
                         "terminal.toggle",
                       )}
                       onToggleTerminal={onToggleTerminal ?? (() => {})}
+                      onAttachFiles={openComposerAttachPicker}
                     />
                   </>
                 )}
@@ -3643,6 +4024,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   isQueued={isSendQueued}
+                  canStackQueuedSend={hasQueuedSends}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
                   isSendBusy={isSendBusy}
@@ -3659,6 +4041,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
                   onQueue={toggleQueuedSend}
+                  onStackQueuedSend={stackDraftQueuedSend}
                   onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                 />
               </div>

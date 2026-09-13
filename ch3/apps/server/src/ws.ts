@@ -11,6 +11,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
@@ -54,8 +55,6 @@ import {
   ProjectWriteFileError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
-  type ServerSelfUpdateError,
-  type ServerSelfUpdateProgressEvent,
   type FilesystemBrowseFailure,
   FilesystemBrowseError,
   AssetWorkspaceContextNotFoundError,
@@ -68,17 +67,27 @@ import {
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
   WS_METHODS,
+  type ServerSelfUpdateError,
+  type ServerSelfUpdateProgressEvent,
   WsRpcGroup,
   SpeechSynthesizeError,
 } from "@ch3tools/contracts";
+import { HostProcessPlatform } from "@ch3tools/shared/hostProcess";
 import { resolveServerBackgroundActivitySettings } from "@ch3tools/shared/backgroundActivitySettings";
-import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
+import {
+  HttpClient,
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerRespondable,
+} from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
+import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import * as ProcessRunner from "./processRunner.ts";
 import {
   projectActivityEvent,
   projectThreadDetailSnapshot,
@@ -93,12 +102,14 @@ import {
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
-import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
+import * as ClaudeCliInstaller from "./provider/ClaudeCliInstaller.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import { resolveTerminalShimPathLine } from "./terminal/claudeAccountShim.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as PtyAdapterLive from "./terminal/PtyAdapterLive.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
@@ -111,13 +122,19 @@ import * as OpenCodeUsageMetrics from "./provider/Drivers/OpenCodeUsageMetrics.t
 import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory.ts";
 import {
   awaitClaudeAccountLogin,
+  cancelClaudeAccountLogin,
   signOutClaudeAccount,
+  claudeUsageBandIdentity,
   listClaudeAccountProfiles,
   type PendingClaudeLogin,
   probeClaudeProfile,
   startClaudeAccountLogin,
 } from "./provider/Drivers/ClaudeAccounts.ts";
-import { resolveClaudeInstanceHomePath } from "./provider/Drivers/claudeInstanceHome.ts";
+import {
+  claudeInstanceHomePathFor,
+  enabledClaudeInstanceCount,
+  resolveClaudeInstanceHomePath,
+} from "./provider/Drivers/claudeInstanceHome.ts";
 import { defaultClaudeConfigDirPath } from "./provider/Drivers/ClaudeHome.ts";
 import { ProviderService } from "./provider/Services/ProviderService.ts";
 import { readProviderSessionIdFromCursor } from "./provider/providerSessionId.ts";
@@ -728,6 +745,10 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 // snapshot instead. Replaying each intervening event costs a shell refetch;
 // past this gap a single O(active-threads) snapshot is cheaper and bounded.
 // Matches the event store's default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
+//
+// Shell only. A thread resume has no gap bound because it does not need one:
+// it reads that thread's own events through a per-stream index instead of the
+// global tail, so its cost is already proportional to what the client missed.
 const SHELL_RESUME_MAX_GAP = 1_000;
 
 // Same bound for the thread-detail stream. A resuming client's cursor goes
@@ -738,8 +759,6 @@ const SHELL_RESUME_MAX_GAP = 1_000;
 // bounded, and — because the read is synchronous on the server's single
 // SQLite connection — it is what keeps a resume from blocking every other
 // client long enough to trip their connection probe.
-const THREAD_RESUME_MAX_GAP = 1_000;
-
 function toAuthAccessStreamEvent(
   change: PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange,
   revision: number,
@@ -803,7 +822,9 @@ const makeWsRpcLayer = (
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
+      const claudeCliInstaller = yield* ClaudeCliInstaller.ClaudeCliInstaller;
       const config = yield* ServerConfig.ServerConfig;
+      const hostPlatform = yield* HostProcessPlatform;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -812,6 +833,12 @@ const makeWsRpcLayer = (
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
+      /**
+       * The last probe outcome this connection reported, so a dialog that is
+       * re-checked every five seconds for a minute leaves one line rather than
+       * thirteen identical ones.
+       */
+      const lastProbeReport = yield* Ref.make<string | null>(null);
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
       yield* Effect.addFinalizer(() =>
         Ref.get(rpcClientIds).pipe(
@@ -1731,49 +1758,54 @@ const makeWsRpcLayer = (
               // catch-up followed by the buffered/ongoing live events. Overlapping
               // events are deduped by sequence on the client.
               //
-              // Both the catch-up and the snapshot path hand off to the same
-              // live tail, so build it once.
-              const afterCatchUp =
-                input.requestCompletionMarker === true
-                  ? Stream.concat(
-                      Stream.fromEffect(
-                        Queue.offer(liveBuffer, { kind: "synchronized" as const }),
-                      ).pipe(Stream.drain),
-                      bufferedLiveStream,
-                    )
-                  : bufferedLiveStream;
-
-              // Replay only while the client is near the head. The per-thread
-              // filter runs after the read, so the cost of a catch-up is the
-              // *global* event volume since the cursor, not this thread's —
-              // bounding it by the gap keeps that from growing without limit
-              // and stops the read chasing a head that agents keep advancing.
-              // Past the bound (or on a cursor ahead of this engine's state,
-              // which is invalid) fall through to the snapshot below: it is
-              // authoritative, so no event can be missed by not replaying it.
-              if (input.afterSequence !== undefined) {
+              // The replay reads THIS thread's events after the cursor, through
+              // `idx_orch_events_stream_sequence`, so it costs what this thread
+              // wrote — not what the environment wrote.
+              //
+              // It used to read the global tail after the cursor and filter it
+              // down afterwards, and the `synchronized` marker that clears the
+              // client's "Syncing messages..." pill was concatenated after that
+              // read. A thread's cursor is the sequence of the last event of
+              // THAT thread while the head advances with every event anywhere,
+              // so the two diverge by design: measured on a real install, 299 of
+              // 302 threads sat over 1,000 events behind the head, the median
+              // 159,437 behind — 208 MB of payloads to decode before the pill
+              // could clear. That is the wake-from-sleep freeze, because wake
+              // replaces the lease and every open subscription re-resumes.
+              //
+              // A cursor AHEAD of this engine's head is not a valid cursor — a
+              // rebuilt or restored store — so it is replaced with a snapshot
+              // rather than resumed from. Anything else resumes and KEEPS the
+              // reader's scrolled-back window, which a snapshot would discard.
+              const headSequence = yield* orchestrationEngine.latestSequence;
+              if (input.afterSequence !== undefined && input.afterSequence <= headSequence) {
                 const afterSequence = input.afterSequence;
-                const headSequence = yield* orchestrationEngine.latestSequence;
-                const replayGap = headSequence - afterSequence;
-                if (replayGap >= 0 && replayGap <= THREAD_RESUME_MAX_GAP) {
-                  const catchUpStream = orchestrationEngine
-                    .readEvents(afterSequence, replayGap)
-                    .pipe(
-                      Stream.filter(isThisThreadDetailEvent),
-                      Stream.map((event) => ({
-                        kind: "event" as const,
-                        event: projectActivityEvent(event),
-                      })),
-                      Stream.mapError(
-                        (cause) =>
-                          new OrchestrationGetSnapshotError({
-                            message: `Failed to replay thread ${input.threadId} events`,
-                            cause,
-                          }),
-                      ),
-                    );
-                  return Stream.concat(catchUpStream, afterCatchUp);
-                }
+                const catchUpStream = orchestrationEngine
+                  .readThreadEvents(input.threadId, afterSequence)
+                  .pipe(
+                    Stream.filter(isThisThreadDetailEvent),
+                    Stream.map((event) => ({
+                      kind: "event" as const,
+                      event: projectActivityEvent(event),
+                    })),
+                    Stream.mapError(
+                      (cause) =>
+                        new OrchestrationGetSnapshotError({
+                          message: `Failed to replay thread ${input.threadId} events`,
+                          cause,
+                        }),
+                    ),
+                  );
+                const afterCatchUp =
+                  input.requestCompletionMarker === true
+                    ? Stream.concat(
+                        Stream.fromEffect(
+                          Queue.offer(liveBuffer, { kind: "synchronized" as const }),
+                        ).pipe(Stream.drain),
+                        bufferedLiveStream,
+                      )
+                    : bufferedLiveStream;
+                return Stream.concat(catchUpStream, afterCatchUp);
               }
 
               const snapshot = yield* projectionSnapshotQuery
@@ -1795,12 +1827,21 @@ const makeWsRpcLayer = (
                 });
               }
 
+              const afterSnapshot =
+                input.requestCompletionMarker === true
+                  ? Stream.concat(
+                      Stream.fromEffect(
+                        Queue.offer(liveBuffer, { kind: "synchronized" as const }),
+                      ).pipe(Stream.drain),
+                      bufferedLiveStream,
+                    )
+                  : bufferedLiveStream;
               return Stream.concat(
                 Stream.make({
                   kind: "snapshot" as const,
                   snapshot: projectThreadDetailSnapshot(snapshot.value),
                 }),
-                afterCatchUp,
+                afterSnapshot,
               );
             }),
             { "rpc.aggregate": "orchestration" },
@@ -2231,18 +2272,41 @@ const makeWsRpcLayer = (
         [WS_METHODS.threadsGetProviderSessionId]: (input) =>
           observeRpcEffect(
             WS_METHODS.threadsGetProviderSessionId,
-            providerSessionDirectory.getBinding(input.threadId).pipe(
-              Effect.map(
-                Option.match({
-                  // No binding yet: the provider has not started a session for
-                  // this thread, so there is genuinely no id to report.
-                  onNone: () => ({ sessionId: null, providerName: null }),
-                  onSome: (binding) => ({
-                    sessionId: readProviderSessionIdFromCursor(binding.resumeCursor ?? null),
-                    providerName: binding.provider,
-                  }),
+            Effect.gen(function* () {
+              const binding = yield* providerSessionDirectory.getBinding(input.threadId);
+              // The account comes from the LIVE session rather than the
+              // binding, because a session outlives the setting that chose its
+              // account: switching accounts repoints the instance, and until
+              // the thread's next turn starts the process answering it is
+              // still signed in as whoever it started as. Reading settings
+              // here would report the account the user just picked and hide
+              // exactly the mismatch this field exists to show.
+              // Advisory, so it fails soft. The caller asked for the session
+              // id — `useCopyConversationId` is the only one — and an adapter
+              // that cannot list its sessions must not take the id down with
+              // it. Without this the copy action fails whole for a field
+              // nothing renders yet.
+              const session = yield* providerService.listSessions().pipe(
+                Effect.map((sessions) =>
+                  sessions.find((candidate) => candidate.threadId === input.threadId),
+                ),
+                Effect.orElseSucceed(() => undefined),
+              );
+              return Option.match(binding, {
+                // No binding yet: the provider has not started a session for
+                // this thread, so there is genuinely no id to report.
+                onNone: () => ({
+                  sessionId: null,
+                  providerName: null,
+                  accountKey: session?.accountKey ?? null,
                 }),
-              ),
+                onSome: (value) => ({
+                  sessionId: readProviderSessionIdFromCursor(value.resumeCursor ?? null),
+                  providerName: value.provider,
+                  accountKey: session?.accountKey ?? null,
+                }),
+              });
+            }).pipe(
               Effect.mapError(
                 (cause) =>
                   new ProviderSessionIdError({
@@ -2616,6 +2680,7 @@ const makeWsRpcLayer = (
               const profiles = yield* listClaudeAccountProfiles({
                 configuredHomePath: input.currentHomePath,
                 ...(input.includeUsage === true ? { includeUsage: true } : {}),
+                ...(input.cachedUsageOnly === true ? { cachedUsageOnly: true } : {}),
               }).pipe(
                 Effect.mapError(
                   (cause) =>
@@ -2626,7 +2691,17 @@ const makeWsRpcLayer = (
                     }),
                 ),
               );
-              return { profiles };
+              // The panel answers "which account does `claude` run as", and for a
+              // shell CH3 did not spawn that answer depends on one line
+              // being on the person's PATH. Sent with the profiles so the
+              // panel can show the line rather than a runbook link.
+              const terminalShimPathLine = yield* resolveTerminalShimPathLine({
+                shimDir: config.claudeShimDir,
+                settingsPath: config.settingsPath,
+                nodePath: process.execPath,
+                platform: hostPlatform,
+              });
+              return { profiles, terminalShimPathLine };
             }),
             {
               "rpc.aggregate": "provider",
@@ -2696,22 +2771,10 @@ const makeWsRpcLayer = (
                 );
               }
               yield* awaitClaudeAccountLogin(pending).pipe(
-                Effect.mapError((cause) =>
-                  // A ClaudeAccountError already carries its own reason and
-                  // detail; re-wrapping it read `.message`, which a tagged
-                  // error class leaves EMPTY — so the timeout's explanation
-                  // arrived as "" and the client showed nothing at all.
-                  Schema.is(ClaudeAccountError)(cause)
-                    ? cause
-                    : new ClaudeAccountError({
-                        reason: "failed",
-                        detail:
-                          cause instanceof Error && cause.message.trim().length > 0
-                            ? cause.message
-                            : "The Claude sign-in did not complete.",
-                        cause,
-                      }),
-                ),
+                // No re-wrapping: every failure from here is already a
+                // ClaudeAccountError with its own reason and detail, and the
+                // wrapper that used to sit here read `.message` — empty on a
+                // tagged error — which is how explanations arrived blank.
                 Effect.ensuring(Effect.sync(() => pendingClaudeLogins.delete(input.loginId))),
               );
               const profile = yield* probeClaudeProfile({
@@ -2733,6 +2796,35 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "provider",
             },
           ),
+        [WS_METHODS.claudeCancelAccountLogin]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.claudeCancelAccountLogin,
+            // Abandoning a sign-in has to reach the CLI session, not just the
+            // screen: left running it holds a subprocess for the whole timeout
+            // and its cleanup can still delete the directory minutes later,
+            // after a second attempt has signed into that same folder.
+            Effect.gen(function* () {
+              const pending = pendingClaudeLogins.get(input.loginId);
+              if (!pending) return { cancelled: false };
+              pendingClaudeLogins.delete(input.loginId);
+              yield* cancelClaudeAccountLogin(pending);
+              return { cancelled: true };
+            }),
+            {
+              "rpc.aggregate": "provider",
+            },
+          ),
+        [WS_METHODS.claudeInstallCli]: () =>
+          observeRpcEffect(
+            WS_METHODS.claudeInstallCli,
+            // Total by construction: the installer answers `ok: false` with a
+            // reason rather than failing, because "it could not be installed"
+            // is something the panel shows, not something it swallows.
+            claudeCliInstaller.ensureInstalled({ reason: "settings panel" }),
+            {
+              "rpc.aggregate": "provider",
+            },
+          ),
         [WS_METHODS.claudeSignOutAccount]: (input) =>
           observeRpcEffect(
             WS_METHODS.claudeSignOutAccount,
@@ -2747,7 +2839,37 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "provider",
             },
           ),
-        [WS_METHODS.claudeCurrentAccountUsage]: () =>
+        [WS_METHODS.claudeForceAccountUsageRead]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.claudeForceAccountUsageRead,
+            // One account, read NOW: the freshness window and the pause the
+            // endpoint asked for are both set aside, because a person looking
+            // at a nine-hour-old number had no way to make anything try. The
+            // throttle that stops this becoming a burst lives in
+            // `fetchClaudeAccountUsage`, keyed by account, and a refused force
+            // comes back as `usageForceRetryAt` on the profile rather than as
+            // an error — the row still has numbers to show either way.
+            probeClaudeProfile({
+              homePath: input.homePath,
+              isCurrent: false,
+              includeUsage: true,
+              forceUsage: true,
+            }).pipe(
+              Effect.map((profile) => ({ profile })),
+              Effect.mapError(
+                (cause) =>
+                  new ClaudeAccountError({
+                    reason: "failed",
+                    detail: "That account's usage could not be read.",
+                    cause,
+                  }),
+              ),
+            ),
+            {
+              "rpc.aggregate": "provider",
+            },
+          ),
+        [WS_METHODS.claudeCurrentAccountUsage]: (input) =>
           observeRpcEffect(
             WS_METHODS.claudeCurrentAccountUsage,
             // ONE probe of the in-use account, resolved from the provider
@@ -2758,28 +2880,46 @@ const makeWsRpcLayer = (
             // per-thread statusline poll. Total: any failure yields "no
             // usage" rather than failing the band.
             Effect.gen(function* () {
-              const homePath = yield* serverSettings.getSettings.pipe(
-                Effect.map((settings) =>
-                  resolveClaudeInstanceHomePath({
-                    providerInstances: settings.providerInstances,
-                    legacyHomePath: settings.providers.claudeAgent.homePath,
-                  }),
-                ),
-                Effect.orElseSucceed(() => ""),
+              const settings = yield* serverSettings.getSettings.pipe(
+                Effect.orElseSucceed(() => undefined),
               );
+              const requestedInstanceId = (input.providerInstanceId ?? "").trim();
+              const instanceHomePath =
+                requestedInstanceId.length > 0
+                  ? claudeInstanceHomePathFor(settings?.providerInstances, requestedInstanceId)
+                  : undefined;
+              const homePath =
+                instanceHomePath ??
+                (settings === undefined
+                  ? ""
+                  : resolveClaudeInstanceHomePath({
+                      providerInstances: settings.providerInstances,
+                      legacyHomePath: settings.providers.claudeAgent.homePath,
+                    }));
+              // The account is a metering key, and a caller that did not say
+              // which instance it means gets it only when there is nothing
+              // to confuse it with: with two Claude instances on two
+              // accounts, a blind answer would meter the wrong one — or not
+              // meter a Claudio account at all.
+              const accountEmailKnowable =
+                instanceHomePath !== undefined ||
+                enabledClaudeInstanceCount(settings?.providerInstances) <= 1;
               const profile = yield* probeClaudeProfile({
-                homePath: homePath.trim().length > 0 ? homePath : yield* defaultClaudeConfigDirPath(),
+                homePath:
+                  homePath.trim().length > 0 ? homePath : yield* defaultClaudeConfigDirPath(),
                 isCurrent: true,
                 includeUsage: true,
               }).pipe(Effect.orElseSucceed(() => undefined));
-              const accountLabel =
-                (profile?.organizationName ?? "").trim().length > 0
-                  ? profile!.organizationName!
-                  : (profile?.email ?? "");
+              const { accountLabel, accountEmail } = claudeUsageBandIdentity({
+                profile,
+                accountEmailKnowable,
+              });
               return {
                 usage: profile?.usage ?? null,
                 ...(accountLabel.length > 0 ? { accountLabel } : {}),
+                ...(accountEmail.length > 0 ? { accountEmail } : {}),
                 ...(profile?.usageRateLimited ? { rateLimited: true } : {}),
+                ...(profile?.usageRetryAt === undefined ? {} : { retryAt: profile.usageRetryAt }),
                 ...(profile?.usageStale ? { stale: true } : {}),
               };
             }),
@@ -3231,8 +3371,17 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           Effect.provide(
             makeWsRpcLayer(session, previewAutomationBroker).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
-              Layer.provide(ProviderMaintenanceRunner.layer),
-              Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
+              // One argument, not two: this chain sits at `pipe`'s twenty-argument
+              // overload limit, and the twenty-first collapses every requirement
+              // in the graph to `any` — which turns a missing service from a
+              // compile error into a crash at boot.
+              Layer.provide(
+                Layer.mergeAll(
+                  ProviderMaintenanceRunner.layer,
+                  ClaudeCliInstaller.layer.pipe(Layer.provide(ProviderMaintenanceRunner.layer)),
+                  Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate),
+                ),
+              ),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

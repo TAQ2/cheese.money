@@ -5,7 +5,7 @@ import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 const repoEnv = loadRepoEnv();
 const shouldLaunchElectronAfterPack = process.env.CH3CODE_DESKTOP_DEV === "1";
 const publicConfigDefine = {
-  __CH3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
+  __CH3_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.CH3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
 };

@@ -430,6 +430,13 @@ export function resolvePromptInjectedEffort(
   return null;
 }
 
+/**
+ * The marker ultrathink prepends. Named once because two places need it: the
+ * one that puts it on, and the one that has to see past it to decide whether
+ * a prompt still says anything.
+ */
+const CLAUDE_ULTRATHINK_PREFIX = "Ultrathink:";
+
 export function applyClaudePromptEffortPrefix(
   text: string,
   effort: string | null | undefined,
@@ -441,8 +448,24 @@ export function applyClaudePromptEffortPrefix(
   if (effort !== "ultrathink") {
     return trimmed;
   }
-  if (trimmed.startsWith("Ultrathink:")) {
+  if (trimmed.startsWith(CLAUDE_ULTRATHINK_PREFIX)) {
     return trimmed;
   }
-  return `Ultrathink:\n${trimmed}`;
+  return `${CLAUDE_ULTRATHINK_PREFIX}\n${trimmed}`;
+}
+
+/**
+ * The prompt with the effort marker taken back off — what the person actually
+ * wrote.
+ *
+ * An outgoing prompt is not the same string as the draft it came from, so
+ * "is there anything here?" cannot be asked of it directly. A message queued
+ * on ultrathink and then edited down to nothing still reads as `Ultrathink:`,
+ * which is not empty and is not a message either.
+ */
+export function stripClaudePromptEffortPrefix(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.startsWith(CLAUDE_ULTRATHINK_PREFIX)
+    ? trimmed.slice(CLAUDE_ULTRATHINK_PREFIX.length).trim()
+    : trimmed;
 }

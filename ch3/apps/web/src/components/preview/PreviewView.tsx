@@ -113,6 +113,9 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
   const canGoForward = desktopOverlay?.canGoForward ?? snapshot?.canGoForward ?? false;
   const refreshDisabled = navStatus._tag === "Idle";
   const isUnreachable = navStatus._tag === "LoadFailed";
+  // `ElectronShell.parseSafeExternalUrl` hands the system browser http(s) only, so on a local
+  // file the button would be dead. Drop the affordance rather than leave one that does nothing.
+  const isLocalFileUrl = url.startsWith("file:");
   const showEmptyState = shouldShowPreviewEmptyState(snapshot);
   const controller = desktopOverlay?.controller ?? "none";
   const loadProgress = useLoadingProgress(loading);
@@ -622,7 +625,7 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
         onForward={handleForward}
         onRefresh={handleRefresh}
         onSubmit={(next) => void handleSubmitUrl(next)}
-        onOpenInBrowser={tabId ? handleOpenInBrowser : undefined}
+        onOpenInBrowser={tabId && !isLocalFileUrl ? handleOpenInBrowser : undefined}
         onCapture={previewBridge && tabId ? handleCapture : undefined}
         captureDisabled={!desktopOverlay || isUnreachable}
         recording={recordingRuntimeTabId !== null}

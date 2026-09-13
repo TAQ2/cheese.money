@@ -27,6 +27,7 @@ import { useEnvironments } from "../../state/environments";
 import { useKnownTerminalSessions } from "../../state/terminalSessions";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useCopyConversationId, useCopyThreadId } from "../../hooks/useCopyConversationId";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import type { SidebarThreadSummary } from "../../types";
 import { useThreadActions } from "../../hooks/useThreadActions";
@@ -42,7 +43,8 @@ function isCommandFailure(result: unknown): boolean {
   );
 }
 import { resolveSidebarV2Status } from "../Sidebar.logic";
-import { resolveSnoozePresets, type SnoozePreset } from "../Sidebar.snooze";
+import { resolveSnoozePresets } from "../Sidebar.snooze";
+import { SnoozeCustomDialog } from "../SnoozeCustomDialog";
 import {
   KANBAN_ALL_FILTERS,
   adjacentKanbanColumn,
@@ -57,6 +59,10 @@ import {
   type KanbanFilters,
 } from "./Kanban.logic";
 import { KanbanCard } from "./KanbanCard";
+import { KanbanNewThreadDialog } from "./KanbanNewThreadDialog";
+import { openCommandPalette } from "../../commandPaletteBus";
+import { onKanbanNewThread } from "../../kanbanNewThreadBus";
+import type { ScopedProjectRef } from "@ch3tools/contracts";
 import {
   KANBAN_CUSTOM_ACCENTS,
   KANBAN_TYPE_COLOR_CHOICES,
@@ -73,6 +79,13 @@ import {
 /** Drag payload type for column reordering — distinct from the cards' plain
     text payload so a column drop can never be misread as a card move. */
 const KANBAN_COLUMN_DRAG_TYPE = "application/x-ch3-kanban-column";
+
+/** What a card needs about its project: a name, an icon source, an identity. */
+type ProjectMeta = {
+  readonly title: string;
+  readonly cwd: string;
+  readonly canonicalKey: string | null;
+};
 
 /** Coarse clock for column derivation — snooze wakes and settle windows only
     need minute resolution, and a coarse tick keeps the board memo stable. */
@@ -129,6 +142,9 @@ export function KanbanBoardView() {
   const settings = useClientSettings();
   const updateSettings = useUpdateClientSettings();
   const updateKanban = useAtomCommand(threadEnvironment.updateKanban);
+  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata);
+  const copyConversationId = useCopyConversationId();
+  const copyThreadId = useCopyThreadId();
   const { settleThread, unsettleThread, snoozeThread, unsnoozeThread } = useThreadActions();
   const { environments } = useEnvironments();
   const now = useMinuteNow();
@@ -164,6 +180,11 @@ export function KanbanBoardView() {
 
   const [filters, setFilters] = useState<KanbanFilters>({ cardType: "all", projectKey: "all" });
   const [metricsOpen, setMetricsOpen] = useState(false);
+  // A project picked for a new thread — by the header button, the sidebar's
+  // New thread, or the shortcut, all of which go through the palette's
+  // project picker and end on the bus. Set opens the dialog; null closes it.
+  const [newThreadProjectRef, setNewThreadProjectRef] = useState<ScopedProjectRef | null>(null);
+  useEffect(() => onKanbanNewThread((detail) => setNewThreadProjectRef(detail.projectRef)), []);
   const [notice, setNotice] = useState<{
     readonly text: string;
     readonly columnId: KanbanColumnId | null;
@@ -176,6 +197,12 @@ export function KanbanBoardView() {
   );
   const [dragOverColumn, setDragOverColumn] = useState<KanbanColumnId | null>(null);
   const [snoozeChoice, setSnoozeChoice] = useState<{
+    readonly thread: SidebarThreadSummary;
+    readonly from: KanbanColumnId;
+  } | null>(null);
+  // The exact-time picker replaces the preset overlay rather than stacking
+  // on it: the card is already chosen by the time it opens.
+  const [customSnoozeChoice, setCustomSnoozeChoice] = useState<{
     readonly thread: SidebarThreadSummary;
     readonly from: KanbanColumnId;
   } | null>(null);
@@ -339,12 +366,13 @@ export function KanbanBoardView() {
   // Title + workspace root per project: the card renders a favicon from the
   // root (folder-icon fallback) plus the name, so a card's project is always
   // legible instead of a tooltip-only dot.
-  const projectMeta = useMemo(() => {
-    const meta = new Map<string, { readonly title: string; readonly cwd: string }>();
+  const projectMeta = useMemo<ReadonlyMap<string, ProjectMeta>>(() => {
+    const meta = new Map<string, ProjectMeta>();
     for (const project of projects) {
       meta.set(`${project.environmentId}:${project.id}`, {
         title: project.title,
         cwd: project.workspaceRoot,
+        canonicalKey: project.repositoryIdentity?.canonicalKey ?? null,
       });
     }
     return meta;
@@ -583,7 +611,13 @@ export function KanbanBoardView() {
     });
     setNewColumnLabel("");
     setAddingColumn(false);
-  }, [columns, newColumnLabel, settings.kanbanColumnOrder, settings.kanbanCustomColumns, updateSettings]);
+  }, [
+    columns,
+    newColumnLabel,
+    settings.kanbanColumnOrder,
+    settings.kanbanCustomColumns,
+    updateSettings,
+  ]);
 
   const deleteColumn = useCallback(
     (columnId: KanbanColumnId) => {
@@ -652,8 +686,11 @@ export function KanbanBoardView() {
     (thread: SidebarThreadSummary) => {
       setCardMenu(null);
       // The classification reactor refuses to read a running turn — surface
-      // that up front instead of spinning until the timeout.
-      if (resolveSidebarV2Status(thread) === "working") {
+      // that up front instead of spinning until the timeout. "delegating" is
+      // also a running turn (the agent is driving sub-agents), so it is
+      // refused here too rather than left to time out.
+      const runningStatus = resolveSidebarV2Status(thread);
+      if (runningStatus === "working" || runningStatus === "delegating") {
         setToast({
           text: "Can't re-categorize while the agent is working — try again when the turn finishes.",
           tone: "error",
@@ -748,7 +785,7 @@ export function KanbanBoardView() {
   }, [threads, reclassifying, reclassifyTick, boardSettings, columns]);
 
   const confirmSnooze = useCallback(
-    (choice: { thread: SidebarThreadSummary; from: KanbanColumnId }, preset: SnoozePreset) => {
+    (choice: { thread: SidebarThreadSummary; from: KanbanColumnId }, snoozedUntil: string) => {
       setSnoozeChoice(null);
       const ref = scopeThreadRef(choice.thread.environmentId, choice.thread.id);
       // Snoozing out of Settled must also unsettle, or the card silently
@@ -756,7 +793,7 @@ export function KanbanBoardView() {
       if (choice.from === "settled") {
         void unsettleThread(ref);
       }
-      void snoozeThread(ref, preset.snoozedUntil).then((result) => {
+      void snoozeThread(ref, snoozedUntil).then((result) => {
         if (isCommandFailure(result)) {
           showNotice("Couldn't snooze — the server refused.", "snoozed");
         }
@@ -779,6 +816,15 @@ export function KanbanBoardView() {
       ))}
       <header className="flex flex-none flex-wrap items-center gap-3 border-b border-border px-4 py-2.5">
         <h1 className="text-sm font-semibold">Kanban</h1>
+        <button
+          type="button"
+          className="rounded-md border border-border bg-transparent px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          title="Start a new thread on the board — pick the project, then the lane, priority and first prompt"
+          data-testid="kanban-new-thread"
+          onClick={() => openCommandPalette({ open: "new-thread-in", newThreadTarget: "kanban" })}
+        >
+          New thread
+        </button>
         <select
           aria-label="Filter by card type"
           className="rounded-md border border-border bg-transparent px-2 py-1 text-xs text-muted-foreground"
@@ -866,88 +912,88 @@ export function KanbanBoardView() {
         ) : null}
         {editMode ? (
           <div className="relative">
-          <button
-            type="button"
-            data-testid="kanban-add-type"
-            title="Create and manage card types"
-            className={cn(
-              "inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground",
-              typeManagerOpen && "bg-accent text-foreground",
-            )}
-            onClick={() => setTypeManagerOpen((open) => !open)}
-          >
-            <PlusIcon className="size-3.5" />
-            Type
-          </button>
-          {typeManagerOpen ? (
-            <div className="absolute top-full right-0 z-40 mt-1 w-64 rounded-lg border border-border bg-popover p-2 shadow-2xl">
-              <form
-                className="flex flex-col gap-2"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  addCardType();
-                }}
-              >
-                <input
-                  aria-label="New card type name"
-                  placeholder="Type name…"
-                  className="rounded-md border border-border bg-transparent px-2 py-1 text-xs outline-none focus:border-primary"
-                  value={newTypeLabel}
-                  onChange={(event) => setNewTypeLabel(event.target.value)}
-                />
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {availableTypeColors.map((color) => (
-                    <button
-                      key={color}
-                      type="button"
-                      aria-label={`Use color ${color}`}
-                      className={cn(
-                        "size-5 rounded-full border-2",
-                        (newTypeGlow ?? availableTypeColors[0]) === color
-                          ? "border-foreground"
-                          : "border-transparent",
-                      )}
-                      style={{ backgroundColor: color }}
-                      onClick={() => setNewTypeGlow(color)}
-                    />
-                  ))}
-                  {availableTypeColors.length === 0 ? (
-                    <span className="text-[10px] text-muted-foreground">
-                      All colors are in use — delete a type first.
-                    </span>
-                  ) : null}
-                </div>
-                <button
-                  type="submit"
-                  disabled={newTypeLabel.trim().length === 0 || availableTypeColors.length === 0}
-                  className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-40"
+            <button
+              type="button"
+              data-testid="kanban-add-type"
+              title="Create and manage card types"
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground",
+                typeManagerOpen && "bg-accent text-foreground",
+              )}
+              onClick={() => setTypeManagerOpen((open) => !open)}
+            >
+              <PlusIcon className="size-3.5" />
+              Type
+            </button>
+            {typeManagerOpen ? (
+              <div className="absolute top-full right-0 z-40 mt-1 w-64 rounded-lg border border-border bg-popover p-2 shadow-2xl">
+                <form
+                  className="flex flex-col gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    addCardType();
+                  }}
                 >
-                  Create type
-                </button>
-              </form>
-              {settings.kanbanCustomCardTypes.length > 0 ? (
-                <div className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
-                  {settings.kanbanCustomCardTypes.map((entry) => (
-                    <div key={entry.id} className="flex items-center gap-1.5 text-xs">
-                      <span
-                        className="size-2.5 rounded-full"
-                        style={{ backgroundColor: entry.glow }}
-                      />
-                      <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                  <input
+                    aria-label="New card type name"
+                    placeholder="Type name…"
+                    className="rounded-md border border-border bg-transparent px-2 py-1 text-xs outline-none focus:border-primary"
+                    value={newTypeLabel}
+                    onChange={(event) => setNewTypeLabel(event.target.value)}
+                  />
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {availableTypeColors.map((color) => (
                       <button
+                        key={color}
                         type="button"
-                        aria-label={`Delete type ${entry.label}`}
-                        className="rounded p-0.5 text-muted-foreground/60 hover:bg-accent hover:text-destructive-foreground"
-                        onClick={() => deleteCardType(entry.id)}
-                      >
-                        <Trash2Icon className="size-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+                        aria-label={`Use color ${color}`}
+                        className={cn(
+                          "size-5 rounded-full border-2",
+                          (newTypeGlow ?? availableTypeColors[0]) === color
+                            ? "border-foreground"
+                            : "border-transparent",
+                        )}
+                        style={{ backgroundColor: color }}
+                        onClick={() => setNewTypeGlow(color)}
+                      />
+                    ))}
+                    {availableTypeColors.length === 0 ? (
+                      <span className="text-[10px] text-muted-foreground">
+                        All colors are in use — delete a type first.
+                      </span>
+                    ) : null}
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={newTypeLabel.trim().length === 0 || availableTypeColors.length === 0}
+                    className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-40"
+                  >
+                    Create type
+                  </button>
+                </form>
+                {settings.kanbanCustomCardTypes.length > 0 ? (
+                  <div className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
+                    {settings.kanbanCustomCardTypes.map((entry) => (
+                      <div key={entry.id} className="flex items-center gap-1.5 text-xs">
+                        <span
+                          className="size-2.5 rounded-full"
+                          style={{ backgroundColor: entry.glow }}
+                        />
+                        <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                        <button
+                          type="button"
+                          aria-label={`Delete type ${entry.label}`}
+                          className="rounded p-0.5 text-muted-foreground/60 hover:bg-accent hover:text-destructive-foreground"
+                          onClick={() => deleteCardType(entry.id)}
+                        >
+                          <Trash2Icon className="size-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
         <button
@@ -985,6 +1031,14 @@ export function KanbanBoardView() {
           {editMode ? "Done" : "Edit"}
         </button>
       </header>
+      {newThreadProjectRef !== null ? (
+        <KanbanNewThreadDialog
+          projectRef={newThreadProjectRef}
+          columns={columns}
+          cardTypes={cardTypes}
+          onClose={() => setNewThreadProjectRef(null)}
+        />
+      ) : null}
 
       <div className="relative flex min-h-0 flex-1">
         {cardMenu ? (
@@ -1016,10 +1070,66 @@ export function KanbanBoardView() {
                 onClick={() => {
                   const thread = cardMenu.thread;
                   setCardMenu(null);
+                  void updateThreadMetadata({
+                    environmentId: thread.environmentId,
+                    input: { threadId: thread.id, regenerateTitle: true },
+                  });
+                }}
+              >
+                Regenerate title
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                onClick={() => {
+                  const thread = cardMenu.thread;
+                  setCardMenu(null);
                   openThread(thread);
                 }}
               >
                 Open conversation
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                onClick={() => {
+                  const thread = cardMenu.thread;
+                  setCardMenu(null);
+                  if (thread.snoozedUntil != null) {
+                    void unsnoozeThread(scopeThreadRef(thread.environmentId, thread.id));
+                    return;
+                  }
+                  // Same chooser the drag-into-Snoozed path opens, so the wake
+                  // time stays the user's call and Settled still unsettles.
+                  setSnoozeChoice({ thread, from: resolveKanbanColumn(thread, boardSettings) });
+                }}
+              >
+                {cardMenu.thread.snoozedUntil != null ? "Wake thread" : "Snooze"}
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                onClick={() => {
+                  const thread = cardMenu.thread;
+                  setCardMenu(null);
+                  copyThreadId(thread.id);
+                }}
+              >
+                Copy Thread ID
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+                onClick={() => {
+                  const thread = cardMenu.thread;
+                  setCardMenu(null);
+                  void copyConversationId({
+                    environmentId: thread.environmentId,
+                    threadId: thread.id,
+                  });
+                }}
+              >
+                Copy Conversation ID
               </button>
             </div>
           </>
@@ -1067,11 +1177,21 @@ export function KanbanBoardView() {
                   key={preset.id}
                   type="button"
                   className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"
-                  onClick={() => confirmSnooze(snoozeChoice, preset)}
+                  onClick={() => confirmSnooze(snoozeChoice, preset.snoozedUntil)}
                 >
                   {preset.label} · {preset.whenLabel}
                 </button>
               ))}
+              <button
+                type="button"
+                className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"
+                onClick={() => {
+                  setCustomSnoozeChoice(snoozeChoice);
+                  setSnoozeChoice(null);
+                }}
+              >
+                Pick date and time…
+              </button>
               <button
                 type="button"
                 className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
@@ -1082,6 +1202,17 @@ export function KanbanBoardView() {
             </div>
           </div>
         ) : null}
+        <SnoozeCustomDialog
+          open={customSnoozeChoice !== null}
+          onOpenChange={(open) => {
+            if (!open) setCustomSnoozeChoice(null);
+          }}
+          subject={customSnoozeChoice?.thread.title ?? ""}
+          onConfirm={(snoozedUntil) => {
+            if (customSnoozeChoice !== null) confirmSnooze(customSnoozeChoice, snoozedUntil);
+            setCustomSnoozeChoice(null);
+          }}
+        />
 
         {/* One scrollport for the whole board: both bands move together, so a
             column's two halves can never drift out of alignment. */}
@@ -1211,7 +1342,7 @@ function KanbanColumn({
   /** Present only for user-created columns — built-ins cannot be deleted. */
   readonly onDeleteColumn: ((columnId: KanbanColumnId) => void) | null;
   readonly onCardContextMenu: (thread: SidebarThreadSummary, x: number, y: number) => void;
-  readonly projectMeta: ReadonlyMap<string, { readonly title: string; readonly cwd: string }>;
+  readonly projectMeta: ReadonlyMap<string, ProjectMeta>;
   readonly onDragEnter: () => void;
   readonly onDragLeaveColumn: () => void;
   readonly onDrop: (event: DragEvent, target: KanbanColumnId) => void;
@@ -1231,20 +1362,20 @@ function KanbanColumn({
   const cardProps = (thread: SidebarThreadSummary, lane: "user" | "agent" | "waiting") => {
     const meta = projectMeta.get(`${thread.environmentId}:${thread.projectId}`);
     return {
-    thread,
-    lane,
-    compact: isDerived,
-    cardTypes,
-    projectTitle: meta?.title ?? "Unknown project",
-    projectCwd: meta?.cwd ?? "",
-    canMoveLeft: adjacentKanbanColumn(cell.columnId, -1, columns) !== null,
-    canMoveRight: adjacentKanbanColumn(cell.columnId, 1, columns) !== null,
-    onContextMenu: onCardContextMenu,
-    onOpen,
-    onMove,
-    onSetType,
-    onSetDeadline,
-    onTogglePin,
+      thread,
+      lane,
+      compact: isDerived,
+      cardTypes,
+      projectTitle: meta?.title ?? "Unknown project",
+      projectCwd: meta?.cwd ?? "",
+      canMoveLeft: adjacentKanbanColumn(cell.columnId, -1, columns) !== null,
+      canMoveRight: adjacentKanbanColumn(cell.columnId, 1, columns) !== null,
+      onContextMenu: onCardContextMenu,
+      onOpen,
+      onMove,
+      onSetType,
+      onSetDeadline,
+      onTogglePin,
     };
   };
 

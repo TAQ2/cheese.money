@@ -130,3 +130,44 @@ describe("ProviderSettingsForm helpers", () => {
     expect(readProviderConfigBoolean({}, "experimental", true)).toBe(true);
   });
 });
+
+describe("the Claude session-tool switches, as the form will really render them", () => {
+  // Pinned against the SHIPPED schema, not a fixture. These three arrived
+  // annotated with only a title and description, and the renderer defaults
+  // `control` to "text" — no boolean had ever reached it before, so they
+  // would have shipped as three text boxes nobody could switch on, and typing
+  // "true" would have written a string that fails the schema and takes the
+  // whole Claude instance to "unavailable".
+  const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+  const switches = ["artifactToolEnabled", "chromeIntegrationEnabled", "claudeAiConnectorsEnabled"];
+
+  it("renders each one as a switch, not a text box", () => {
+    expect(claude).toBeDefined();
+    const fields = deriveProviderSettingsFields(claude!);
+    for (const key of switches) {
+      const field = fields.find((candidate) => candidate.key === key);
+      expect(field, `${key} is missing from the form`).toBeDefined();
+      expect(field!.control, `${key} renders as ${field!.control}`).toBe("switch");
+    }
+  });
+
+  it("ships every one of them off, and says so to the renderer", () => {
+    // `defaultBooleanValue` is what an unset config reads as, and what
+    // `clearWhenEmpty` compares against — off has to be the default on both
+    // sides or the switch lies about its own state.
+    const fields = deriveProviderSettingsFields(claude!);
+    for (const key of switches) {
+      const field = fields.find((candidate) => candidate.key === key)!;
+      expect(field.defaultBooleanValue, `${key} default`).toBe(false);
+      expect(readProviderConfigBoolean({}, key, field.defaultBooleanValue ?? false)).toBe(false);
+    }
+  });
+
+  it("writes a real boolean when switched on, never the string the schema rejects", () => {
+    const fields = deriveProviderSettingsFields(claude!);
+    const field = fields.find((candidate) => candidate.key === "artifactToolEnabled")!;
+    const next = nextProviderConfigWithFieldValue({}, field, true);
+    expect(next?.["artifactToolEnabled"]).toBe(true);
+    expect(typeof next?.["artifactToolEnabled"]).toBe("boolean");
+  });
+});

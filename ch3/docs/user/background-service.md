@@ -3,30 +3,34 @@
 On a Linux host, CH3 can run as a background service for your user. It starts when the machine
 boots and keeps running after you log out.
 
+The `ch3` command here is the server's own CLI, run from a checkout (`node apps/server/src/bin.ts`)
+or from the installed app's bundle. There is no npm package to fetch it from; CH3 ships the
+desktop app only, and this Linux service is inherited from upstream and not something CH3 runs.
+
 ## Manage the Service
 
 Install it with the latest CH3 release:
 
 ```sh
-npx ch3@latest service install
+ch3 service install
 ```
 
 Check whether it is installed:
 
 ```sh
-npx ch3@latest service status
+ch3 service status
 ```
 
 Update or repair it:
 
 ```sh
-npx ch3@latest service update
+ch3 service update
 ```
 
 Stop it and remove it from startup:
 
 ```sh
-npx ch3@latest service uninstall
+ch3 service uninstall
 ```
 
 Updating restarts CH3 briefly. Let active agent work and terminal commands finish first.

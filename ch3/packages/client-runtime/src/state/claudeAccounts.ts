@@ -38,9 +38,36 @@ export function createClaudeAccountEnvironmentAtoms<R, E>(
       label: "environment-data:claude:await-account-login",
       tag: WS_METHODS.claudeAwaitAccountLogin,
     }),
+    cancelLogin: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:claude:cancel-account-login",
+      tag: WS_METHODS.claudeCancelAccountLogin,
+    }),
     signOut: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:claude:sign-out-account",
       tag: WS_METHODS.claudeSignOutAccount,
+    }),
+    /**
+     * Read ONE account's usage now, past its freshness window and past the
+     * pause the endpoint asked for.
+     *
+     * A command, never a query: nothing may put this on a timer. Automatic
+     * retries inside a rate-limit penalty are what left an account's reading
+     * nine hours old in the first place, so the only thing allowed to spend
+     * one of these is a person pressing a button.
+     */
+    forceUsageRead: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:claude:force-account-usage-read",
+      tag: WS_METHODS.claudeForceAccountUsageRead,
+    }),
+    /**
+     * Install the Claude Code CLI on the machine this environment runs on.
+     *
+     * A command rather than a query: it changes the machine, it can take
+     * minutes, and nothing should re-run it on a refresh.
+     */
+    installCli: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:claude:install-cli",
+      tag: WS_METHODS.claudeInstallCli,
     }),
     // The in-use account's usage, for the native band under the composer.
     // A query (auto-refreshing) rather than a command, keyed only by

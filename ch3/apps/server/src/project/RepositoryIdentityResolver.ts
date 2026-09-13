@@ -157,12 +157,40 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
     },
   );
 
+  /**
+   * The repository root a directory belongs to, remembered per directory.
+   *
+   * The cache below is keyed by that root on purpose: two worktrees of one
+   * repository share an identity, and only git can say they do. But deriving
+   * the key ran `git rev-parse --show-toplevel` on every single call, so a
+   * cache hit still cost a subprocess — and the shell snapshot resolves an
+   * identity per project, on every reconnect. Measured at 713 calls an hour on
+   * an idle machine, every one of them a spawn.
+   *
+   * Same lifetime as the identity it leads to: a directory changing which
+   * repository it belongs to means a checkout was moved or re-created, and
+   * both of those are minute-scale events.
+   */
+  const cacheKeyCache = yield* Cache.makeWith<string, string>(
+    (cwd) =>
+      resolveRepositoryIdentityCacheKey(cwd).pipe(
+        Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+      ),
+    {
+      capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
+      timeToLive: Exit.match({
+        // A directory that is not in a repository resolves to itself, and that
+        // answer is as cheap to hold as any other.
+        onSuccess: () => options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL,
+        onFailure: () => Duration.zero,
+      }),
+    },
+  );
+
   const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fn(
     "RepositoryIdentityResolver.resolve",
   )(function* (cwd) {
-    const cacheKey = yield* resolveRepositoryIdentityCacheKey(cwd).pipe(
-      Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
-    );
+    const cacheKey = yield* Cache.get(cacheKeyCache, cwd);
     return yield* Cache.get(repositoryIdentityCache, cacheKey);
   });
 

@@ -24,6 +24,7 @@ import {
   LinuxIconResizeError,
   MacPasskeySigningConfigurationResolutionError,
   MissingMacPasskeyProvisioningProfileError,
+  renderMacHardenedRuntimeEntitlements,
   renderMacPasskeyEntitlements,
   resolveClerkPasskeyNativeArtifacts,
   resolveMacPasskeySigningConfiguration,
@@ -34,8 +35,9 @@ import {
   resolveDesktopProductName,
   resolveDesktopUpdateChannel,
   resolveDesktopWebAssetBrand,
-  resolveResourceMonitorRustTargets,
-  resourceMonitorExecutableName,
+  resolveRustTargets,
+  nativeExecutableName,
+  STAGED_NATIVE_BINARIES,
   resolveGitHubPublishConfig,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
@@ -91,7 +93,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "CH3 (Alpha)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "CH3");
     assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "CH3 (Nightly)");
   });
 
@@ -526,6 +528,75 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
+  it("renders plain hardened-runtime entitlements without profile-bound keys", () => {
+    const entitlements = renderMacHardenedRuntimeEntitlements();
+
+    assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
+    assert.include(
+      entitlements,
+      "<key>com.apple.security.cs.allow-unsigned-executable-memory</key>",
+    );
+    assert.include(entitlements, "<key>com.apple.security.cs.disable-library-validation</key>");
+    assert.notInclude(entitlements, "com.apple.application-identifier");
+    assert.notInclude(entitlements, "com.apple.developer.associated-domains");
+  });
+
+  it.effect("notarizes signed macOS builds and omits the profile when none is configured", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
+        entitlementsPath: "/tmp/entitlements.mac.plist",
+        provisioningProfilePath: undefined,
+      });
+
+      const mac = config.mac as Record<string, unknown>;
+      assert.equal(mac.notarize, true);
+      assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
+      assert.notProperty(mac, "provisioningProfile");
+      assert.notProperty(mac, "identity");
+      assert.notProperty(mac, "hardenedRuntime");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("keeps the dmg out of the macOS update manifest", () =>
+    Effect.gen(function* () {
+      const dmgConfig = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
+        entitlementsPath: "/tmp/entitlements.mac.plist",
+        provisioningProfilePath: undefined,
+      });
+      const zipConfig = yield* createBuildConfig(
+        "mac",
+        "zip",
+        "1.2.3",
+        true,
+        false,
+        undefined,
+        undefined,
+      );
+
+      // The updater reads the zip; a dmg entry would carry a checksum taken
+      // before the release job staples the ticket to it.
+      assert.deepStrictEqual(dmgConfig.dmg, { writeUpdateInfo: false });
+      assert.notProperty(zipConfig, "dmg");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("does not notarize unsigned macOS builds", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      const mac = config.mac as Record<string, unknown>;
+      assert.notProperty(mac, "notarize");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
   it.effect("keeps executable resource editing enabled for unsigned Windows builds", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig(
@@ -545,25 +616,38 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
-  it("stages the resource monitor as an external executable resource", () => {
+  it("stages every native binary as an external executable resource", () => {
     assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES, [
       {
         from: "apps/desktop/prod-resources/resource-monitor",
         to: "resource-monitor",
       },
     ]);
-    assert.deepStrictEqual(resolveResourceMonitorRustTargets("mac", "universal"), [
+    assert.deepStrictEqual(resolveRustTargets("mac", "universal"), [
       "aarch64-apple-darwin",
       "x86_64-apple-darwin",
     ]);
-    assert.deepStrictEqual(resolveResourceMonitorRustTargets("linux", "x64"), [
-      "x86_64-unknown-linux-gnu",
-    ]);
-    assert.deepStrictEqual(resolveResourceMonitorRustTargets("win", "arm64"), [
-      "aarch64-pc-windows-msvc",
-    ]);
-    assert.equal(resourceMonitorExecutableName("mac"), "ch3-resource-monitor");
-    assert.equal(resourceMonitorExecutableName("win"), "ch3-resource-monitor.exe");
+    assert.deepStrictEqual(resolveRustTargets("linux", "x64"), ["x86_64-unknown-linux-gnu"]);
+    assert.deepStrictEqual(resolveRustTargets("win", "arm64"), ["aarch64-pc-windows-msvc"]);
+    assert.equal(nativeExecutableName("ch3-resource-monitor", "mac"), "ch3-resource-monitor");
+    assert.equal(nativeExecutableName("ch3-resource-monitor", "win"), "ch3-resource-monitor.exe");
+  });
+
+  // The staged directory names are the contract between this script's
+  // extra-resources mapping and the server's lookup of the binaries at
+  // runtime. They are asserted rather than assumed because nothing else fails
+  // when they drift: the app builds, ships, and cannot find the proxy.
+  it("keeps every staged native binary reachable through extra resources", () => {
+    for (const nativeBinary of STAGED_NATIVE_BINARIES) {
+      const mapping = DESKTOP_EXTRA_RESOURCES.find(
+        (entry) => entry.to === nativeBinary.destinationName,
+      );
+      assert.isDefined(
+        mapping,
+        `${nativeBinary.destinationName} is staged but never copied into the app`,
+      );
+      assert.equal(mapping?.from, `apps/desktop/prod-resources/${nativeBinary.destinationName}`);
+    }
   });
   it("promotes target fff binaries to direct staged dependencies", () => {
     assert.deepStrictEqual(resolveFffNativeDependencies("mac", "arm64", "0.9.4"), {

@@ -3,6 +3,7 @@ import * as Arr from "effect/Array";
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
+  MessageId,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
@@ -12,6 +13,8 @@ import {
   type ThreadId,
   type TurnId,
 } from "@ch3tools/contracts";
+
+import { getProviderDriverKindLabel } from "./providerModels";
 
 import type {
   ChatMessage,
@@ -31,23 +34,19 @@ export const PROVIDER_OPTIONS: Array<{
   /** Shown on the model picker sidebar when relevant */
   pickerSidebarBadge?: "new" | "soon";
 }> = [
-  { value: ProviderDriverKind.make("codex"), label: "Codex", available: true },
-  { value: ProviderDriverKind.make("claudeAgent"), label: "Claude", available: true },
+  {
+    value: ProviderDriverKind.make("codex"),
+    label: getProviderDriverKindLabel(ProviderDriverKind.make("codex")),
+    available: true,
+  },
+  {
+    value: ProviderDriverKind.make("claudeAgent"),
+    label: getProviderDriverKindLabel(ProviderDriverKind.make("claudeAgent")),
+    available: true,
+  },
   {
     value: ProviderDriverKind.make("opencode"),
-    label: "OpenCode",
-    available: true,
-    pickerSidebarBadge: "new",
-  },
-  {
-    value: ProviderDriverKind.make("cursor"),
-    label: "Cursor",
-    available: true,
-    pickerSidebarBadge: "new",
-  },
-  {
-    value: ProviderDriverKind.make("grok"),
-    label: "Grok",
+    label: getProviderDriverKindLabel(ProviderDriverKind.make("opencode")),
     available: true,
     pickerSidebarBadge: "new",
   },
@@ -78,6 +77,8 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
+  /** Set on a `provider.turn.start.failed` row: the message a Retry button resends. */
+  retryMessageId?: MessageId;
   /** Stable id across a tool call's lifecycle events, when the runtime provides one. */
   toolCallId?: string;
   /**
@@ -637,6 +638,16 @@ export function hasActionableProposedPlan(
   return proposedPlan !== null && proposedPlan.implementedAt === null;
 }
 
+function isShellPidOnlyProgress(activity: OrchestrationThreadActivity): boolean {
+  if (activity.kind !== "task.progress") return false;
+  const payload =
+    activity.payload && typeof activity.payload === "object"
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  if (payload === null || typeof payload.pid !== "number") return false;
+  return Object.keys(payload).every((key) => key === "pid" || key === "taskId");
+}
+
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): WorkLogEntry[] {
@@ -646,6 +657,10 @@ export function deriveWorkLogEntries(
     if (activity.kind === "tool.started") continue;
     if (activity.kind === "task.started") continue;
     if (activity.kind === "context-window.updated") continue;
+    // The server's "here is the shell's pid" row carries the pid and the
+    // task id and nothing to read; the roster merges it, the log must not
+    // print "pid 54560" as the one thing the turn is doing.
+    if (isShellPidOnlyProgress(activity)) continue;
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
     entries.push(toDerivedWorkLogEntry(activity));
@@ -747,10 +762,21 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (title) {
     entry.toolTitle = title;
   }
+  if (activity.kind === "provider.turn.start.failed" && typeof payload?.messageId === "string") {
+    entry.retryMessageId = MessageId.make(payload.messageId);
+  }
   if (itemType === "mcp_tool_call") {
     const data = asRecord(payload?.data);
     if (data?.item !== undefined) {
       entry.toolData = data.item;
+    } else if (typeof data?.toolName === "string") {
+      // The Claude runtime emits the call flat — `{ toolName, input, result }`
+      // with no nested `item` — so without this the MCP call carried no data
+      // at all and nothing downstream (the spawn-agent card, the expanded
+      // body) could read its name, arguments, or result. Guarded on
+      // `toolName` so a `tool.started` with an empty `data: {}` cannot
+      // clobber richer data from a later lifecycle row.
+      entry.toolData = data;
     }
   }
   if (itemType === "collab_agent_tool_call") {

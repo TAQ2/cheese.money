@@ -54,6 +54,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
+          live_delegation_count,
           has_actionable_proposed_plan,
           deleted_at
         )
@@ -80,6 +81,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.latestUserMessageAt},
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},
+          ${row.liveDelegationCount},
           ${row.hasActionableProposedPlan},
           ${row.deletedAt}
         )
@@ -106,6 +108,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           latest_user_message_at = excluded.latest_user_message_at,
           pending_approval_count = excluded.pending_approval_count,
           pending_user_input_count = excluded.pending_user_input_count,
+          live_delegation_count = excluded.live_delegation_count,
           has_actionable_proposed_plan = excluded.has_actionable_proposed_plan,
           deleted_at = excluded.deleted_at
       `,
@@ -139,6 +142,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
+          live_delegation_count AS "liveDelegationCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           deleted_at AS "deletedAt"
         FROM projection_threads
@@ -174,6 +178,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
+          live_delegation_count AS "liveDelegationCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           deleted_at AS "deletedAt"
         FROM projection_threads

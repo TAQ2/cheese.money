@@ -24,7 +24,11 @@ import * as DesktopIpc from "./ipc/DesktopIpc.ts";
 import * as ElectronApp from "./electron/ElectronApp.ts";
 import * as ElectronDialog from "./electron/ElectronDialog.ts";
 import * as ElectronMenu from "./electron/ElectronMenu.ts";
+import * as ElectronNotification from "./electron/ElectronNotification.ts";
 import * as ElectronPowerMonitor from "./electron/ElectronPowerMonitor.ts";
+import * as ElectronPowerSaveBlocker from "./electron/ElectronPowerSaveBlocker.ts";
+import * as DesktopAgentPowerGuard from "./power/DesktopAgentPowerGuard.ts";
+import * as DesktopPowerResumeRecovery from "./power/DesktopPowerResumeRecovery.ts";
 import * as ElectronProtocol from "./electron/ElectronProtocol.ts";
 import * as ElectronSafeStorage from "./electron/ElectronSafeStorage.ts";
 import * as ElectronShell from "./electron/ElectronShell.ts";
@@ -61,6 +65,15 @@ import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 
+// macOS: Chromium's Safe Storage derives its encryption key from an item in
+// the login keychain ("ch3 Safe Storage"), which throws a password prompt
+// at startup — and again after every rebuilt binary, because the keychain ACL
+// is bound to the exact signed executable. CH3 must start silently, so use
+// Chromium's mock keychain instead: connection-catalog secrets are obfuscated
+// rather than keychain-encrypted, and the login keychain is never touched at
+// launch. Must be set before the app's "ready" event.
+Electron.app.commandLine.appendSwitch("use-mock-keychain");
+
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {
     const metadata = yield* Effect.service(ElectronApp.ElectronApp).pipe(
@@ -80,7 +93,6 @@ const desktopEnvironmentLayer = Layer.unwrap(
 
 const resolveDesktopSshCliRunner = (
   environment: DesktopEnvironment.DesktopEnvironment["Service"],
-  settings: DesktopAppSettings.DesktopSettings,
 ): RemoteCH3RunnerOptions => {
   const devRemoteEntryPath = Option.getOrUndefined(environment.devRemoteCH3ServerEntryPath);
   if (environment.isDevelopment && devRemoteEntryPath !== undefined) {
@@ -92,7 +104,6 @@ const resolveDesktopSshCliRunner = (
   return {
     packageSpec: resolveRemoteCH3CliPackageSpec({
       appVersion: environment.appVersion,
-      updateChannel: settings.updateChannel,
       isDevelopment: environment.isDevelopment,
     }),
     nodeEngineRange: serverPackageJson.engines.node,
@@ -105,7 +116,7 @@ const desktopSshEnvironmentLayer = Layer.unwrap(
     const settings = yield* DesktopAppSettings.DesktopAppSettings;
     return DesktopSshEnvironment.layer({
       resolveCliRunner: settings.get.pipe(
-        Effect.map((currentSettings) => resolveDesktopSshCliRunner(environment, currentSettings)),
+        Effect.map(() => resolveDesktopSshCliRunner(environment)),
       ),
     });
   }),
@@ -121,11 +132,20 @@ const electronLayer = Layer.mergeAll(
   ElectronShell.layer,
   ElectronTheme.layer,
   ElectronUpdater.layer,
+  // What the updater posts as install.sh quits the app: the one message
+  // that outlives the process.
+  ElectronNotification.layer,
+  // The in-app Update button runs install.sh; this is what spawns it. It
+  // resolves gh through the login shell, hence the platform services.
   ElectronWindow.layer,
   DesktopIpc.layer(Electron.ipcMain),
 );
 
 const desktopFoundationLayer = Layer.mergeAll(
+  // `provideMerge`, not merged alongside: the credential store opens the
+  // sealed sign-in mailbox and needs the session, and the workspace-auth IPC
+  // handlers need the very same instance to record into. Sibling layers cannot
+  // see each other, so a plain merge would build two.
   DesktopState.layer,
   DesktopShutdown.layer,
   DesktopAppSettings.layer,
@@ -182,10 +202,23 @@ const desktopApplicationLayer = Layer.mergeAll(
   DesktopApplicationMenu.layer,
   DesktopShellEnvironment.layer,
   desktopSshLayer,
+  // Resume recovery nudges renderers to reconnect and health-checks the
+  // backend after sleep.
+  DesktopPowerResumeRecovery.layer,
 ).pipe(
   // Provided rather than merged alongside: the menu's Restart item runs the
-  // lifecycle relaunch, and sibling layers cannot see each other.
-  Layer.provideMerge(DesktopLifecycle.layer),
+  // lifecycle relaunch, and sibling layers cannot see each other. The power
+  // guard sits under the lifecycle for the same reason: before-quit asks it
+  // whether an agent run is live before killing the backend.
+  Layer.provideMerge(
+    DesktopLifecycle.layer.pipe(
+      // Agent-run power posture: the renderer reports live runs over IPC and
+      // the guard holds a power-save blocker.
+      Layer.provideMerge(
+        DesktopAgentPowerGuard.layer.pipe(Layer.provide(ElectronPowerSaveBlocker.layer)),
+      ),
+    ),
+  ),
   Layer.provideMerge(DesktopUpdates.layer),
   Layer.provideMerge(desktopWslBackendLayer),
   Layer.provideMerge(desktopLocalEnvironmentAuthLayer),

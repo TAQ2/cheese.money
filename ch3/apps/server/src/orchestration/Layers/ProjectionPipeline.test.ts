@@ -1345,6 +1345,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
             runtimeMode: "full-access",
             activeTurnId: turnId,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: "2026-01-01T00:00:01.000Z",
           },
         },
@@ -1406,6 +1407,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: "2026-01-01T00:01:00.000Z",
           },
         },
@@ -1496,6 +1498,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
               runtimeMode: "full-access",
               activeTurnId: turnId,
               lastError: null,
+              lastErrorClass: null,
               updatedAt,
             },
           },
@@ -2085,6 +2088,201 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("counts subagents in flight on the newest turn, and clears them when they finish", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-live-delegations");
+      const turnId = TurnId.make("turn-live-delegations");
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+      const readCount = Effect.gen(function* () {
+        const rows = yield* sql<{ readonly liveDelegationCount: number }>`
+          SELECT live_delegation_count AS "liveDelegationCount"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        return rows[0]?.liveDelegationCount ?? null;
+      });
+      const delegationActivity = (input: {
+        readonly eventSuffix: string;
+        readonly activityId: string;
+        readonly kind: "tool.started" | "tool.completed";
+        readonly turnId: string | null;
+        readonly at: string;
+      }) =>
+        appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make(`evt-live-delegations-${input.eventSuffix}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: input.at,
+          commandId: CommandId.make(`cmd-live-delegations-${input.eventSuffix}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-live-delegations-${input.eventSuffix}`),
+          metadata: {},
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make(input.activityId),
+              tone: "tool",
+              kind: input.kind,
+              summary: "Subagent task",
+              payload: { itemType: "collab_agent_tool_call" },
+              turnId: input.turnId as never,
+              createdAt: input.at,
+            },
+          },
+        });
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-live-delegations-1"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-live-delegations"),
+        occurredAt: "2026-02-26T13:00:00.000Z",
+        commandId: CommandId.make("cmd-live-delegations-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-live-delegations-1"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-live-delegations"),
+          title: "Project Live Delegations",
+          workspaceRoot: "/tmp/project-live-delegations",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-02-26T13:00:00.000Z",
+          updatedAt: "2026-02-26T13:00:00.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-live-delegations-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-02-26T13:00:01.000Z",
+        commandId: CommandId.make("cmd-live-delegations-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-live-delegations-2"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-live-delegations"),
+          title: "Thread Live Delegations",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claude"),
+            model: "claude-opus",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-02-26T13:00:01.000Z",
+          updatedAt: "2026-02-26T13:00:01.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-live-delegations-3"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-02-26T13:00:02.000Z",
+        commandId: CommandId.make("cmd-live-delegations-3"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-live-delegations-3"),
+        metadata: {},
+        payload: {
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "claude",
+            runtimeMode: "full-access",
+            activeTurnId: turnId,
+            lastError: null,
+            lastErrorClass: null,
+            updatedAt: "2026-02-26T13:00:02.000Z",
+          },
+        },
+      });
+
+      yield* delegationActivity({
+        eventSuffix: "4",
+        activityId: "activity-live-delegations-started-1",
+        kind: "tool.started",
+        turnId,
+        at: "2026-02-26T13:00:03.000Z",
+      });
+      yield* delegationActivity({
+        eventSuffix: "5",
+        activityId: "activity-live-delegations-started-2",
+        kind: "tool.started",
+        turnId,
+        at: "2026-02-26T13:00:04.000Z",
+      });
+      assert.strictEqual(yield* readCount, 2);
+
+      yield* delegationActivity({
+        eventSuffix: "6",
+        activityId: "activity-live-delegations-completed-1",
+        kind: "tool.completed",
+        turnId,
+        at: "2026-02-26T13:00:05.000Z",
+      });
+      assert.strictEqual(yield* readCount, 1);
+
+      // A delegation from an older turn is not this turn's business: counting
+      // it is how a finished thread ends up pulsing forever.
+      yield* delegationActivity({
+        eventSuffix: "7",
+        activityId: "activity-live-delegations-other-turn",
+        kind: "tool.started",
+        turnId: "turn-live-delegations-previous",
+        at: "2026-02-26T13:00:06.000Z",
+      });
+      assert.strictEqual(yield* readCount, 1);
+
+      yield* delegationActivity({
+        eventSuffix: "8",
+        activityId: "activity-live-delegations-completed-2",
+        kind: "tool.completed",
+        turnId,
+        at: "2026-02-26T13:00:07.000Z",
+      });
+      assert.strictEqual(yield* readCount, 0);
+
+      // A completion whose start was never projected — a restart mid-turn, a
+      // dropped event. The count must floor at nothing rather than go negative
+      // and then need two starts before it says anything again.
+      yield* delegationActivity({
+        eventSuffix: "9",
+        activityId: "activity-live-delegations-orphan-completion",
+        kind: "tool.completed",
+        turnId,
+        at: "2026-02-26T13:00:08.000Z",
+      });
+      assert.strictEqual(yield* readCount, 0);
+
+      // And the honest consequence of summing a turn: the orphan completion
+      // above offsets the next start, so this reads 0 rather than 1. Both the
+      // old row-walking derivation and the SQL sum behave this way, and the
+      // error is self-correcting — the next turn starts from nothing.
+      yield* delegationActivity({
+        eventSuffix: "10",
+        activityId: "activity-live-delegations-after-orphan",
+        kind: "tool.started",
+        turnId,
+        at: "2026-02-26T13:00:09.000Z",
+      });
+      assert.strictEqual(yield* readCount, 0);
+    }),
+  );
+
   it.effect("ignores non-stale provider approval response failures", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
@@ -2520,6 +2718,7 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("ch3-pending-turn-terminal-test
                 runtimeMode: "approval-required",
                 activeTurnId: null,
                 lastError: status === "error" ? "startup failed" : null,
+                lastErrorClass: null,
                 updatedAt: requestedAt,
               },
             },
@@ -2538,6 +2737,146 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("ch3-pending-turn-terminal-test
       }),
     );
   },
+);
+
+it.effect("a retried turn keeps the plan the first attempt was started from", () =>
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    const persistenceLayer = makeSqlitePersistenceLive(dbPath);
+    const projectionLayer = OrchestrationProjectionPipelineLive.pipe(
+      Layer.provideMerge(OrchestrationEventStoreLive),
+      Layer.provideMerge(persistenceLayer),
+    );
+
+    const threadId = ThreadId.make("thread-retry-plan");
+    const messageId = MessageId.make("message-retry-plan");
+    const otherMessageId = MessageId.make("message-retry-other");
+    const sourcePlanThreadId = ThreadId.make("thread-plan-source");
+    const sourcePlanId = "plan-source";
+    const firstAt = "2026-02-26T14:00:00.000Z";
+    const retriedAt = "2026-02-26T14:01:00.000Z";
+    const laterAt = "2026-02-26T14:02:00.000Z";
+
+    const rows = yield* Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const sql = yield* SqlClient.SqlClient;
+
+      // The turn the user started from a proposed plan. It never reaches the
+      // provider — that is the failure Retry exists for.
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-retry-plan-1"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: firstAt,
+        commandId: CommandId.make("cmd-retry-plan-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-retry-plan-1"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId,
+          sourceProposedPlan: { threadId: sourcePlanThreadId, planId: sourcePlanId },
+          runtimeMode: "approval-required",
+          createdAt: firstAt,
+        },
+      });
+
+      // `thread.turn.retry` names a thread and a message and nothing else: the
+      // decider cannot reach the plan, because the read model does not keep it.
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-retry-plan-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: retriedAt,
+        commandId: CommandId.make("cmd-retry-plan-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-retry-plan-2"),
+        metadata: {},
+        payload: { threadId, messageId, runtimeMode: "approval-required", createdAt: retriedAt },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const afterRetry = yield* sql<{
+        readonly pendingMessageId: string | null;
+        readonly sourceProposedPlanThreadId: string | null;
+        readonly sourceProposedPlanId: string | null;
+        readonly requestedAt: string;
+      }>`
+        SELECT
+          pending_message_id AS "pendingMessageId",
+          source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
+          source_proposed_plan_id AS "sourceProposedPlanId",
+          requested_at AS "requestedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id IS NULL AND state = 'pending'
+      `;
+
+      // A LATER message is a different turn and inherits nothing.
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-retry-plan-3"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: laterAt,
+        commandId: CommandId.make("cmd-retry-plan-3"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-retry-plan-3"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: otherMessageId,
+          runtimeMode: "approval-required",
+          createdAt: laterAt,
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const afterNextMessage = yield* sql<{
+        readonly pendingMessageId: string | null;
+        readonly sourceProposedPlanThreadId: string | null;
+        readonly sourceProposedPlanId: string | null;
+      }>`
+        SELECT
+          pending_message_id AS "pendingMessageId",
+          source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
+          source_proposed_plan_id AS "sourceProposedPlanId"
+        FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id IS NULL AND state = 'pending'
+      `;
+
+      return { afterRetry, afterNextMessage };
+    }).pipe(Effect.provide(projectionLayer));
+
+    assert.deepEqual(rows.afterRetry, [
+      {
+        pendingMessageId: "message-retry-plan",
+        sourceProposedPlanThreadId: "thread-plan-source",
+        sourceProposedPlanId: "plan-source",
+        requestedAt: retriedAt,
+      },
+    ]);
+    assert.deepEqual(rows.afterNextMessage, [
+      {
+        pendingMessageId: "message-retry-other",
+        sourceProposedPlanThreadId: null,
+        sourceProposedPlanId: null,
+      },
+    ]);
+  }).pipe(
+    Effect.provide(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "ch3-projection-pipeline-retry-plan-",
+        }),
+        NodeServices.layer,
+      ),
+    ),
+  ),
 );
 
 it.effect("restores pending turn-start metadata across projection pipeline restart", () =>
@@ -2614,6 +2953,7 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
             runtimeMode: "approval-required",
             activeTurnId: turnId,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: sessionSetAt,
           },
         },
@@ -2783,3 +3123,131 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 });
+
+it.layer(makeProjectionPipelinePrefixedTestLayer("ch3-projection-shell-summary-test-"))(
+  "the thread shell summary",
+  (it) => {
+    // The shell summary used to load every activity of a thread — payloads and
+    // all — on every event, to recount what the thread is waiting on. On the
+    // busiest thread here that was 20 MB a time, inside the write transaction.
+    // The unreadable payload below belongs to a kind the count never inspects: if
+    // the refresh still reads the whole thread, it fails on that row.
+    it.effect("recounts pending input without reading the rest of the thread", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-08-28T00:00:00.000Z";
+
+        yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.make("evt-narrow-1"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-narrow"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-narrow-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-narrow-1"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-narrow"),
+            title: "Narrow",
+            workspaceRoot: "/tmp/project-narrow",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-narrow-2"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-narrow"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-narrow-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-narrow-2"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-narrow"),
+            projectId: ProjectId.make("project-narrow"),
+            title: "Narrow thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        // Written straight into the projection, because no event could produce a
+        // payload the decoder refuses.
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id,
+            thread_id,
+            turn_id,
+            tone,
+            kind,
+            summary,
+            payload_json,
+            created_at
+          )
+          VALUES (
+            'activity-narrow-unreadable',
+            'thread-narrow',
+            NULL,
+            'info',
+            'runtime.note',
+            'unreadable',
+            'this is not json',
+            '2026-08-28T00:00:01.000Z'
+          )
+        `;
+
+        yield* eventStore.append({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-narrow-3"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-narrow"),
+          occurredAt: "2026-08-28T00:00:02.000Z",
+          commandId: CommandId.make("cmd-narrow-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-narrow-3"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-narrow"),
+            activity: {
+              id: EventId.make("activity-narrow-question"),
+              tone: "info",
+              kind: "user-input.requested",
+              summary: "Which branch?",
+              payload: { requestId: "request-narrow-1" },
+              turnId: null,
+              createdAt: "2026-08-28T00:00:02.000Z",
+            },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const rows = yield* sql<{
+          readonly pendingUserInputCount: number;
+        }>`
+          SELECT pending_user_input_count AS "pendingUserInputCount"
+          FROM projection_threads
+          WHERE thread_id = 'thread-narrow'
+        `;
+        assert.deepEqual(rows, [{ pendingUserInputCount: 1 }]);
+      }),
+    );
+  },
+);

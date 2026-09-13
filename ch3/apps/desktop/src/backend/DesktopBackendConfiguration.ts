@@ -141,33 +141,43 @@ const logBackendObservabilitySettingsReadFailure = (
   );
 };
 
-function resourceMonitorBinaryName(platform: NodeJS.Platform): string {
-  return platform === "win32" ? "ch3-resource-monitor.exe" : "ch3-resource-monitor";
-}
-
-const resolveResourceMonitorPath = Effect.fn(
-  "desktop.backendConfiguration.resolveResourceMonitorPath",
-)(function* () {
+/**
+ * Where a native binary the app ships lives, from the desktop shell's point of
+ * view.
+ *
+ * Only the shell can answer this. In a packaged app the binaries sit in
+ * `Contents/Resources/<directoryName>/`, while the server runs from inside
+ * `app.asar` and cannot see beside itself; in development they are wherever
+ * cargo left them. So the shell resolves the path and passes it down in the
+ * bootstrap payload rather than the server guessing.
+ *
+ * `directoryName` must match the staged directory in
+ * `scripts/build-desktop-artifact.ts` (`STAGED_NATIVE_BINARIES`).
+ */
+const resolveStagedNativeBinaryPath = Effect.fn(
+  "desktop.backendConfiguration.resolveStagedNativeBinaryPath",
+)(function* (input: { readonly directoryName: string; readonly crateBinaryName: string }) {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
-  const binaryName = resourceMonitorBinaryName(environment.platform);
+  const binaryName =
+    environment.platform === "win32" ? `${input.crateBinaryName}.exe` : input.crateBinaryName;
   const candidates = environment.isDevelopment
     ? [
         environment.path.join(
           environment.rootDir,
-          "native/resource-monitor/target/release",
+          `native/${input.directoryName}/target/release`,
           binaryName,
         ),
         environment.path.join(
           environment.rootDir,
-          "native/resource-monitor/target/debug",
+          `native/${input.directoryName}/target/debug`,
           binaryName,
         ),
       ]
     : environment.isPackaged
-      ? [environment.path.join(environment.resourcesPath, "resource-monitor", binaryName)]
+      ? [environment.path.join(environment.resourcesPath, input.directoryName, binaryName)]
       : environment.resolveResourcePathCandidates(
-          environment.path.join("resource-monitor", binaryName),
+          environment.path.join(input.directoryName, binaryName),
         );
 
   for (const candidate of candidates) {
@@ -177,6 +187,11 @@ const resolveResourceMonitorPath = Effect.fn(
   }
 
   return Option.none<string>();
+});
+
+const resolveResourceMonitorPath = resolveStagedNativeBinaryPath({
+  directoryName: "resource-monitor",
+  crateBinaryName: "ch3-resource-monitor",
 });
 
 const readPersistedBackendObservabilitySettings = Effect.gen(function* () {
@@ -407,8 +422,21 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         // TLS interception replaces certificates with ones only the SYSTEM
         // trust store knows, and the network may be proxy-only. Appended so
         // an existing NODE_OPTIONS survives.
-        NODE_OPTIONS: [process.env["NODE_OPTIONS"], "--use-system-ca"].filter(Boolean).join(" "),
+        // A ceiling, so death is deterministic and diagnosable. Without one the
+        // server takes the default heap limit, and a runaway read drives the
+        // machine into swap before V8 gives up — which is how an abort with no
+        // trail cost two days. 3 GB is far above the steady state and far below
+        // the point where the Mac starts thrashing.
+        NODE_OPTIONS: [process.env["NODE_OPTIONS"], "--use-system-ca", "--max-old-space-size=3072"]
+          .filter(Boolean)
+          .join(" "),
         NODE_USE_ENV_PROXY: "1",
+        // The backend talks to its own spawned services over loopback; on a
+        // proxy-only network without this, those calls would traverse the
+        // corporate proxy. Appended so a user's own NO_PROXY still wins.
+        NO_PROXY: [process.env["NO_PROXY"] ?? process.env["no_proxy"], "localhost,127.0.0.1,::1"]
+          .filter(Boolean)
+          .join(","),
       },
       // Primary wants process.env (PATH, dev-runner's CH3CODE_HOME, etc.).
       extendEnv: true,
@@ -678,11 +706,14 @@ export const make = Effect.gen(function* () {
 
   const buildWindowsPrimaryConfig = Effect.gen(function* () {
     const shared = yield* sharedInputs;
-    const resourceMonitorPath = yield* resolveResourceMonitorPath().pipe(
+    const resourceMonitorPath = yield* resolveResourceMonitorPath.pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
     );
-    return yield* resolvePrimaryStartConfig({ ...shared, resourceMonitorPath }).pipe(
+    return yield* resolvePrimaryStartConfig({
+      ...shared,
+      resourceMonitorPath,
+    }).pipe(
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
       Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),
     );

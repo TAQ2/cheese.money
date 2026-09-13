@@ -103,10 +103,18 @@ function getSelectedTraits(
     caps,
     selections: modelOptions,
   });
-  const selectDescriptors = descriptors.filter(
-    (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> =>
-      descriptor.type === "select",
-  );
+  const selectDescriptors = descriptors
+    .filter(
+      (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> =>
+        descriptor.type === "select",
+    )
+    // The Fast service tier is deliberately not offered — see the fast-mode
+    // note below: it drains shared plan usage at a far higher rate.
+    .map((descriptor) =>
+      descriptor.id === "serviceTier"
+        ? { ...descriptor, options: descriptor.options.filter((option) => option.label !== "Fast") }
+        : descriptor,
+    );
   const booleanDescriptors = descriptors.filter(
     (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "boolean" }> =>
       descriptor.type === "boolean",
@@ -115,8 +123,11 @@ function getSelectedTraits(
   const contextWindowDescriptor =
     selectDescriptors.find((descriptor) => descriptor.id === "contextWindow") ?? null;
   const agentDescriptor = selectDescriptors.find((descriptor) => descriptor.id === "agent") ?? null;
-  const fastModeDescriptor =
-    booleanDescriptors.find((descriptor) => descriptor.id === "fastMode") ?? null;
+  // Fast mode is deliberately NOT offered: it burns plan usage at a
+  // drastically higher rate, which on shared company accounts drains the
+  // weekly window for everyone. The descriptor stays null so the picker
+  // never renders the group, whatever the provider advertises.
+  const fastModeDescriptor = null;
   const thinkingDescriptor =
     booleanDescriptors.find((descriptor) => descriptor.id === "thinking") ?? null;
 

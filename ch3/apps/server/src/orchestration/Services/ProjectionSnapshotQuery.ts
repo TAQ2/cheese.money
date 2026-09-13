@@ -16,6 +16,7 @@ import type {
   OrchestrationSearchThreadsResult,
   OrchestrationShellSnapshot,
   OrchestrationThread,
+  OrchestrationThreadActivitiesPage,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadShell,
   ProjectId,
@@ -73,6 +74,23 @@ export interface ProjectionSnapshotQueryShape {
    * projector cursor state.
    */
   readonly getSnapshot: () => Effect.Effect<OrchestrationReadModel, ProjectionRepositoryError>;
+
+  /**
+   * Read every project, and nothing else.
+   *
+   * The callers that only want projects — the default-projects daemon, the
+   * `workspace.listDefaultProjects` handler, the skills catalogue — used to ask
+   * `getSnapshot` and keep the `projects` field. That read materialises every
+   * message and every activity payload in the database to answer a question
+   * about a few dozen rows: measured at 856 MB of live heap and 4-5 seconds on
+   * a real machine, once a minute, which is what put the server over V8's
+   * ceiling and killed it. Same shape as the `projects` slice of the snapshot,
+   * repository identities included, without touching a thread table.
+   */
+  readonly listProjects: () => Effect.Effect<
+    ReadonlyArray<OrchestrationProject>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Read the latest orchestration shell snapshot.
@@ -178,6 +196,17 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadDetailSnapshot: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadDetailSnapshot>, ProjectionRepositoryError>;
+
+  /**
+   * Read a page of a thread's activities strictly older than `beforeSequence`
+   * (ascending, newest window semantics — see the contract). `Option.none`
+   * when the thread does not exist or is archived, mirroring
+   * `getThreadDetailSnapshot`.
+   */
+  readonly getThreadActivitiesPage: (
+    threadId: ThreadId,
+    input: { readonly beforeSequence: number; readonly limit?: number },
+  ) => Effect.Effect<Option.Option<OrchestrationThreadActivitiesPage>, ProjectionRepositoryError>;
 }
 
 /**

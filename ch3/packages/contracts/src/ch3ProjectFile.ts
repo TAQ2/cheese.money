@@ -7,7 +7,16 @@ import { ProjectScriptIcon } from "./orchestration.ts";
 export const CH3_PROJECT_FILE_NAME = "ch3.json";
 
 /** Public URL of the published JSON Schema for {@link CH3ProjectFile}. */
-export const CH3_PROJECT_FILE_SCHEMA_URL = "https://ch3.codes/schema/ch3.json";
+/**
+ * Identifier for this file's JSON Schema.
+ *
+ * It names a document in this repository rather than a hosted site. The
+ * previous value pointed at an unregistered domain, which an editor following
+ * a `$schema` link would have fetched from whoever registered it — and it
+ * carried the pre-fork brand into every project file CH3 writes.
+ */
+export const CH3_PROJECT_FILE_SCHEMA_URL =
+  "https://raw.githubusercontent.com/CH3/ch3/main/docs/schema/ch3.json";
 
 const CH3_PROJECT_FILE_PATH_MAX_LENGTH = 512;
 const CH3_PROJECT_FILE_MAX_SCRIPTS = 50;
@@ -83,6 +92,6 @@ export const CH3ProjectFile = Schema.Struct({
 }).annotate({
   title: "CH3 project file",
   description:
-    "Checked-in project configuration for CH3 (ch3.json at the repository root). See https://ch3.codes for documentation.",
+    "Checked-in project configuration for CH3 (ch3.json at the repository root). See https://github.com/CH3/ch3 for documentation.",
 });
 export type CH3ProjectFile = typeof CH3ProjectFile.Type;

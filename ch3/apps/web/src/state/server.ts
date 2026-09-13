@@ -1,6 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   type EditorId,
+  type EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
@@ -21,9 +22,30 @@ import { environmentSession } from "./session";
 export const serverEnvironment = createServerEnvironmentAtoms(connectionAtomRuntime, {
   initialConfigValueAtom: environmentSession.initialConfigValueAtom,
 });
+
+/**
+ * The server's config, as one atom every provider-reading consumer enters
+ * through.
+ *
+ * **Anything reading `config.providers` must read it through this atom, never
+ * through `serverEnvironment.configValueAtom`.** It is the single place a
+ * catalogue-wide rule can be applied, rather than re-implemented in each
+ * picker, palette entry and default-resolution path — which only holds if
+ * every consumer enters here. Today those are the environment config map and
+ * the primary-server state below, plus the environment presentations in
+ * `state/presentation`, which is where `ChatView` gets its providers. The
+ * handful of components still on the raw atom read only `availableEditors` and
+ * `cwd`; a component that starts reading `providers` must move over.
+ */
+export const accessScopedServerConfigValueAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get): ServerConfig | null =>
+    get(serverEnvironment.configValueAtom(environmentId)),
+  ).pipe(Atom.withLabel(`web-access-scoped-server-config:${environmentId}`)),
+);
+
 export const environmentServerConfigsAtom = createEnvironmentServerConfigsAtom({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
-  serverConfigValueAtom: serverEnvironment.configValueAtom,
+  serverConfigValueAtom: accessScopedServerConfigValueAtom,
 });
 
 interface PrimaryServerState {
@@ -53,7 +75,7 @@ export const primaryServerStateAtom = Atom.make((get): PrimaryServerState => {
   const welcome = Option.getOrNull(AsyncResult.value(get(serverEnvironment.welcome(target))));
 
   return {
-    config: get(serverEnvironment.configValueAtom(environmentId)),
+    config: get(accessScopedServerConfigValueAtom(environmentId)),
     latestEvent: configProjection?.latestEvent ?? null,
     welcome,
   };

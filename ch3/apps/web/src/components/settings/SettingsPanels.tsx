@@ -15,7 +15,7 @@ import {
   defaultInstanceIdForDriver,
   type BackgroundActivityProfile,
   type BackgroundActivitySettings,
-  type DesktopUpdateChannel,
+  isRetiredProviderDriverKind,
   PROVIDER_DISPLAY_NAMES,
   ProviderDriverKind,
   type ProviderInstanceConfig,
@@ -49,18 +49,25 @@ import * as Equal from "effect/Equal";
 import * as Result from "effect/Result";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import {
+  DESKTOP_UPDATE_IN_PROGRESS_MESSAGE,
+  getDesktopUpdateDownloadConfirmationMessage,
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
 } from "../../components/desktopUpdate.logic";
+import { formatOutputStyleLabel, resolveDefaultOutputStyleOptions } from "../BranchToolbar.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import {
-  resolveEnvironmentIdentificationPillLabel,
-  useEnvironmentStageLabel,
-} from "../SidebarStageBackdrop";
+  interactionModeConfig,
+  interactionModeOptions,
+  isProviderInteractionMode,
+  isRuntimeMode,
+  runtimeModeConfig,
+  runtimeModeOptions,
+} from "../chat/threadModes";
 import { isElectron } from "../../env";
 import { buildHostedChannelSelectionUrl, type HostedAppChannel } from "../../hostedPairing";
 import { useTheme } from "../../hooks/useTheme";
@@ -114,8 +121,11 @@ import {
   collectProviderUpdateCandidates,
   hasOneClickUpdateProviderCandidate,
   isProviderUpdateActive,
+  providerUpdateCandidateKey,
+  providerUpdateFailureMessage,
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
+import { dismissProviderUpdateNotification } from "../../providerUpdateDismissal";
 import { ClaudeAccountsManager } from "./ClaudeAccountSwitcher";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
@@ -158,6 +168,10 @@ const THEME_OPTIONS = [
   {
     value: "dark",
     label: "Dark",
+  },
+  {
+    value: "ch3",
+    label: "CH3",
   },
 ] as const;
 
@@ -354,41 +368,9 @@ function AboutVersionTitle() {
 
 function AboutVersionSection() {
   const updateState = useDesktopUpdateState();
-  const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
-  const selectedUpdateChannel = updateState?.channel ?? "latest";
   const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
-
-  const handleUpdateChannelChange = useCallback(
-    (channel: DesktopUpdateChannel) => {
-      const bridge = window.desktopBridge;
-      if (
-        !bridge ||
-        typeof bridge.setUpdateChannel !== "function" ||
-        channel === selectedUpdateChannel
-      ) {
-        return;
-      }
-
-      setIsChangingUpdateChannel(true);
-      void bridge
-        .setUpdateChannel(channel)
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not change update track",
-              description: error instanceof Error ? error.message : "Update track change failed.",
-            }),
-          );
-        })
-        .finally(() => {
-          setIsChangingUpdateChannel(false);
-        });
-    },
-    [selectedUpdateChannel],
-  );
 
   const handleButtonClick = useCallback(() => {
     const bridge = window.desktopBridge;
@@ -397,12 +379,21 @@ function AboutVersionSection() {
     const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
 
     if (action === "download") {
+      if (
+        !window.confirm(
+          getDesktopUpdateDownloadConfirmationMessage(
+            updateState ?? { availableVersion: null, currentVersion: "" },
+          ),
+        )
+      ) {
+        return;
+      }
       void bridge.downloadUpdate().catch((error: unknown) => {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not download update",
-            description: error instanceof Error ? error.message : "Download failed.",
+            title: "Could not update",
+            description: error instanceof Error ? error.message : "Update failed.",
           }),
         );
       });
@@ -462,18 +453,20 @@ function AboutVersionSection() {
       ? !canCheckForUpdate(updateState)
       : isDesktopUpdateButtonDisabled(updateState);
 
-  const actionLabel: Record<string, string> = { download: "Download", install: "Install" };
+  const actionLabel: Record<string, string> = { download: "Update", install: "Install" };
   const statusLabel: Record<string, string> = {
     checking: "Checking…",
-    downloading: "Downloading…",
+    downloading: "Updating…",
     "up-to-date": "Up to Date",
   };
   const buttonLabel =
     actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
   const description =
-    action === "download" || action === "install"
-      ? "Update available."
-      : "Current version of the application.";
+    updateState?.status === "downloading"
+      ? (updateState.message ?? DESKTOP_UPDATE_IN_PROGRESS_MESSAGE)
+      : action === "download" || action === "install"
+        ? "Update available. Update runs install.sh with your GitHub CLI; CH3 closes and reopens by itself on the new version."
+        : "Current version of the application.";
 
   return (
     <>
@@ -498,38 +491,9 @@ function AboutVersionSection() {
           </Tooltip>
         }
       />
-      {hasDesktopBridge ? (
-        <SettingsRow
-          title="Update track"
-          description="Stable follows full releases. Nightly follows the nightly desktop channel and can switch back to stable immediately."
-          control={
-            <Select
-              value={selectedUpdateChannel}
-              onValueChange={(value) => {
-                handleUpdateChannelChange(value as DesktopUpdateChannel);
-              }}
-            >
-              <SelectTrigger
-                className="w-full sm:w-40"
-                aria-label="Update track"
-                disabled={isChangingUpdateChannel}
-              >
-                <SelectValue>
-                  {selectedUpdateChannel === "nightly" ? "Nightly" : "Stable"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="latest">
-                  Stable
-                </SelectItem>
-                <SelectItem hideIndicator value="nightly">
-                  Nightly
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-      ) : selectedHostedAppChannel ? (
+      {/* One release stream at CH3: the desktop app has no update track to
+          pick. The hosted web app (not shipped here) keeps its channel switch. */}
+      {selectedHostedAppChannel ? (
         <SettingsRow
           title="Update track"
           description="Switches the hosted app release channel."
@@ -538,9 +502,13 @@ function AboutVersionSection() {
               value={selectedHostedAppChannel}
               onValueChange={(value) => {
                 if (value === selectedHostedAppChannel) return;
-                window.location.assign(
-                  buildHostedChannelSelectionUrl({ channel: value as HostedAppChannel }),
-                );
+                const target = buildHostedChannelSelectionUrl({
+                  channel: value as HostedAppChannel,
+                });
+                // Null when this build has no hosted origin configured; the
+                // control is only rendered for hosted builds, so this is a
+                // guard rather than a path users reach.
+                if (target !== null) window.location.assign(target);
               }}
             >
               <SelectTrigger className="w-full sm:w-40" aria-label="Update track">
@@ -584,6 +552,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
+      ...(settings.defaultOutputStyle !== DEFAULT_UNIFIED_SETTINGS.defaultOutputStyle
+        ? ["Default response style"]
+        : []),
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
         ? ["Visible threads"]
         : []),
@@ -613,6 +584,12 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin
         ? ["New worktrees start from origin"]
         : []),
+      ...(settings.defaultRuntimeMode !== DEFAULT_UNIFIED_SETTINGS.defaultRuntimeMode
+        ? ["New thread access"]
+        : []),
+      ...(settings.defaultInteractionMode !== DEFAULT_UNIFIED_SETTINGS.defaultInteractionMode
+        ? ["New thread agent mode"]
+        : []),
       ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
         ? ["Add project base directory"]
         : []),
@@ -630,9 +607,12 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.autoOpenPlanSidebar,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
+      settings.defaultOutputStyle,
       settings.addProjectBaseDirectory,
       settings.defaultThreadEnvMode,
       settings.newWorktreesStartFromOrigin,
+      settings.defaultRuntimeMode,
+      settings.defaultInteractionMode,
       settings.diffIgnoreWhitespace,
       settings.environmentIdentificationMode,
       settings.glassOpacity,
@@ -659,6 +639,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setTheme("system");
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      defaultOutputStyle: DEFAULT_UNIFIED_SETTINGS.defaultOutputStyle,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
@@ -674,6 +655,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       providerHealthRefreshInterval: DEFAULT_UNIFIED_SETTINGS.providerHealthRefreshInterval,
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
       newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
+      defaultRuntimeMode: DEFAULT_UNIFIED_SETTINGS.defaultRuntimeMode,
+      defaultInteractionMode: DEFAULT_UNIFIED_SETTINGS.defaultInteractionMode,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
@@ -958,9 +941,11 @@ export function AppearanceSettingsPanel() {
   const { theme, setTheme } = useTheme();
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
-  const environmentStageLabel = useEnvironmentStageLabel();
-  const showEnvironmentIdentification =
-    resolveEnvironmentIdentificationPillLabel(environmentStageLabel) !== null;
+  // Always shown. It used to appear only on Dev and Nightly, back when those
+  // were the only stages the artwork reached; now every window wears header
+  // art, so hiding the row left a shipped install with artwork on and no way
+  // to turn it off but hand-editing `client-settings.json`.
+  const showEnvironmentIdentification = true;
   const glassOpacityRatio =
     (settings.glassOpacity - MIN_GLASS_OPACITY) / (MAX_GLASS_OPACITY - MIN_GLASS_OPACITY);
   const glassOpacitySliderStyle = {
@@ -983,7 +968,12 @@ export function AppearanceSettingsPanel() {
             <Select
               value={theme}
               onValueChange={(value) => {
-                if (value === "system" || value === "light" || value === "dark") {
+                if (
+                  value === "system" ||
+                  value === "light" ||
+                  value === "dark" ||
+                  value === "ch3"
+                ) {
                   setTheme(value);
                 }
               }}
@@ -1053,7 +1043,7 @@ export function AppearanceSettingsPanel() {
         {showEnvironmentIdentification ? (
           <SettingsRow
             title="Environment identification"
-            description="Choose how Dev and Nightly environments are identified."
+            description="Header artwork on every window, a Dev or Nightly badge, or neither."
             resetAction={
               settings.environmentIdentificationMode !== DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE ? (
                 <SettingResetButton
@@ -1159,9 +1149,15 @@ export function AccountsSettingsPanel() {
     } satisfies ProviderInstanceConfig);
   const config = (instance.config ?? {}) as Record<string, unknown>;
   const homePath = typeof config["homePath"] === "string" ? config["homePath"] : "";
-  const failoverEnabled = config["accountFailoverEnabled"] === true;
-  // Default ON: absent means enabled, matching the server's own read.
-  const rotationEnabled = config["accountRotationEnabled"] !== false;
+  // Failover and keep-warm are opt-OUT: absent means enabled, matching the
+  // schema defaults the server decodes with. Reading them as `=== true` was
+  // what made a fresh install show the boxes unticked while the server behaved
+  // as though they were on. Rotation is the exception — it is opt-IN, because
+  // its scoring probe raises a keychain consent dialog at startup on a machine
+  // that has never granted one.
+  const failoverEnabled = config["accountFailoverEnabled"] !== false;
+  const rotationEnabled = config["accountRotationEnabled"] === true;
+  const keepWarmEnabled = config["accountRiddleKeepWarmEnabled"] !== false;
 
   const updateConfigValue = (key: string, value: unknown) => {
     updateSettings(
@@ -1197,6 +1193,10 @@ export function AccountsSettingsPanel() {
               rotationEnabled={rotationEnabled}
               onRotationEnabledChange={(enabled) =>
                 updateConfigValue("accountRotationEnabled", enabled)
+              }
+              keepWarmEnabled={keepWarmEnabled}
+              onKeepWarmEnabledChange={(enabled) =>
+                updateConfigValue("accountRiddleKeepWarmEnabled", enabled)
               }
             />
           ) : (
@@ -1399,6 +1399,22 @@ export function GeneralSettingsPanel() {
     DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
   );
 
+  // Same live list the composer's style chip reads — only the Claude driver
+  // reports one, so the first instance that has it wins. Falls back to
+  // Caveman/None (what this picker offered before it read the live list)
+  // when no instance has answered yet.
+  const defaultOutputStyleOptions = useMemo(() => {
+    const advertised = serverProviders.find(
+      (provider) => (provider.outputStyles?.length ?? 0) > 0,
+    )?.outputStyles;
+    const options = resolveDefaultOutputStyleOptions(advertised);
+    // The saved preference always renders as a selectable item, even if it
+    // names a custom style whose file was since renamed or deleted.
+    return options.includes(settings.defaultOutputStyle)
+      ? options
+      : [settings.defaultOutputStyle, ...options];
+  }, [serverProviders, settings.defaultOutputStyle]);
+
   return (
     <SettingsPageContainer>
       <SettingsSection title="General">
@@ -1475,6 +1491,44 @@ export function GeneralSettingsPanel() {
                 <SelectItem hideIndicator value="24-hour">
                   {TIMESTAMP_FORMAT_LABELS["24-hour"]}
                 </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Default response style"
+          description="The response style every new conversation starts on. Change it for one thread anytime from the composer's style chip."
+          resetAction={
+            settings.defaultOutputStyle !== DEFAULT_UNIFIED_SETTINGS.defaultOutputStyle ? (
+              <SettingResetButton
+                label="default response style"
+                onClick={() =>
+                  updateSettings({
+                    defaultOutputStyle: DEFAULT_UNIFIED_SETTINGS.defaultOutputStyle,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.defaultOutputStyle}
+              onValueChange={(value) => {
+                if (value !== null && defaultOutputStyleOptions.includes(value)) {
+                  updateSettings({ defaultOutputStyle: value });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-48" aria-label="Default response style">
+                <SelectValue>{formatOutputStyleLabel(settings.defaultOutputStyle)}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {defaultOutputStyleOptions.map((style) => (
+                  <SelectItem key={style} hideIndicator value={style}>
+                    {formatOutputStyleLabel(style)}
+                  </SelectItem>
+                ))}
               </SelectPopup>
             </Select>
           }
@@ -1745,6 +1799,84 @@ export function GeneralSettingsPanel() {
         ) : null}
 
         <SettingsRow
+          title="New thread access"
+          description="How much a new thread may do on its own. Change it per thread from the composer."
+          resetAction={
+            settings.defaultRuntimeMode !== DEFAULT_UNIFIED_SETTINGS.defaultRuntimeMode ? (
+              <SettingResetButton
+                label="new thread access"
+                onClick={() =>
+                  updateSettings({
+                    defaultRuntimeMode: DEFAULT_UNIFIED_SETTINGS.defaultRuntimeMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.defaultRuntimeMode}
+              onValueChange={(value) => {
+                if (isRuntimeMode(value)) {
+                  updateSettings({ defaultRuntimeMode: value });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-44" aria-label="Default thread access">
+                <SelectValue>{runtimeModeConfig[settings.defaultRuntimeMode].label}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {runtimeModeOptions.map((mode) => (
+                  <SelectItem hideIndicator key={mode} value={mode}>
+                    {runtimeModeConfig[mode].label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
+
+        <SettingsRow
+          title="New thread agent mode"
+          description="Whether a new thread starts building or writes a plan first."
+          resetAction={
+            settings.defaultInteractionMode !== DEFAULT_UNIFIED_SETTINGS.defaultInteractionMode ? (
+              <SettingResetButton
+                label="new thread agent mode"
+                onClick={() =>
+                  updateSettings({
+                    defaultInteractionMode: DEFAULT_UNIFIED_SETTINGS.defaultInteractionMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.defaultInteractionMode}
+              onValueChange={(value) => {
+                if (isProviderInteractionMode(value)) {
+                  updateSettings({ defaultInteractionMode: value });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-44" aria-label="Default thread agent mode">
+                <SelectValue>
+                  {interactionModeConfig[settings.defaultInteractionMode].label}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {interactionModeOptions.map((mode) => (
+                  <SelectItem hideIndicator key={mode} value={mode}>
+                    {interactionModeConfig[mode].label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
+
+        <SettingsRow
           title="Add project starts in"
           description='Leave empty to use "~/" when the Add Project browser opens.'
           resetAction={
@@ -1949,14 +2081,7 @@ export function ProviderSettingsPanel() {
     () => new Map(providerUpdateCandidates.map((candidate) => [candidate.instanceId, candidate])),
     [providerUpdateCandidates],
   );
-  const visibleProviderSettings = PROVIDER_SETTINGS.filter(
-    (providerSettings) =>
-      providerSettings.provider !== "cursor" ||
-      serverProviders.some(
-        (provider) =>
-          provider.instanceId === defaultInstanceIdForDriver(ProviderDriverKind.make("cursor")),
-      ),
-  );
+  const visibleProviderSettings = PROVIDER_SETTINGS;
   const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
@@ -2026,17 +2151,20 @@ export function ProviderSettingsPanel() {
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
         toastManager.add(
           stackedThreadToast({
             type: "error",
             title: `Could not update ${PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver}`,
-            description:
-              error instanceof Error
-                ? error.message
-                : "The provider update command could not be started.",
+            description: providerUpdateFailureMessage(squashAtomCommandFailure(result)),
           }),
         );
+        // Stop the launch prompt nagging about a version this machine just
+        // failed to install: the reason has not changed, so re-offering it on
+        // every launch is how someone ends up pressing a button that never
+        // works. The card keeps the badge, now reading "Update failed" with the
+        // reason and a "Try again", so the way back in is deliberate — and a
+        // newer version produces a new key and prompts again on its own.
+        dismissProviderUpdateNotification(providerUpdateCandidateKey(candidate));
       }
       setUpdatingProviderDrivers((previous) => {
         if (!previous.has(candidate.driver)) {
@@ -2076,6 +2204,8 @@ export function ProviderSettingsPanel() {
   );
 
   const rows: InstanceRow[] = [];
+  /** Instances of a driver this build retired — listed only so they can be removed. */
+  const retiredInstanceIds: ProviderInstanceId[] = [];
   const visibleDriverKinds = new Set<ProviderDriverKind>(
     visibleProviderSettings.map((providerSettings) => providerSettings.provider),
   );
@@ -2115,6 +2245,18 @@ export function ProviderSettingsPanel() {
   }
   for (const [driver, list] of instancesByDriver) {
     if (visibleDriverKinds.has(driver)) continue;
+    // A settings file that still names a retired driver is the normal case for
+    // anyone who once switched Cursor or Grok on — the key has to keep decoding,
+    // but this build cannot run it, so a card here would only offer to configure
+    // something that will never start. Collected rather than merely skipped, so
+    // the panel can still offer the way OUT: hiding the card also hid the only
+    // control that could delete the entry, leaving it — plus its model
+    // preferences and any favourite it left behind — stuck in `settings.json`
+    // through every future upgrade.
+    if (isRetiredProviderDriverKind(driver)) {
+      for (const [id] of list) retiredInstanceIds.push(id);
+      continue;
+    }
     for (const [id, instance] of list) {
       rows.push({
         instanceId: id,
@@ -2429,6 +2571,27 @@ export function ProviderSettingsPanel() {
             />
           );
         })}
+        {retiredInstanceIds.length > 0 ? (
+          <SettingsRow
+            title="Leftover provider settings"
+            description={`Cursor and Grok were retired and cannot run in this build. ${
+              retiredInstanceIds.length === 1
+                ? "One instance is"
+                : `${retiredInstanceIds.length} instances are`
+            } still stored in your settings, doing nothing.`}
+          >
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                for (const id of retiredInstanceIds) deleteProviderInstance(id);
+              }}
+            >
+              Remove
+            </Button>
+          </SettingsRow>
+        ) : null}
       </SettingsSection>
 
       {isAddInstanceDialogOpen ? (
@@ -2464,6 +2627,7 @@ export function ArchivedThreadsPanel() {
                 environmentId,
                 name: project.title,
                 cwd: project.workspaceRoot,
+                canonicalKey: project.repositoryIdentity?.canonicalKey,
               },
             ] as const,
         ),

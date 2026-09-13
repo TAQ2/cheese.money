@@ -10,6 +10,8 @@ import {
   type AtomCommandResult,
   mapAtomCommandResult,
 } from "@ch3tools/client-runtime/state/runtime";
+import { isWorkspaceBrowserPreviewPath } from "@ch3tools/shared/filePreview";
+import { isLoopbackHost, normalizePreviewUrl } from "@ch3tools/shared/preview";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -22,8 +24,35 @@ import {
 } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 
-export const isBrowserPreviewFile = (path: string): boolean =>
-  /\.(?:html?|pdf)$/i.test(path.split(/[?#]/, 1)[0] ?? "");
+/**
+ * The `file://` URL a local path navigates to, or null when the path is not
+ * one the preview can reach — a relative path, a Windows drive path, a UNC
+ * share. This is the same gate the browser's URL bar runs a pasted path
+ * through, so a chip and a pasted path land on the same file.
+ */
+function localFilePreviewUrl(filePath: string, environmentHttpBaseUrl: string): string | null {
+  try {
+    // `file://` resolves on the machine showing the window, so it names the
+    // intended file only when the environment IS that machine. A remote or
+    // tunnelled environment keeps the routes that read through it.
+    if (!isLoopbackHost(new URL(environmentHttpBaseUrl).hostname)) return null;
+    const url = normalizePreviewUrl(filePath);
+    return url.startsWith("file:") ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when `openFileInPreview` has a route for this path. */
+export function canOpenFileInBrowserPreview(
+  filePath: string,
+  environmentHttpBaseUrl: string,
+): boolean {
+  return (
+    isWorkspaceBrowserPreviewPath(filePath) ||
+    localFilePreviewUrl(filePath, environmentHttpBaseUrl) !== null
+  );
+}
 
 export class BrowserPreviewUnavailableError extends Data.TaggedError(
   "BrowserPreviewUnavailableError",
@@ -70,6 +99,19 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
         }),
       ),
     );
+  }
+  // A workspace html or pdf goes over http so the relative assets it pulls in
+  // resolve through the same signed token. Everything else — any file type,
+  // anywhere on disk, inside the project or not — opens as the local file.
+  const localFileUrl = isWorkspaceBrowserPreviewPath(input.filePath)
+    ? null
+    : localFilePreviewUrl(input.filePath, input.httpBaseUrl);
+  if (localFileUrl !== null) {
+    return openUrlInPreview({
+      threadRef: input.threadRef,
+      url: localFileUrl,
+      openPreview: input.openPreview,
+    });
   }
   const assetResult = await input.createAssetUrl({
     environmentId: input.threadRef.environmentId,

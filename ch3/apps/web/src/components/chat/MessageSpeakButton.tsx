@@ -7,11 +7,14 @@ import {
   RotateCwIcon,
   Volume2Icon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { squashAtomCommandFailure } from "@ch3tools/client-runtime/state/runtime";
 
 import { speechEnvironment } from "~/state/speech";
+import { useEnvironment } from "../../state/environments";
+import { splitForSpeech } from "./speechChunks";
+import { WorkingTimer } from "./WorkingTimer";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useUiStateStore } from "../../uiStateStore";
 import { Button } from "../ui/button";
@@ -25,6 +28,14 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  * fifteen-second jump to either side. Once loaded the audio stays on this
  * element, so pausing, resuming and jumping never touch the network. Jumping
  * back repeatedly reaches the start, so a dedicated restart earns nothing.
+ *
+ * Synthesis is SLOW — a minute of speech takes about a minute to make — so the
+ * spinner carries the age of the wait, and every state past "nothing happening"
+ * marks itself `data-speech-active`. Surfaces that fade their action rows out
+ * when the pointer leaves (the chat timeline does) keep the row up while that
+ * marker is present. Without it a listener clicks, moves the mouse, sees an
+ * empty row, and is startled a minute later by audio from nowhere with no
+ * visible control to stop it.
  */
 
 /** One jump of the transport. Fifteen seconds rewinds a missed sentence without losing the paragraph. */
@@ -72,6 +83,11 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
   environmentId,
   text,
 }: MessageSpeakButtonProps) {
+  // Asked here rather than by each caller: a surface that forgets renders a
+  // speaker that fails on click with the reason hidden in a tooltip, which is
+  // exactly what the documents reader did on a server with no speech engine.
+  const environment = useEnvironment(environmentId);
+  const speechAvailable = environment?.serverConfig?.environment.capabilities.speech === true;
   const synthesize = useAtomCommand(speechEnvironment.synthesize, { reportFailure: false });
   const englishVoice = useUiStateStore((state) => state.speechVoice);
   const spanishPick = useUiStateStore((state) => state.speechVoiceSpanish);
@@ -84,9 +100,20 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
   const voice = languageMode === "spanish" ? spanishPick : englishVoice;
   const spanishVoice = languageMode === "detect" ? spanishPick : undefined;
 
+  // The speech service refuses anything over its own limit, which makes the
+  // longest things in the app — an evidence pack, a decision memo, an agent's
+  // full analysis — exactly the things it would not read. So a long text is
+  // spoken in parts, in order, and the next one is fetched when the last ends.
+  // Each part is sized against what the server will SPEAK, not against its own
+  // character count, so every part here is one the server accepts.
+  const parts = useMemo(() => splitForSpeech(text), [text]);
+  const [partIndex, setPartIndex] = useState(0);
+
   const [phase, setPhase] = useState<SpeechPhase>("idle");
   const [playing, setPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** When the part now loading was asked for, so the wait can show its own age. */
+  const [loadStartedAt, setLoadStartedAt] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   /**
@@ -126,6 +153,10 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
     }
     setPhase("idle");
     setPlaying(false);
+    setPartIndex(0);
+    // The old voice's failure is not this voice's failure.
+    setError(null);
+    setLoadStartedAt(null);
   }, [voice, spanishVoice, languageMode, rate]);
 
   /**
@@ -146,49 +177,87 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
     }
   }, []);
 
-  const load = useCallback(async () => {
-    const generation = loadGenerationRef.current;
-    setError(null);
-    setPhase("loading");
-    // Both voices travel with the request; the server detects the language of
-    // the text and decides which of the two actually reads it.
-    const result = await synthesize({
-      environmentId,
-      input: {
-        text,
-        ...(voice ? { voice } : {}),
-        ...(spanishVoice ? { spanishVoice } : {}),
-        ...(rate ? { rate } : {}),
-      },
-    });
-    // Abandoned while we waited: the row went away, or the voice changed and
-    // this clip is now the wrong one.
-    if (loadGenerationRef.current !== generation) return;
-    if (result._tag === "Failure") {
-      setPhase("idle");
-      // The server says WHY — service unreachable, connection refused,
-      // nothing speakable. Replacing that with a generic line leaves the
-      // user with no way to act on it.
-      setError(describeSpeechFailure(result));
-      return;
-    }
-    const bytes = Uint8Array.from(atob(result.value.audioBase64), (character) =>
-      character.charCodeAt(0),
-    );
-    const url = URL.createObjectURL(new Blob([bytes], { type: result.value.mimeType }));
-    if (loadGenerationRef.current !== generation) {
-      URL.revokeObjectURL(url);
-      return;
-    }
-    objectUrlRef.current = url;
-    const audio = new Audio(url);
-    audio.addEventListener("ended", () => setPlaying(false));
-    audio.addEventListener("pause", () => setPlaying(false));
-    audio.addEventListener("play", () => setPlaying(true));
-    audioRef.current = audio;
-    setPhase("ready");
-    void startPlayback(audio);
-  }, [environmentId, rate, spanishVoice, startPlayback, synthesize, text, voice]);
+  const load = useCallback(
+    async (index: number) => {
+      const spoken = parts[index];
+      if (spoken === undefined) {
+        // Unreachable from the rendered control — the button is not offered
+        // when there are no parts, and the transport only advances into one
+        // that exists. Kept as a guard that SAYS something, because a control
+        // that swallows a press is the failure this whole file is about.
+        setPhase("idle");
+        setPlaying(false);
+        setError("There is nothing left to read aloud.");
+        return;
+      }
+      const generation = loadGenerationRef.current;
+      setPartIndex(index);
+      setError(null);
+      // A minute of speech takes about a minute to synthesize, so this wait is
+      // measured in tens of seconds, not in frames. A bare spinner for that
+      // long reads as a hang; the clock beside it reads as work.
+      setLoadStartedAt(new Date().toISOString());
+      setPhase("loading");
+      // Both voices travel with the request; the server detects the language of
+      // the text and decides which of the two actually reads it.
+      const result = await synthesize({
+        environmentId,
+        input: {
+          text: spoken,
+          ...(voice ? { voice } : {}),
+          ...(spanishVoice ? { spanishVoice } : {}),
+          ...(rate ? { rate } : {}),
+        },
+      });
+      // Abandoned while we waited: the row went away, or the voice changed and
+      // this clip is now the wrong one.
+      if (loadGenerationRef.current !== generation) return;
+      if (result._tag === "Failure") {
+        setPhase("idle");
+        // The server says WHY — service unreachable, connection refused,
+        // nothing speakable. Replacing that with a generic line leaves the
+        // user with no way to act on it.
+        setError(describeSpeechFailure(result));
+        return;
+      }
+      const bytes = Uint8Array.from(atob(result.value.audioBase64), (character) =>
+        character.charCodeAt(0),
+      );
+      const url = URL.createObjectURL(new Blob([bytes], { type: result.value.mimeType }));
+      if (loadGenerationRef.current !== generation) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      // The previous part's blob goes now. Audio for a fifty-thousand-character
+      // document is megabytes per part, and holding every part until the row
+      // unmounted was a leak that grew with the length of the thing somebody
+      // most wanted read to them.
+      if (objectUrlRef.current !== null) URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = url;
+      const audio = new Audio(url);
+      audio.addEventListener("ended", () => {
+        setPlaying(false);
+        // Straight on to the next part. A listener who put the phone down wants
+        // the rest of the memo, not a button to press every ten thousand
+        // characters.
+        if (index + 1 < parts.length && loadGenerationRef.current === generation) {
+          void loadRef.current?.(index + 1);
+        }
+      });
+      audio.addEventListener("pause", () => setPlaying(false));
+      audio.addEventListener("play", () => setPlaying(true));
+      audioRef.current = audio;
+      setPhase("ready");
+      void startPlayback(audio);
+    },
+    [environmentId, parts, rate, spanishVoice, startPlayback, synthesize, voice],
+  );
+
+  // The advance above runs from an audio event, outside React's render, so it
+  // reaches `load` through a ref rather than closing over the one that existed
+  // when the part started.
+  const loadRef = useRef<((index: number) => Promise<void>) | null>(null);
+  loadRef.current = load;
 
   const togglePlay = useCallback(() => {
     const audio = audioRef.current;
@@ -202,6 +271,8 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
 
   // Position only — whether audio is playing is the play/pause button's
   // business, and a jump must not overrule it.
+  const partLabel = parts.length > 1 ? ` — part ${partIndex + 1} of ${parts.length}` : "";
+
   const skipBy = useCallback((seconds: number) => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -210,25 +281,57 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
     audio.currentTime = Math.min(Math.max(target, 0), end);
   }, []);
 
+  // No engine, or nothing a voice could say — a reply that is one file path
+  // cleans away to nothing. Either way the press could only fail, and a
+  // speaker that cannot speak is worse than no speaker at all.
+  if (!speechAvailable || parts.length === 0) return null;
+
   if (phase === "idle") {
     return (
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="xs"
-              type="button"
-              className="px-1 text-muted-foreground/70 hover:text-foreground/80"
-              onClick={() => void load()}
-              aria-label="Read aloud"
-            />
-          }
-        >
-          <Volume2Icon className="size-3.5" />
-        </TooltipTrigger>
-        <TooltipPopup>{error ?? "Read aloud"}</TooltipPopup>
-      </Tooltip>
+      // `data-speech-active` while a failure is showing: the tooltip carrying
+      // the reason is useless inside a toolbar that fades out the moment the
+      // pointer leaves, which is how a refused synthesis looked exactly like a
+      // button that did nothing at all.
+      <span className="inline-flex items-center" {...(error ? { "data-speech-active": "" } : {})}>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="xs"
+                type="button"
+                className={
+                  error
+                    ? "px-1 text-destructive/80 hover:text-destructive"
+                    : "px-1 text-muted-foreground/70 hover:text-foreground/80"
+                }
+                // Where the listener actually is, not the top. A cancelled
+                // spinner or a dropped connection on part seven used to mean
+                // re-listening to six parts — and paying to synthesize them
+                // again.
+                onClick={() => void load(partIndex)}
+                aria-label={
+                  error
+                    ? `Read aloud failed — ${error}`
+                    : partIndex > 0
+                      ? `Resume reading — part ${partIndex + 1}`
+                      : "Read aloud"
+                }
+              />
+            }
+          >
+            <Volume2Icon className="size-3.5" />
+          </TooltipTrigger>
+          <TooltipPopup>
+            {error ??
+              (partIndex > 0
+                ? `Resume — part ${partIndex + 1} of ${parts.length}`
+                : parts.length > 1
+                  ? `Read aloud — ${parts.length} parts`
+                  : "Read aloud")}
+          </TooltipPopup>
+        </Tooltip>
+      </span>
     );
   }
 
@@ -238,31 +341,40 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
     // four-minute timeout. Cancelling bumps the generation, so the result is
     // discarded whenever it eventually arrives.
     return (
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="xs"
-              type="button"
-              className="px-1 text-muted-foreground/70 hover:text-foreground/80"
-              onClick={() => {
-                loadGenerationRef.current += 1;
-                setPhase("idle");
-              }}
-              aria-label="Cancel"
-            />
-          }
-        >
-          <Loader2Icon className="size-3.5 animate-spin" />
-        </TooltipTrigger>
-        <TooltipPopup>Preparing audio — click to cancel</TooltipPopup>
-      </Tooltip>
+      <span className="inline-flex items-center" data-speech-active="">
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="xs"
+                type="button"
+                className="px-1 text-muted-foreground/70 hover:text-foreground/80"
+                onClick={() => {
+                  loadGenerationRef.current += 1;
+                  setLoadStartedAt(null);
+                  setPhase("idle");
+                }}
+                aria-label="Cancel"
+              />
+            }
+          >
+            <Loader2Icon className="size-3.5 animate-spin" />
+          </TooltipTrigger>
+          <TooltipPopup>Preparing audio — click to cancel</TooltipPopup>
+        </Tooltip>
+        {loadStartedAt ? (
+          <WorkingTimer
+            startedAt={loadStartedAt}
+            className="pe-1 text-[10px] tabular-nums text-muted-foreground/60"
+          />
+        ) : null}
+      </span>
     );
   }
 
   return (
-    <span className="inline-flex items-center">
+    <span className="inline-flex items-center" data-speech-active="">
       <Tooltip>
         <TooltipTrigger
           render={
@@ -295,8 +407,15 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
         >
           {playing ? <PauseIcon className="size-3.5" /> : <PlayIcon className="size-3.5" />}
         </TooltipTrigger>
-        <TooltipPopup>{error ?? (playing ? "Pause" : "Play")}</TooltipPopup>
+        <TooltipPopup>{error ?? `${playing ? "Pause" : "Play"}${partLabel}`}</TooltipPopup>
       </Tooltip>
+      {parts.length > 1 ? (
+        // Long enough to be read in pieces, so say which piece: a listener who
+        // paused at part two of nine should know there are seven to go.
+        <span className="px-1 text-[10px] tabular-nums text-muted-foreground/60">
+          {partIndex + 1}/{parts.length}
+        </span>
+      ) : null}
       <Tooltip>
         <TooltipTrigger
           render={

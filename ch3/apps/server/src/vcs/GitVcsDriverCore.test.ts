@@ -1212,43 +1212,49 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         yield* initRepoWithCommit(cwd);
         const driver = yield* GitVcsDriver.GitVcsDriver;
 
-        yield* git(cwd, ["remote", "add", "origin", "https://github.com/pingdotgg/ch3.git"]);
+        // Every URL below names the SAME repository as `origin`, spelled a
+        // different way — that is the only reason reuse is the right answer.
+        // Change the owner or the repository name in one of them and the case
+        // silently becomes "a different repo", which is the fork case at the
+        // bottom. A rebrand rename once did exactly that to three of them.
+        yield* git(cwd, ["remote", "add", "origin", "https://github.com/ch3/ch3.git"]);
 
         const reusedForSsh = yield* driver.ensureRemote({
           cwd,
-          preferredName: "pingdotgg",
-          url: "git@github.com:pingdotgg/ch3.git",
+          preferredName: "ch3",
+          url: "git@github.com:ch3/ch3.git",
         });
         assert.equal(reusedForSsh, "origin");
 
         const reusedForSshScheme = yield* driver.ensureRemote({
           cwd,
-          preferredName: "pingdotgg",
-          url: "ssh://git@github.com/pingdotgg/ch3",
+          preferredName: "ch3",
+          url: "ssh://git@github.com/ch3/ch3",
         });
         assert.equal(reusedForSshScheme, "origin");
 
         const reusedForBareSshScheme = yield* driver.ensureRemote({
           cwd,
-          preferredName: "pingdotgg",
-          url: "ssh://github.com/pingdotgg/ch3",
+          preferredName: "ch3",
+          url: "ssh://github.com/ch3/ch3",
         });
         assert.equal(reusedForBareSshScheme, "origin");
 
         const reusedForSshPort = yield* driver.ensureRemote({
           cwd,
-          preferredName: "pingdotgg",
-          url: "ssh://git@github.com:22/pingdotgg/ch3",
+          preferredName: "ch3",
+          url: "ssh://git@github.com:22/ch3/ch3",
         });
         assert.equal(reusedForSshPort, "origin");
 
         const reusedForSshWithPort = yield* driver.ensureRemote({
           cwd,
-          preferredName: "pingdotgg",
-          url: "ssh://git@github.com:22/pingdotgg/ch3.git",
+          preferredName: "ch3",
+          url: "ssh://git@github.com:22/ch3/ch3.git",
         });
         assert.equal(reusedForSshWithPort, "origin");
 
+        // A genuinely different repository: this one has to be added.
         const addedForFork = yield* driver.ensureRemote({
           cwd,
           preferredName: "octocat",

@@ -184,6 +184,9 @@ function buildProps() {
     revertTurnCountByUserMessageId: new Map(),
     onRevertUserMessage: () => {},
     onEditUserMessage: () => {},
+    onRetryTurnStart: () => {},
+    retriableMessageId: MessageId.make("message-1"),
+    onReportTurnStartFailure: () => {},
     speechAvailable: false,
     isRevertingCheckpoint: false,
     onImageExpand: () => {},
@@ -192,12 +195,10 @@ function buildProps() {
     resolvedTheme: "light" as const,
     timestampFormat: "locale" as const,
     workspaceRoot: undefined,
-    anchorMessageId: null,
-    onAnchorReady: () => {},
-    onAnchorSizeChanged: () => {},
     contentInsetEndAdjustment: 0,
     onIsAtEndChange: () => {},
     onManualNavigation: () => {},
+    followEnd: true,
   };
 }
 
@@ -298,19 +299,31 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("1 changed file");
   });
 
-  it("uses LegendList isNearEnd when deciding whether the live edge is visible", async () => {
+  it("stops pinning the list to the live edge once the reader has scrolled away", () => {
+    const timelineEntries = [buildUserTimelineEntry("Hello")];
+
+    const following = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={timelineEntries} />,
+    );
+    const scrolledAway = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={timelineEntries} followEnd={false} />,
+    );
+
+    expect(following).toContain('data-maintain-scroll-at-end="enabled"');
+    expect(scrolledAway).not.toContain("data-maintain-scroll-at-end");
+  });
+
+  it("reads the live edge from LegendList isAtEnd, not from its near-end prefetch signal", async () => {
     const {
       resolveTimelineIsAtEnd,
       resolveTimelineMinimapHasPersistentGutter,
       resolveTimelineMinimapHeightStyle,
-      resolveTimelineMinimapHitStripWidth,
+      resolveTimelineMinimapLane,
       resolveTimelineMinimapIndexFromPointer,
-      resolveTimelineMinimapInteractiveWidth,
       resolveTimelineMinimapTopPercent,
     } = await import("./MessagesTimeline.logic");
 
-    expect(resolveTimelineIsAtEnd({ isNearEnd: true, isAtEnd: false })).toBe(true);
-    expect(resolveTimelineIsAtEnd({ isNearEnd: false, isAtEnd: true })).toBe(false);
+    expect(resolveTimelineIsAtEnd({ isAtEnd: false })).toBe(false);
     expect(resolveTimelineIsAtEnd({ isAtEnd: true })).toBe(true);
     expect(resolveTimelineIsAtEnd(undefined)).toBeUndefined();
 
@@ -332,79 +345,66 @@ describe("MessagesTimeline", () => {
         pointerY: 999,
       }),
     ).toBe(100);
-    expect(resolveTimelineMinimapHasPersistentGutter(832)).toBe(false);
-    expect(resolveTimelineMinimapHasPersistentGutter(863)).toBe(false);
-    expect(resolveTimelineMinimapHasPersistentGutter(864)).toBe(true);
+    // Both read the gutter measured off the rendered column. The rail only
+    // stands in the open once the column leaves clear space beside it.
+    expect(resolveTimelineMinimapHasPersistentGutter(35)).toBe(false);
+    expect(resolveTimelineMinimapHasPersistentGutter(47)).toBe(false);
+    expect(resolveTimelineMinimapHasPersistentGutter(48)).toBe(true);
+    expect(resolveTimelineMinimapHasPersistentGutter(0)).toBe(false);
+    expect(resolveTimelineMinimapHasPersistentGutter(Number.NaN)).toBe(false);
 
-    // No usable gutter (zoomed in / narrow pane): the strip must go inert
-    // instead of overlaying the centered content column.
-    expect(resolveTimelineMinimapHitStripWidth(768)).toBe(0);
-    expect(resolveTimelineMinimapHitStripWidth(792)).toBe(0);
-    // Partial gutter: strip shrinks to what fits between the viewport edge
-    // and the content column.
-    expect(resolveTimelineMinimapHitStripWidth(820)).toBe(14);
-    // Full gutter: unchanged 40px-wide strip.
-    expect(resolveTimelineMinimapHitStripWidth(872)).toBe(40);
-    expect(resolveTimelineMinimapHitStripWidth(1400)).toBe(40);
-    expect(resolveTimelineMinimapHitStripWidth(0)).toBe(0);
-    expect(resolveTimelineMinimapHitStripWidth(Number.NaN)).toBe(0);
-
-    // The collapsed target stays narrow, but an open preview keeps its full
-    // 20rem width plus the 2rem offset from the minimap rail interactive.
-    expect(resolveTimelineMinimapInteractiveWidth(0, false)).toBe(0);
-    expect(resolveTimelineMinimapInteractiveWidth(14, false)).toBe(14);
-    expect(resolveTimelineMinimapInteractiveWidth(40, false)).toBe(40);
-    expect(resolveTimelineMinimapInteractiveWidth(0, true)).toBe("22rem");
-    expect(resolveTimelineMinimapInteractiveWidth(14, true)).toBe("22rem");
-    expect(resolveTimelineMinimapInteractiveWidth(40, true)).toBe("22rem");
+    // Tight gutter: a shorter rail beside the text, not the absence of one.
+    expect(resolveTimelineMinimapLane(26)).toEqual({
+      rightEdge: 14,
+      hitStripWidth: 14,
+      tickWidth: 14,
+    });
+    // Wide gutter: full-size rail, still 12px off the column.
+    expect(resolveTimelineMinimapLane(160)).toEqual({
+      rightEdge: 148,
+      hitStripWidth: 40,
+      tickWidth: 24,
+    });
+    // Nothing to stand in: hidden.
+    expect(resolveTimelineMinimapLane(23).hitStripWidth).toBe(0);
+    expect(resolveTimelineMinimapLane(Number.NaN).hitStripWidth).toBe(0);
   });
 
-  it("anchors a sent attachment message using its measured height", () => {
-    const onAnchorReady = vi.fn();
-    const onAnchorSizeChanged = vi.fn();
+  // Sending used to park the new message at the top and reserve space below
+  // it, which read as the conversation jumping backwards a screenful every
+  // time. The list now stays pinned to the newest row instead, and that is what
+  // `maintainScrollAtEnd` does — so it has to be on whenever the reader is
+  // following the end.
+  it("keeps the list pinned to the newest row while following the end", () => {
     const firstEntry = buildUserTimelineEntry("First prompt.");
-    const secondEntry = {
-      ...buildUserTimelineEntry("Newest prompt."),
-      id: "entry-2",
-      message: {
-        ...buildUserTimelineEntry("Newest prompt.").message,
-        id: MessageId.make("message-2"),
-        attachments: [
-          {
-            type: "image" as const,
-            id: "attachment-1",
-            name: "screenshot.png",
-            mimeType: "image/png",
-            sizeBytes: 1,
-            previewUrl: "data:image/png;base64,iVBORw0KGgo=",
-          },
-        ],
-      },
-    };
+    const secondEntry = { ...buildUserTimelineEntry("Newest prompt."), id: "entry-2" };
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
-        anchorMessageId={secondEntry.message.id}
-        onAnchorReady={onAnchorReady}
-        onAnchorSizeChanged={onAnchorSizeChanged}
         contentInsetEndAdjustment={144}
         timelineEntries={[firstEntry, secondEntry]}
       />,
     );
 
-    expect(markup).toContain('data-anchor-index="1"');
-    expect(markup).toContain('data-anchor-offset="16"');
-    expect(markup).toContain('data-anchor-on-ready="true"');
-    expect(markup).not.toContain("data-anchor-max-size=");
+    expect(markup).toContain('data-maintain-scroll-at-end="enabled"');
+    expect(markup).toContain('data-maintain-scroll-at-end-data-change="true"');
     expect(markup).toContain('data-content-inset-end="144"');
     expect(markup).toContain("[overflow-anchor:none]");
+    // Nothing reserves space for an anchored message any more.
+    expect(markup).not.toContain("data-anchor-index=");
+    expect(markup).toContain('data-anchor-on-ready="false"');
+  });
+
+  it("stops pinning once the reader scrolls away from the end", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        followEnd={false}
+        timelineEntries={[buildUserTimelineEntry("First prompt.")]}
+      />,
+    );
+
     expect(markup).not.toContain('data-maintain-scroll-at-end="enabled"');
-    expect(markup).toContain('data-maintain-visible-content-position="object"');
-    expect(markup).toContain('data-maintain-visible-content-position-data="true"');
-    expect(markup).toContain('data-maintain-visible-content-position-size="false"');
-    expect(onAnchorReady).toHaveBeenCalledOnce();
-    expect(onAnchorReady).toHaveBeenCalledWith(secondEntry.message.id, 1);
-    expect(onAnchorSizeChanged).toHaveBeenCalledWith(secondEntry.message.id, 240);
   });
 
   it("renders collapse controls for long user messages", () => {
@@ -656,6 +656,140 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("lucide-x");
     expect(markup).toContain('aria-label="Tool call failed"');
+  });
+
+  it("renders a Retry button on a failed turn-start entry, targeting the message that failed", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Provider turn start failed",
+              tone: "error",
+              detail: "turn/setPermissionMode failed",
+              sourceActivityKind: "provider.turn.start.failed",
+              retryMessageId: MessageId.make("message-1"),
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Retry sending this message"');
+    expect(markup).toContain("lucide-rotate-ccw");
+  });
+
+  it("does not render a Retry button once the failed row carries no message to retry", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Provider turn start failed",
+              tone: "error",
+              detail: "User message 'message-1' was not found for turn start request.",
+              sourceActivityKind: "provider.turn.start.failed",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).not.toContain('aria-label="Retry sending this message"');
+  });
+
+  it("does not offer Retry on a failure the thread has already moved past", () => {
+    // The failed row never leaves the log. Once a newer message is the one
+    // waiting at the end of the thread, this failure's turn is spent, and the
+    // decider refuses it — so the button is not offered either.
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        retriableMessageId={MessageId.make("message-2")}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Provider turn start failed",
+              tone: "error",
+              detail: "turn/setPermissionMode failed",
+              sourceActivityKind: "provider.turn.start.failed",
+              retryMessageId: MessageId.make("message-1"),
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).not.toContain('aria-label="Retry sending this message"');
+    // The Report link stays: reporting an old failure is still useful.
+    expect(markup).toContain("Report");
+  });
+
+  it("renders a Report link on a failed turn-start entry, even one with no resendable message", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Provider turn start failed",
+              tone: "error",
+              detail: "User message 'message-1' was not found for turn start request.",
+              sourceActivityKind: "provider.turn.start.failed",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain(">Report<");
+  });
+
+  it("does not render a Report link on an unrelated failed row", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Glob",
+              tone: "tool",
+              toolLifecycleStatus: "failed",
+              detail: "No files found",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).not.toContain(">Report<");
   });
 
   it("renders the Worked-for control above the turn and again under its reply", () => {

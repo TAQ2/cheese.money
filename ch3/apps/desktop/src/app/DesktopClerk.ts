@@ -13,7 +13,7 @@ import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
-declare const __CH3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
+declare const __CH3_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
 
 export class DesktopClerkBridgeInitializationError extends Schema.TaggedErrorClass<DesktopClerkBridgeInitializationError>()(
   "DesktopClerkBridgeInitializationError",
@@ -66,9 +66,9 @@ export function resolveDesktopClerkFrontendApiHostname(
 }
 
 export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHostname(
-  typeof __CH3CODE_BUILD_CLERK_PUBLISHABLE_KEY__ === "undefined"
+  typeof __CH3_BUILD_CLERK_PUBLISHABLE_KEY__ === "undefined"
     ? undefined
-    : __CH3CODE_BUILD_CLERK_PUBLISHABLE_KEY__,
+    : __CH3_BUILD_CLERK_PUBLISHABLE_KEY__,
 );
 
 export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {

@@ -116,6 +116,18 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       `,
   });
 
+  const selectLatestUserMessageAt = SqlSchema.findOne({
+    Request: ListProjectionThreadMessagesInput,
+    Result: Schema.Struct({ latestUserMessageAt: Schema.NullOr(Schema.String) }),
+    execute: ({ threadId }) =>
+      sql`
+        SELECT MAX(created_at) AS "latestUserMessageAt"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId}
+          AND role = 'user'
+      `,
+  });
+
   const listProjectionThreadMessageRows = SqlSchema.findAll({
     Request: ListProjectionThreadMessagesInput,
     Result: ProjectionThreadMessageDbRowSchema,
@@ -167,6 +179,18 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       Effect.map((rows) => rows.map(toProjectionThreadMessage)),
     );
 
+  const latestUserMessageAt: ProjectionThreadMessageRepositoryShape["latestUserMessageAt"] = (
+    input,
+  ) =>
+    selectLatestUserMessageAt(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadMessageRepository.latestUserMessageAt:query"),
+      ),
+      // `MAX` over no rows is one row holding null: a thread nobody has written
+      // to yet is an ordinary state, not a missing one.
+      Effect.map((row) => row.latestUserMessageAt),
+    );
+
   const deleteByThreadId: ProjectionThreadMessageRepositoryShape["deleteByThreadId"] = (input) =>
     deleteProjectionThreadMessageRows(input).pipe(
       Effect.mapError(
@@ -178,6 +202,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
     upsert,
     getByMessageId,
     listByThreadId,
+    latestUserMessageAt,
     deleteByThreadId,
   } satisfies ProjectionThreadMessageRepositoryShape;
 });

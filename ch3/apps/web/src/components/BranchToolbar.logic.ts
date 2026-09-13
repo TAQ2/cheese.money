@@ -1,4 +1,5 @@
 import type { EnvironmentId, VcsRef, ProjectId } from "@ch3tools/contracts";
+import { DEFAULT_OUTPUT_STYLE_PREFERENCE } from "@ch3tools/contracts/settings";
 import * as Schema from "effect/Schema";
 import { toSortableTimestamp } from "../lib/threadSort";
 export {
@@ -107,6 +108,87 @@ function isHiddenOutputStyle(style: string): boolean {
  */
 export const DEFAULT_OUTPUT_STYLE = "default";
 
+/**
+ * The response style CH3 ships as the starting point for every
+ * conversation, absent a user preference. Matched against the CLI's
+ * advertised names verbatim, so it must equal the `name:` in
+ * `assets/output-styles/caveman.md`. Source of truth is
+ * `DEFAULT_OUTPUT_STYLE_PREFERENCE` in `@ch3tools/contracts/settings` — that is
+ * also the schema default for the `defaultOutputStyle` client setting, so an
+ * install that has never touched the preference and one that has explicitly
+ * set it back to Caveman are indistinguishable.
+ *
+ * Only applied when the CLI actually advertises it — the file lives in the
+ * user's home and can be deleted, and naming a style the CLI does not know is
+ * a broken session rather than a missing preference.
+ */
+export const PREFERRED_OUTPUT_STYLE = DEFAULT_OUTPUT_STYLE_PREFERENCE;
+
+/**
+ * The styles CH3 pins to the top of the menu, in this order.
+ *
+ * Caveman leads this group because it is what every conversation starts on,
+ * and a default that sorts into the C's looks like one option among a dozen
+ * rather than the one in force. "I'm Tired" sits directly under it as the
+ * deliberate way out on a bad day. Everything else — the CLI's own styles and
+ * whatever the user has written — sorts alphabetically below.
+ *
+ * "None" is not in this list and outranks all of it: see the sort in
+ * {@link deriveOutputStyleMenu}. Pinning here is about the recommended styles,
+ * not about the top of the menu.
+ *
+ * Names must match the `name:` frontmatter in `assets/output-styles/`, since
+ * that is the string the CLI advertises and the `outputStyle` setting matches.
+ */
+export const PINNED_OUTPUT_STYLES: ReadonlyArray<string> = [PREFERRED_OUTPUT_STYLE, "I'm Tired"];
+
+function pinnedOutputStyleRank(style: string): number {
+  const index = PINNED_OUTPUT_STYLES.findIndex(
+    (pinned) => pinned.localeCompare(style, undefined, { sensitivity: "base" }) === 0,
+  );
+  return index === -1 ? PINNED_OUTPUT_STYLES.length : index;
+}
+
+/**
+ * The style a conversation starts on when nobody has picked one.
+ *
+ * `preferredStyle` defaults to the shipped `PREFERRED_OUTPUT_STYLE` (Caveman)
+ * but is a parameter so it can carry the user's own `defaultOutputStyle`
+ * setting instead — including `DEFAULT_OUTPUT_STYLE` ("default"), which is
+ * how "None for every new conversation" is expressed.
+ *
+ * Exported so the composer can put it in the options it dispatches, not only
+ * in the chip's label: a chip that says Caveman while the run uses something
+ * else would be a lie, and the label is the cheaper half to get right.
+ */
+export function resolveInitialOutputStyle(
+  availableStyles: ReadonlyArray<string> | undefined,
+  preferredStyle: string = PREFERRED_OUTPUT_STYLE,
+): string | null {
+  return (availableStyles ?? []).includes(preferredStyle) ? preferredStyle : null;
+}
+
+/**
+ * The style to write into a conversation that has not picked one, or `null`
+ * when there is nothing to write.
+ *
+ * Exists because the two readings of "nobody picked one" disagreed and the
+ * disagreement was invisible: `getOutputStyleSelection` answers `undefined`,
+ * the chip normalises that to `null`, and a seeding guard written against
+ * `null` therefore matched every render and never fired. The label went on
+ * showing Caveman — it falls back to the same default it had failed to write —
+ * while the turn ran under whatever the CLI resolved on its own. One function,
+ * so the label and the written selection cannot drift apart again.
+ */
+export function resolveOutputStyleToSeed(input: {
+  pickedStyle: string | null | undefined;
+  availableStyles: ReadonlyArray<string> | undefined;
+  preferredStyle?: string;
+}): string | null {
+  if (input.pickedStyle?.trim()) return null;
+  return resolveInitialOutputStyle(input.availableStyles, input.preferredStyle);
+}
+
 export function isDefaultOutputStyle(style: string): boolean {
   return style.localeCompare(DEFAULT_OUTPUT_STYLE, undefined, { sensitivity: "base" }) === 0;
 }
@@ -132,10 +214,40 @@ export function formatOutputStyleLabel(style: string): string {
  * thread's own setting stays visible and selectable rather than silently
  * reading as some other style.
  */
+/**
+ * The full menu of styles Settings offers for "what a fresh conversation
+ * starts on" — every style the driver reports, minus {@link HIDDEN_OUTPUT_STYLES},
+ * Caveman pinned first always, everything else alphabetical.
+ *
+ * Unlike {@link resolveOutputStyleChipState} this never returns empty:
+ * Settings has no thread to hide behind, so before the capabilities probe has
+ * answered (or on a machine with no Claude driver) it falls back to the two
+ * styles CH3 ships — Caveman and None — the same pair this picker offered
+ * before it read the live list.
+ */
+export function resolveDefaultOutputStyleOptions(
+  availableStyles: ReadonlyArray<string> | undefined,
+): ReadonlyArray<string> {
+  const styles = (availableStyles ?? []).filter((style) => !isHiddenOutputStyle(style));
+  if (styles.length === 0) {
+    return [PREFERRED_OUTPUT_STYLE, DEFAULT_OUTPUT_STYLE];
+  }
+  const withCaveman = styles.includes(PREFERRED_OUTPUT_STYLE)
+    ? styles
+    : [PREFERRED_OUTPUT_STYLE, ...styles];
+  return withCaveman.toSorted((left, right) => {
+    const leftIsCaveman = pinnedOutputStyleRank(left) === 0;
+    const rightIsCaveman = pinnedOutputStyleRank(right) === 0;
+    if (leftIsCaveman !== rightIsCaveman) return leftIsCaveman ? -1 : 1;
+    return left.localeCompare(right, undefined, { sensitivity: "base" });
+  });
+}
+
 export function resolveOutputStyleChipState(input: {
   availableStyles: ReadonlyArray<string> | undefined;
   activeStyle: string | undefined;
   pickedStyle: string | null | undefined;
+  preferredStyle?: string;
 }): OutputStyleChipState | null {
   const availableStyles = input.availableStyles ?? [];
   if (availableStyles.length === 0) {
@@ -144,11 +256,18 @@ export function resolveOutputStyleChipState(input: {
 
   const pickedStyle = input.pickedStyle?.trim() ? input.pickedStyle.trim() : null;
 
-  // With nothing picked the chip mirrors the driver's own resolved style, so
-  // the label is true before the first pick. The last resort is the driver's
-  // FIRST REPORTED style — the CLI lists its own default first — which is why
-  // this reads the raw list rather than the display order built below.
-  const selectedStyle = pickedStyle ?? input.activeStyle?.trim() ?? availableStyles[0] ?? null;
+  // Nothing picked yet: start on the style CH3 ships for that purpose (or
+  // the user's own `defaultOutputStyle` setting), and fall back to the
+  // driver's own resolved style only where it is absent. The last resort is
+  // the driver's FIRST REPORTED style — the CLI lists its own default first —
+  // which is why this reads the raw list rather than the display order built
+  // below.
+  const selectedStyle =
+    pickedStyle ??
+    resolveInitialOutputStyle(availableStyles, input.preferredStyle) ??
+    input.activeStyle?.trim() ??
+    availableStyles[0] ??
+    null;
 
   const styles = (
     pickedStyle && !availableStyles.includes(pickedStyle)
@@ -160,11 +279,23 @@ export function resolveOutputStyleChipState(input: {
     // Select whose value matches no item renders as empty.
     .filter((style) => style === selectedStyle || !isHiddenOutputStyle(style))
     .toSorted((left, right) => {
-      // "None" is pinned to the top rather than sorted into the N's: it is the
-      // way out of every other style, so it belongs where the eye lands first.
+      // "None" leads, always. It is the way out of every other style, and the
+      // way out belongs in the one position you can hit without reading the
+      // list. It sat third for a while, under the two CH3 recommends; that
+      // put the escape somewhere you had to look for it, which is the wrong
+      // trade for a menu whose other entries are all opinions.
+      //
+      // This is ORDER ONLY. Nothing here decides what a conversation starts
+      // on — `PREFERRED_OUTPUT_STYLE` still does, and it is still Caveman.
       if (isDefaultOutputStyle(left) !== isDefaultOutputStyle(right)) {
         return isDefaultOutputStyle(left) ? -1 : 1;
       }
+      // Then CH3's own styles, in the order `PINNED_OUTPUT_STYLES` gives:
+      // the style every conversation starts on should be read before whatever
+      // the CLI happens to ship.
+      const leftRank = pinnedOutputStyleRank(left);
+      const rightRank = pinnedOutputStyleRank(right);
+      if (leftRank !== rightRank) return leftRank - rightRank;
       // Everything else alphabetical, case-insensitive: the driver reports its
       // built-ins first and then whatever order the style files come back in,
       // which makes a list of a dozen styles something you read rather than

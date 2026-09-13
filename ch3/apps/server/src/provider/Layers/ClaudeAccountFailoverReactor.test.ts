@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
+import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import {
@@ -75,10 +76,22 @@ const processRunnerLayer = Layer.succeed(ProcessRunner.ProcessRunner, {
     }),
 } as never);
 
+/**
+ * A background policy reporting one foreground client, so the idle gate lets
+ * the tick run. Suspending on an idle machine is tested against the pure rule
+ * in `claudeUsagePollGate.test.ts`; here it must simply not veto.
+ */
+const backgroundPolicyLayer = Layer.succeed(BackgroundPolicy.BackgroundPolicy, {
+  snapshot: Effect.succeed({ activeForegroundLeaseCount: 1 }),
+} as never);
+
 const testLayer = (running: number) =>
-  Layer.mergeAll(settingsLayer, turnsLayer(running), processRunnerLayer).pipe(
-    Layer.provideMerge(NodeServices.layer),
-  );
+  Layer.mergeAll(
+    settingsLayer,
+    turnsLayer(running),
+    processRunnerLayer,
+    backgroundPolicyLayer,
+  ).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("Claude account failover reactor", () => {
   it.effect("writes nothing while a turn is in flight", () =>

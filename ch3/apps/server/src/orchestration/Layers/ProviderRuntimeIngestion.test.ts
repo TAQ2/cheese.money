@@ -44,6 +44,7 @@ import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityRes
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import * as BackgroundShellPidLookup from "../../resourceTelemetry/BackgroundShellPidLookup.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
@@ -109,6 +110,7 @@ function createProviderServiceHarness() {
     mcpServerAction: () => unsupported(),
     listRewindTargets: () => unsupported(),
     rewindFiles: () => unsupported(),
+    reattachSessions: () => Effect.succeed([]),
     listSessions: () => Effect.succeed([...runtimeSessions]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     getInstanceInfo: (instanceId) => {
@@ -222,10 +224,15 @@ describe("ProviderRuntimeIngestion", () => {
     }
   });
 
-  async function createHarness(options?: { serverSettings?: Partial<ServerSettings> }) {
+  async function createHarness(options?: {
+    serverSettings?: Partial<ServerSettings>;
+    /** A stand-in process table, for the tests that need a task's shell to exist. */
+    backgroundShellPid?: { readonly taskId: string; readonly pid: number };
+  }) {
     const workspaceRoot = makeTempDir("ch3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const shellPid = options?.backgroundShellPid;
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -244,6 +251,16 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
+      // No process table here, so every task row answers "no pid" — unless a
+      // test hands one over, which is the only way to observe the pid path.
+      Layer.provideMerge(
+        shellPid === undefined
+          ? BackgroundShellPidLookup.layerUnavailable
+          : Layer.succeed(BackgroundShellPidLookup.BackgroundShellPidLookup, {
+              resolve: (taskId) =>
+                Effect.succeed(taskId === shellPid.taskId ? shellPid.pid : undefined),
+            }),
+      ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -301,6 +318,7 @@ describe("ProviderRuntimeIngestion", () => {
           activeTurnId: null,
           updatedAt: createdAt,
           lastError: null,
+          lastErrorClass: null,
         },
         createdAt,
       }),
@@ -531,6 +549,7 @@ describe("ProviderRuntimeIngestion", () => {
             runtimeMode: "approval-required",
             activeTurnId: staleTurnId,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: "2026-01-01T00:00:01.000Z",
           },
           createdAt: "2026-01-01T00:00:01.000Z",
@@ -633,6 +652,7 @@ describe("ProviderRuntimeIngestion", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: "2026-01-01T00:00:01.000Z",
         },
         createdAt: "2026-01-01T00:00:01.000Z",
@@ -648,6 +668,7 @@ describe("ProviderRuntimeIngestion", () => {
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: stoppedAt,
         },
         createdAt: stoppedAt,
@@ -753,6 +774,7 @@ describe("ProviderRuntimeIngestion", () => {
           activeTurnId: null,
           updatedAt: seededAt,
           lastError: null,
+          lastErrorClass: null,
         },
         createdAt: seededAt,
       }),
@@ -1191,6 +1213,7 @@ describe("ProviderRuntimeIngestion", () => {
           activeTurnId: null,
           updatedAt: createdAt,
           lastError: null,
+          lastErrorClass: null,
         },
         createdAt,
       }),
@@ -1226,6 +1249,7 @@ describe("ProviderRuntimeIngestion", () => {
           activeTurnId: null,
           updatedAt: createdAt,
           lastError: null,
+          lastErrorClass: null,
         },
         createdAt,
       }),
@@ -1377,6 +1401,7 @@ describe("ProviderRuntimeIngestion", () => {
             activeTurnId: null,
             updatedAt: createdAt,
             lastError: null,
+            lastErrorClass: null,
           },
           createdAt,
         }),
@@ -1617,6 +1642,7 @@ describe("ProviderRuntimeIngestion", () => {
           activeTurnId: null,
           updatedAt: createdAt,
           lastError: null,
+          lastErrorClass: null,
         },
         createdAt,
       }),
@@ -1652,6 +1678,7 @@ describe("ProviderRuntimeIngestion", () => {
           activeTurnId: null,
           updatedAt: createdAt,
           lastError: null,
+          lastErrorClass: null,
         },
         createdAt,
       }),
@@ -1809,8 +1836,8 @@ describe("ProviderRuntimeIngestion", () => {
     expect(proposedPlan?.planMarkdown).toBe("## Buffered plan\n\n- first\n- second");
   });
 
-  it("buffers assistant deltas by default until completion", async () => {
-    const harness = await createHarness();
+  it("buffers assistant deltas until completion when streaming is off", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const now = "2026-01-01T00:00:00.000Z";
 
     harness.emit({
@@ -2005,7 +2032,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("does not create assistant segments for whitespace-only buffered text at approval boundaries", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const startedAt = "2026-03-28T06:28:00.000Z";
     const pausedAt = "2026-03-28T06:28:01.000Z";
 
@@ -2633,6 +2660,98 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime exploded");
+  });
+
+  it("keeps the error class through the turn.completed that follows it", async () => {
+    // A failed turn emits BOTH: `runtime.error` carrying the classification,
+    // then `turn.completed` a moment later. `thread.session.set` replaces the
+    // whole session, so a lifecycle write that nulled the class erased the
+    // classification milliseconds after it landed — and the auth banner never
+    // rendered for the failure it was built for.
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-auth-error"),
+      provider: ProviderDriverKind.make("claude"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-3"),
+      payload: {
+        message: "OAuth token revoked",
+        class: "auth_error",
+      },
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.lastErrorClass === "auth_error",
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed"),
+      provider: ProviderDriverKind.make("claude"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-3"),
+      payload: {
+        turnId: asTurnId("turn-3"),
+        state: "failed",
+        errorMessage: "OAuth token revoked",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.activeTurnId === null,
+    );
+    expect(thread.session?.lastError).toBe("OAuth token revoked");
+    expect(thread.session?.lastErrorClass).toBe("auth_error");
+  });
+
+  it("drops the error class when a later failure arrives without one", async () => {
+    // The other half of the rule: a lifecycle event carrying a DIFFERENT error
+    // has no classification of its own, and wearing the previous one would put
+    // a Sign in button in front of a failure that has nothing to do with auth.
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-auth-error-2"),
+      provider: ProviderDriverKind.make("claude"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-3"),
+      payload: { message: "OAuth token revoked", class: "auth_error" },
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.lastErrorClass === "auth_error",
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-2"),
+      provider: ProviderDriverKind.make("claude"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-3"),
+      payload: {
+        turnId: asTurnId("turn-3"),
+        state: "failed",
+        errorMessage: "disk full",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.lastError === "disk full",
+    );
+    expect(thread.session?.lastErrorClass).toBe(null);
   });
 
   it("records runtime.error activities from the typed payload message", async () => {
@@ -3480,5 +3599,81 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+
+  it("names the process behind a backgrounded shell task from the task id alone", async () => {
+    // The CLI announces a background shell with `task.started` and nothing
+    // CH3 could once use: the Bash input arrived on a different event,
+    // milliseconds later, and matching its command text against a process
+    // sample missed most rows. The task id is enough now — the lookup joins on
+    // the output file the CLI names after it — so the pid is looked up as
+    // soon as the task exists and lands on its own row.
+    const harness = await createHarness({
+      backgroundShellPid: { taskId: "bsz3u4b2k", pid: 54560 },
+    });
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-bg-task-started"),
+      provider: ProviderDriverKind.make("claude"),
+      createdAt: "2026-01-01T00:00:14.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        taskId: "bsz3u4b2k",
+        description: "Run 700-pair raw parity gate in background",
+        taskType: "local_bash",
+      },
+    });
+    await harness.drain();
+
+    const stampedThread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          (activity.payload as Record<string, unknown> | undefined)?.["pid"] === 54560,
+      ),
+    );
+    const stamped = stampedThread.activities.find(
+      (activity: ProviderRuntimeTestActivity) =>
+        (activity.payload as Record<string, unknown> | undefined)?.["pid"] === 54560,
+    );
+    // Its own progress row, on the same task id, so the client merges it onto
+    // the row already on screen — and says nothing else, so it cannot blank
+    // the step that row shows.
+    expect(stamped?.kind).toBe("task.progress");
+    expect(stamped?.id).toBe("evt-bg-task-started:shell-pid");
+    expect(stamped?.payload).toEqual({ taskId: "bsz3u4b2k", pid: 54560 });
+    // The row that announced the task is as the runtime sent it.
+    const started = stampedThread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-bg-task-started",
+    );
+    expect(started?.payload).not.toHaveProperty("pid");
+  });
+
+  it("never asks for a process behind a delegated agent, which is not one", async () => {
+    const harness = await createHarness({
+      backgroundShellPid: { taskId: "agent-1", pid: 54560 },
+    });
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-agent-task-started"),
+      provider: ProviderDriverKind.make("claude"),
+      createdAt: "2026-01-01T00:00:14.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: { taskId: "agent-1", description: "Review the diff", taskType: "local_agent" },
+    });
+    await harness.drain();
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-agent-task-started",
+      ),
+    );
+    expect(
+      thread.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          (activity.payload as Record<string, unknown> | undefined)?.["pid"] === 54560,
+      ),
+    ).toBe(false);
   });
 });

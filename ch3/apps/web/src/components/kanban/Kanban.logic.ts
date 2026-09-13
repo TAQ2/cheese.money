@@ -9,7 +9,7 @@ import { effectiveSettled, effectiveSnoozed } from "@ch3tools/client-runtime/sta
 import type { KanbanCardType } from "@ch3tools/contracts";
 
 import type { SidebarThreadSummary } from "../../types";
-import { resolveSidebarV2Status } from "../Sidebar.logic";
+import { resolveSidebarV2Status, isAgentWorkingLeaseActive } from "../Sidebar.logic";
 import {
   DEFAULT_KANBAN_CARD_TYPE,
   KANBAN_CARD_TYPES,
@@ -102,23 +102,50 @@ export function resolveKanbanColumn(
 }
 
 /**
+ * Whether the agent has explicitly claimed this thread and the claim is still
+ * good. The claim is a lease with an absolute expiry rather than a flag,
+ * because the process that set it can be killed before it can retract it — a
+ * lapsed lease heals itself where a stuck flag would strand the card forever.
+ *
+ * A missing, cleared or unparseable expiry is treated as no claim at all: the
+ * observable signals then decide the lane on their own, as they always did.
+ */
+export { isAgentWorkingLeaseActive };
+
+/**
  * The y-axis: a conversation dips into the agent lane while the agent works
  * and re-emerges to the user lane when it finishes (or needs the user).
  *
  * A running terminal subprocess (an orchestration script driving the thread)
  * keeps the card submerged even when the conversation itself is idle — the
- * AI is still working, just not through the chat session. Blocked-on-you
- * always outranks both: a pending approval or input request must surface.
+ * AI is still working, just not through the chat session. Work the agent
+ * launched detached leaves no observable signal at all — `nohup ... & disown`
+ * reparents it away from any terminal we inspect — so the agent claims the
+ * thread outright with a lease instead. Blocked-on-you outranks every one of
+ * them: a pending approval or input request must surface, lease or no lease.
  */
 export function resolveKanbanLane(
   thread: SidebarThreadSummary,
-  options?: { readonly hasRunningTerminal?: boolean },
+  options?: { readonly hasRunningTerminal?: boolean; readonly nowMs?: number },
 ): "user" | "agent" {
   const status = resolveSidebarV2Status(thread);
   if (status === "approval" || status === "input") {
     return "user";
   }
-  if (status === "working") {
+  if (isAgentWorkingLeaseActive(thread, options?.nowMs)) {
+    return "agent";
+  }
+  // "delegating" is a turn still in flight while the session reports idle —
+  // the agent driving sub-agents. Both are the agent working, so both submerge.
+  if (status === "working" || status === "delegating") {
+    return "agent";
+  }
+  // A turn still in flight means the AI is working, whatever the session says.
+  // The two disagree while a turn is driving sub-agents: the parent blocks on
+  // the sub-agent's tool call, the session stops reporting itself as running,
+  // and the card surfaced into the user's lane as though it were waiting on a
+  // human — while the agent was busy the whole time.
+  if (thread.latestTurn?.state === "running") {
     return "agent";
   }
   return options?.hasRunningTerminal === true ? "agent" : "user";

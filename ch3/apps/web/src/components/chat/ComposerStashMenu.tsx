@@ -97,6 +97,32 @@ export const ComposerStashMenu = memo(function ComposerStashMenu(props: {
             <CommandGroupLabel className="flex items-center gap-1.5 px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/55">
               <BookmarkIcon className="size-3" aria-hidden="true" />
               Stashed prompts
+              <span className="flex-1" />
+              {/*
+                Escape closes this too, and so does ⌘S — but neither is
+                visible, and a panel whose only exits are keystrokes reads as
+                stuck to whoever has not learnt them. Same control the find
+                bar and the kanban metrics panel use, in the same corner:
+                quiet until it is looked for. It calls the same `onClose` the
+                key handlers call, so there is one way to close the menu and
+                three ways to ask for it.
+              */}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="-mr-1 shrink-0 text-muted-foreground/60 hover:text-foreground"
+                aria-label="Close stashed prompts"
+                onMouseDown={(event) => {
+                  // The rows do this too: taking focus off the composer to
+                  // click a control inside the popover is not the user
+                  // leaving the composer.
+                  event.preventDefault();
+                }}
+                onClick={onClose}
+              >
+                <XIcon className="size-3.5" />
+              </Button>
             </CommandGroupLabel>
             {entries.length === 0 ? (
               <p className="px-3 pb-3 pt-1 text-muted-foreground/70 text-xs">

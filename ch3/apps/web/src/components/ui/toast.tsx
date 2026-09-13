@@ -427,7 +427,7 @@ interface ToastProviderProps extends Toast.Provider.Props {
   position?: ToastPosition;
 }
 
-function useActiveThreadRefFromRoute(): ScopedThreadRef | null {
+export function useActiveThreadRefFromRoute(): ScopedThreadRef | null {
   const routeTarget = useParams({
     strict: false,
     select: (params) => resolveThreadRouteTarget(params),

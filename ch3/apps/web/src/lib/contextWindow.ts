@@ -1,4 +1,8 @@
-import type { OrchestrationThreadActivity, ThreadTokenUsageSnapshot } from "@ch3tools/contracts";
+import {
+  PROVIDER_DISPLAY_NAMES,
+  type OrchestrationThreadActivity,
+  type ThreadTokenUsageSnapshot,
+} from "@ch3tools/contracts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -25,26 +29,24 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly updatedAt: string;
 };
 
-/** Map a provider driver kind to a user-facing display name. */
+/**
+ * Map a provider driver kind — or a default instance id, which is the same
+ * slug — to a user-facing display name.
+ *
+ * Names resolve through the contract map, so a provider renamed there is
+ * renamed in the sentences this feeds too. `claude` is a legacy spelling of
+ * `claudeAgent` that reached threads written by older builds; anything else
+ * unrecognised (a custom instance id, a fork's driver) is title-cased rather
+ * than printed raw.
+ */
 export function formatProviderDisplayName(provider: string | null | undefined): string {
   if (!provider) return "This agent";
-  switch (provider) {
-    case "claudeAgent":
-    case "claude":
-      return "Claude";
-    case "codex":
-      return "Codex";
-    case "cursor":
-      return "Cursor";
-    case "opencode":
-      return "OpenCode";
-    default: {
-      // Title-case unknown driver kinds so they read reasonably.
-      const trimmed = provider.replace(/Agent$/i, "").trim();
-      if (trimmed.length === 0) return provider;
-      return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
-    }
-  }
+  if (provider === "claude") return "Claude";
+  const displayName = (PROVIDER_DISPLAY_NAMES as Record<string, string | undefined>)[provider];
+  if (displayName !== undefined) return displayName;
+  const trimmed = provider.replace(/Agent$/i, "").trim();
+  if (trimmed.length === 0) return provider;
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
 export function deriveLatestContextWindowSnapshot(

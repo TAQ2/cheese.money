@@ -17,7 +17,10 @@ import {
   buildRestylePrompt,
   formatOutputStyleLabel,
   HIDDEN_OUTPUT_STYLES,
+  resolveDefaultOutputStyleOptions,
+  resolveInitialOutputStyle,
   resolveOutputStyleChipState,
+  resolveOutputStyleToSeed,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
   shouldIncludeBranchPickerItem,
@@ -734,14 +737,17 @@ describe("resolveOutputStyleChipState", () => {
     });
   });
 
-  it("lists the styles alphabetically regardless of the order the driver reports", () => {
+  it("leads with None, then the shipped styles, then the rest alphabetically", () => {
     expect(
       resolveOutputStyleChipState({
-        availableStyles: ["default", "Receipts", "Caveman", "mission control", "Zoom"],
+        availableStyles: ["default", "Receipts", "Caveman", "mission control", "I'm Tired", "Zoom"],
         activeStyle: "default",
         pickedStyle: null,
       })?.styles,
-    ).toEqual(["default", "Caveman", "mission control", "Receipts", "Zoom"]);
+      // Caveman first because every conversation starts on it, "I'm Tired"
+      // second as the deliberate way out, then None, then whatever else the
+      // driver reports — in the order given, not the order it arrived in.
+    ).toEqual(["default", "Caveman", "I'm Tired", "mission control", "Receipts", "Zoom"]);
   });
 
   it("drops the built-in styles on the hidden list", () => {
@@ -824,22 +830,27 @@ describe("resolveOutputStyleChipState", () => {
     // default, which it reports first.
     expect(
       resolveOutputStyleChipState({
-        availableStyles: ["default", "Caveman"],
+        // No shipped default in this list — that path has its own test; this
+        // one is about which fallback wins when nothing else applies.
+        availableStyles: ["default", "Zoom"],
         activeStyle: undefined,
         pickedStyle: null,
       })?.selectedStyle,
     ).toBe("default");
   });
 
-  it("pins the no-style option to the top and calls it None", () => {
+  it("puts the no-style option first and calls it None", () => {
     const chip = resolveOutputStyleChipState({
       availableStyles: ["Caveman", "Zoom", "default", "Ladder"],
       activeStyle: "default",
-      pickedStyle: null,
+      // Picked explicitly: this test is about the display order and the label,
+      // and leaving it unpicked would now select the shipped default instead.
+      pickedStyle: "default",
     });
 
-    // Pinned, not sorted into the N's — it is the way out of every other
-    // style, so it sits where the eye lands first.
+    // Pinned above the alphabetical run rather than sorted into the N's — it
+    // is the way out of every other style — but below the styles CH3 ships
+    // and recommends.
     expect(chip?.styles).toEqual(["default", "Caveman", "Ladder", "Zoom"]);
     // The wire value stays "default"; only the display name changes.
     expect(chip?.selectedStyle).toBe("default");
@@ -864,6 +875,41 @@ describe("resolveOutputStyleChipState", () => {
       selectedStyle: "Caveman",
       label: "Caveman",
     });
+  });
+});
+
+describe("resolveDefaultOutputStyleOptions", () => {
+  it("falls back to Caveman and None when the driver has not answered yet", () => {
+    expect(resolveDefaultOutputStyleOptions(undefined)).toEqual(["Caveman", "default"]);
+    expect(resolveDefaultOutputStyleOptions([])).toEqual(["Caveman", "default"]);
+  });
+
+  it("pins Caveman first, then everything else alphabetically, including None", () => {
+    expect(
+      resolveDefaultOutputStyleOptions(["default", "Zoom", "Caveman", "Ladder", "I'm Tired"]),
+    ).toEqual(["Caveman", "default", "I'm Tired", "Ladder", "Zoom"]);
+  });
+
+  it("adds Caveman even when the driver does not report it", () => {
+    // Bundled at install time, so this should not happen — but the picker
+    // still needs a first-item recommendation if the file was ever deleted.
+    expect(resolveDefaultOutputStyleOptions(["default", "Zoom"])).toEqual([
+      "Caveman",
+      "default",
+      "Zoom",
+    ]);
+  });
+
+  it("drops the built-in styles on the hidden list", () => {
+    expect(
+      resolveDefaultOutputStyleOptions([
+        "default",
+        "Caveman",
+        "Proactive",
+        "Explanatory",
+        "Learning",
+      ]),
+    ).toEqual(["Caveman", "default"]);
   });
 });
 
@@ -900,5 +946,148 @@ describe("buildRestylePrompt", () => {
 
   it("describes the no-style option in words the model can act on", () => {
     expect(buildRestylePrompt("default")).toContain("default response style (no style)");
+  });
+});
+
+describe("the shipped response style", () => {
+  it("starts a conversation on Caveman when the CLI advertises it", () => {
+    const chip = resolveOutputStyleChipState({
+      availableStyles: ["default", "Caveman", "Whiteboard"],
+      activeStyle: "default",
+      pickedStyle: null,
+    });
+    // Beats the driver's own resolved style: CH3 ships Caveman as the
+    // starting point for every conversation.
+    expect(chip?.selectedStyle).toBe("Caveman");
+  });
+
+  it("honours a pick, including the pick that means none", () => {
+    const pick = (pickedStyle: string) =>
+      resolveOutputStyleChipState({
+        availableStyles: ["default", "Caveman", "Whiteboard"],
+        activeStyle: "default",
+        pickedStyle,
+      })?.selectedStyle;
+    expect(pick("Whiteboard")).toBe("Whiteboard");
+    // Moving away is a real selection and must not be overridden back.
+    expect(pick("default")).toBe("default");
+  });
+
+  it("starts a conversation on None when the defaultOutputStyle setting says so", () => {
+    const chip = resolveOutputStyleChipState({
+      availableStyles: ["default", "Caveman", "Whiteboard"],
+      activeStyle: "Caveman",
+      pickedStyle: null,
+      preferredStyle: "default",
+    });
+    expect(chip?.selectedStyle).toBe("default");
+  });
+
+  it("falls back to the driver's own style when Caveman is not installed", () => {
+    // The file lives in the user's home and can be deleted. Naming a style the
+    // CLI does not know is a broken session, not a missing preference.
+    const chip = resolveOutputStyleChipState({
+      availableStyles: ["default", "Whiteboard"],
+      activeStyle: "Whiteboard",
+      pickedStyle: null,
+    });
+    expect(chip?.selectedStyle).toBe("Whiteboard");
+  });
+
+  it("puts None first without changing what a conversation starts on", () => {
+    // The two are separate questions and this is the one place they could be
+    // confused: None leads the MENU, Caveman is still what a new conversation
+    // runs under. Reordering the list must not become a change of default.
+    const chip = resolveOutputStyleChipState({
+      availableStyles: ["default", "Caveman", "I'm Tired", "Zoom"],
+      pickedStyle: null,
+      activeStyle: undefined,
+    });
+
+    expect(chip?.styles[0]).toBe("default");
+    expect(chip?.selectedStyle).toBe("Caveman");
+    expect(resolveInitialOutputStyle(["default", "Caveman", "I'm Tired", "Zoom"])).toBe("Caveman");
+  });
+
+  it("resolveInitialOutputStyle answers null rather than guessing", () => {
+    expect(resolveInitialOutputStyle(["default", "Caveman"])).toBe("Caveman");
+    expect(resolveInitialOutputStyle(["default"])).toBeNull();
+    expect(resolveInitialOutputStyle(undefined)).toBeNull();
+  });
+
+  it("resolveInitialOutputStyle honors a preferredStyle override (the defaultOutputStyle setting)", () => {
+    // "None" for every new conversation is stored as the CLI's own no-style
+    // sentinel, "default" — always in the advertised list, so this never falls
+    // through to the missing-file case.
+    expect(resolveInitialOutputStyle(["default", "Caveman", "Whiteboard"], "default")).toBe(
+      "default",
+    );
+    expect(resolveInitialOutputStyle(["default", "Caveman", "Whiteboard"], "Whiteboard")).toBe(
+      "Whiteboard",
+    );
+    // A preference naming a style this machine does not advertise degrades the
+    // same way the shipped Caveman default does: null, not a guess.
+    expect(resolveInitialOutputStyle(["default", "Caveman"], "Whiteboard")).toBeNull();
+  });
+});
+
+describe("resolveOutputStyleToSeed", () => {
+  it("seeds Caveman into a conversation that has picked nothing", () => {
+    // The reported bug, at its source: nothing had picked a style, and the
+    // guard that was supposed to notice compared the reading against `null`
+    // while it answers `undefined` — so it matched on every render, wrote
+    // nothing, and the turn ran under whatever the CLI resolved on its own.
+    expect(
+      resolveOutputStyleToSeed({
+        pickedStyle: undefined,
+        availableStyles: ["default", "Caveman", "Whiteboard"],
+      }),
+    ).toBe("Caveman");
+    expect(
+      resolveOutputStyleToSeed({
+        pickedStyle: null,
+        availableStyles: ["default", "Caveman", "Whiteboard"],
+      }),
+    ).toBe("Caveman");
+    expect(
+      resolveOutputStyleToSeed({
+        pickedStyle: "   ",
+        availableStyles: ["default", "Caveman", "Whiteboard"],
+      }),
+    ).toBe("Caveman");
+  });
+
+  it("leaves a conversation that has picked one alone, None included", () => {
+    // Picking None is a selection. Seeding over it would make the shipped
+    // default un-leaveable rather than merely the starting point.
+    const styles = ["default", "Caveman", "Whiteboard"];
+    expect(
+      resolveOutputStyleToSeed({ pickedStyle: "default", availableStyles: styles }),
+    ).toBeNull();
+    expect(
+      resolveOutputStyleToSeed({ pickedStyle: "Whiteboard", availableStyles: styles }),
+    ).toBeNull();
+    expect(
+      resolveOutputStyleToSeed({ pickedStyle: "Caveman", availableStyles: styles }),
+    ).toBeNull();
+  });
+
+  it("writes nothing when the CLI does not advertise Caveman", () => {
+    // Naming a style the CLI does not know breaks the session. The chip falls
+    // back to the driver's own resolved style instead, and nothing is written.
+    expect(
+      resolveOutputStyleToSeed({ pickedStyle: null, availableStyles: ["default", "Whiteboard"] }),
+    ).toBeNull();
+    expect(resolveOutputStyleToSeed({ pickedStyle: null, availableStyles: undefined })).toBeNull();
+  });
+
+  it("seeds None instead of Caveman when defaultOutputStyle is set to None", () => {
+    expect(
+      resolveOutputStyleToSeed({
+        pickedStyle: null,
+        availableStyles: ["default", "Caveman", "Whiteboard"],
+        preferredStyle: "default",
+      }),
+    ).toBe("default");
   });
 });

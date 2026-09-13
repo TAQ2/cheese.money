@@ -79,6 +79,7 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the command read model"),
             getSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the full orchestration snapshot"),
+            listProjects: () => Effect.die("this test should not list projects"),
             getShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             getArchivedShellSnapshot: () =>
@@ -108,6 +109,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            getThreadActivitiesPage: () => Effect.succeed(Option.none()),
             searchThreads: () => Effect.succeed({ matches: [] }),
           }),
         ),
@@ -188,6 +190,7 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the command read model"),
             getSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the full orchestration snapshot"),
+            listProjects: () => Effect.die("this test should not list projects"),
             getShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             getArchivedShellSnapshot: () =>
@@ -202,6 +205,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            getThreadActivitiesPage: () => Effect.succeed(Option.none()),
             searchThreads: () => Effect.succeed({ matches: [] }),
           }),
         ),
@@ -272,6 +276,7 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the command read model"),
             getSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the full orchestration snapshot"),
+            listProjects: () => Effect.die("this test should not list projects"),
             getShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             getArchivedShellSnapshot: () =>
@@ -286,6 +291,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            getThreadActivitiesPage: () => Effect.succeed(Option.none()),
             searchThreads: () => Effect.succeed({ matches: [] }),
           }),
         ),
@@ -341,6 +347,7 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the command read model"),
             getSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the full orchestration snapshot"),
+            listProjects: () => Effect.die("this test should not list projects"),
             getShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             getArchivedShellSnapshot: () =>
@@ -355,6 +362,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            getThreadActivitiesPage: () => Effect.succeed(Option.none()),
             searchThreads: () => Effect.succeed({ matches: [] }),
           }),
         ),
@@ -395,6 +403,7 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the command read model"),
             getSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the full orchestration snapshot"),
+            listProjects: () => Effect.die("this test should not list projects"),
             getShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             getArchivedShellSnapshot: () =>
@@ -409,6 +418,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            getThreadActivitiesPage: () => Effect.succeed(Option.none()),
             searchThreads: () => Effect.succeed({ matches: [] }),
           }),
         ),

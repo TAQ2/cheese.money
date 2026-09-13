@@ -5,6 +5,12 @@
  * responsibility here. The rules are aimed at what a voice ruins: code read
  * character by character, URLs spelled out, table pipes and heading markers
  * pronounced as words. Content survives — only the notation goes.
+ *
+ * Shared rather than server-local because the ceiling the server enforces is
+ * measured on the OUTPUT of this function. A client that cuts a long reply
+ * into speakable parts has to size those parts against the same measure, and
+ * the only way to do that without a second, drifting copy of these rules is
+ * to run the same ones.
  */
 
 /** What the listener hears in place of a code block, in the reply's own language. */
@@ -14,6 +20,11 @@ const CODE_BLOCK_CUES = {
 } as const;
 
 export type SpokenTextLanguage = keyof typeof CODE_BLOCK_CUES;
+
+/** Every language the cleaner speaks, so a caller can measure the worst of them. */
+export const SPOKEN_TEXT_LANGUAGES = Object.keys(CODE_BLOCK_CUES) as ReadonlyArray<
+  keyof typeof CODE_BLOCK_CUES
+>;
 
 /**
  * Remove code blocks by walking lines rather than by regex.
@@ -133,4 +144,20 @@ export function prepareSpokenText(text: string, language: SpokenTextLanguage = "
       .replace(/\n{3,}/g, "\n\n")
       .trim()
   );
+}
+
+/**
+ * The longest `text` can speak as, whichever language the server detects.
+ *
+ * The server detects the language itself and cleans with that language's
+ * code-block cue, so a client sizing a request cannot know which cue will be
+ * used. Taking the longest keeps the estimate on the safe side of the
+ * server's ceiling: a part measured here fits whatever the server decides.
+ */
+export function maxSpokenLength(text: string): number {
+  let longest = 0;
+  for (const language of SPOKEN_TEXT_LANGUAGES) {
+    longest = Math.max(longest, prepareSpokenText(text, language).length);
+  }
+  return longest;
 }

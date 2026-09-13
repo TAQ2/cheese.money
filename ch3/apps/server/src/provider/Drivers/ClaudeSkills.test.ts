@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { discoverClaudeSkills } from "./ClaudeSkills.ts";
+import { discoverClaudeOutputStyles, discoverClaudeSkills } from "./ClaudeSkills.ts";
 
 const writeSkill = Effect.fn(function* (
   skillsDir: string,
@@ -103,20 +103,31 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
 
       yield* writeSkill(skillsDir, "no-frontmatter", "# Just a heading\n");
       yield* writeSkill(skillsDir, "broken-yaml", "---\nname: [unclosed\n---\n");
+      // The realistic break: one bare `: ` inside an unquoted description
+      // invalidates the whole block even though `name:` is perfectly readable.
+      yield* writeSkill(
+        skillsDir,
+        "bare-colon",
+        "---\nname: renamed-in-frontmatter\ndescription: Levels: one, two.\n---\n",
+      );
       // A stray file (not a directory with SKILL.md) must be skipped.
       yield* fs.makeDirectory(skillsDir, { recursive: true });
       yield* fs.writeFileString(path.join(skillsDir, "README.md"), "not a skill");
 
       const skills = yield* discoverClaudeSkills({ homePath: configDir }, undefined);
 
-      // A skill with no frontmatter falls back to its directory name; a skill
-      // whose frontmatter fails to parse is skipped entirely (Claude Code
-      // won't load it either).
+      // Every one of these still loads in Claude Code, under its DIRECTORY
+      // name — CLI 2.1.263 ignores the `name:` a broken block claims, which
+      // is why `bare-colon` appears here and `renamed-in-frontmatter` does
+      // not. Skipping them would hide working skills from the `$` picker.
       assert.deepEqual(
         skills.map((skill) => skill.name),
-        ["no-frontmatter"],
+        ["bare-colon", "broken-yaml", "no-frontmatter"],
       );
-      assert.equal(skills[0]?.description, undefined);
+      assert.deepEqual(
+        skills.map((skill) => skill.description),
+        [undefined, undefined, undefined],
+      );
     }),
   );
 
@@ -200,6 +211,131 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
       );
 
       assert.deepEqual(skills, []);
+    }),
+  );
+});
+
+const writeOutputStyle = Effect.fn(function* (
+  stylesDir: string,
+  fileName: string,
+  contents: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.makeDirectory(stylesDir, { recursive: true });
+  yield* fs.writeFileString(path.join(stylesDir, fileName), contents);
+});
+
+const BUILT_INS = ["default", "Explanatory", "Learning", "Proactive"];
+
+it.layer(NodeServices.layer)("discoverClaudeOutputStyles", (it) => {
+  it.effect("reports the built-ins alone when the styles directory is absent", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-claude-styles-" });
+
+      const styles = yield* discoverClaudeOutputStyles({
+        homePath: path.join(tempDir, "missing-home"),
+      });
+
+      // `default` must survive an empty config dir: it is what the composer
+      // chip shows when the thread has picked no style.
+      assert.deepEqual(styles, BUILT_INS);
+    }),
+  );
+
+  it.effect("identifies a style by its frontmatter name, not its filename", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-claude-styles-" });
+      const configDir = path.join(tempDir, "claude-home");
+
+      // The CLI resolves `outputStyle: "Simplified Technical English"` for
+      // this file and rejects the filename stem, so the stem must never be
+      // what CH3 offers.
+      yield* writeOutputStyle(
+        path.join(configDir, "output-styles"),
+        "simplified-technical-english.md",
+        ["---", "name: Simplified Technical English", "description: STE.", "---", "", "Body"].join(
+          "\n",
+        ),
+      );
+
+      const styles = yield* discoverClaudeOutputStyles({ homePath: configDir });
+
+      assert.deepEqual(styles, [...BUILT_INS, "Simplified Technical English"]);
+    }),
+  );
+
+  it.effect("recovers a name from a broken block, falls back to the stem, skips non-markdown", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-claude-styles-" });
+      const configDir = path.join(tempDir, "claude-home");
+      const stylesDir = path.join(configDir, "output-styles");
+
+      yield* writeOutputStyle(stylesDir, "no-frontmatter.md", "# Just a heading\n");
+      yield* writeOutputStyle(stylesDir, "notes.txt", "---\nname: Not A Style\n---\n");
+      // Styles keep their declared name through a broken block: the CLI
+      // resolves `outputStyle: "Caveman"` for this file and rejects the
+      // filename stem, so the stem must not be what CH3 offers.
+      yield* writeOutputStyle(
+        stylesDir,
+        "caveman.md",
+        "---\nname: Caveman\ndescription: Levels: lite, full, ultra.\n---\n",
+      );
+
+      const styles = yield* discoverClaudeOutputStyles({ homePath: configDir });
+
+      assert.deepEqual(styles, [...BUILT_INS, "Caveman", "no-frontmatter"]);
+    }),
+  );
+
+  it.effect("does not offer a style twice when it only differs from a built-in in case", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-claude-styles-" });
+      const configDir = path.join(tempDir, "claude-home");
+      const stylesDir = path.join(configDir, "output-styles");
+
+      // The CLI matches style names case-insensitively, so this file IS the
+      // built-in rather than a second entry offering the same style.
+      yield* writeOutputStyle(stylesDir, "explanatory.md", "---\nname: explanatory\n---\n");
+      // Two files claiming the same style: the first in sorted filename order
+      // wins, so the list is stable rather than dependent on directory order.
+      yield* writeOutputStyle(stylesDir, "a-caveman.md", "---\nname: Caveman\n---\n");
+      yield* writeOutputStyle(stylesDir, "b-caveman.md", "---\nname: CAVEMAN\n---\n");
+
+      const styles = yield* discoverClaudeOutputStyles({ homePath: configDir });
+
+      assert.deepEqual(styles, [...BUILT_INS, "Caveman"]);
+    }),
+  );
+
+  it.effect("honors CLAUDE_CONFIG_DIR when homePath is unset", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-claude-styles-" });
+      const environmentConfigDir = path.join(tempDir, "env-config");
+
+      // Account rotation is the whole reason this matters: a thread bound to a
+      // non-default account must see that account's styles.
+      yield* writeOutputStyle(
+        path.join(environmentConfigDir, "output-styles"),
+        "receipts.md",
+        "---\nname: Receipts\n---\n",
+      );
+
+      const styles = yield* discoverClaudeOutputStyles({ homePath: "" }, undefined, {
+        CLAUDE_CONFIG_DIR: environmentConfigDir,
+      });
+
+      assert.deepEqual(styles, [...BUILT_INS, "Receipts"]);
     }),
   );
 });

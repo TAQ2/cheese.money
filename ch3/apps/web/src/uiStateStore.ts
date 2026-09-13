@@ -23,6 +23,7 @@ export interface PersistedUiState {
   threadOrder?: string[];
   manuallyUnreadThreadKeys?: string[];
   threadLastVisitedAtById?: Record<string, string>;
+  lastOpenedThreadKey?: string | null;
   speechVoice?: string;
   speechVoiceSpanish?: string;
   speechLanguageMode?: string;
@@ -62,6 +63,16 @@ export interface UiThreadState {
    */
   manuallyUnreadThreadKeys: string[];
   threadLastVisitedAtById: Record<string, string>;
+  /**
+   * The thread this device had open last, so a cold start returns to it.
+   *
+   * Deliberately not derived from `threadLastVisitedAtById`: those values are
+   * the thread's own `updatedAt` at the moment it was seen, which the unread
+   * logic needs and which says nothing about the order threads were opened in.
+   * Opening an older thread last would leave the newest-updated one looking
+   * like the most recent, and the app would come back somewhere you had left.
+   */
+  lastOpenedThreadKey: string | null;
   /** Engine voice id, e.g. `en-GB-RyanNeural`. Per device: a voice is a
       listening preference, not something to sync to another machine. */
   speechVoice: string;
@@ -86,6 +97,7 @@ const initialState: UiState = {
   threadOrder: [],
   manuallyUnreadThreadKeys: [],
   threadLastVisitedAtById: {},
+  lastOpenedThreadKey: null,
   speechVoice: "en-GB-RyanNeural",
   speechVoiceSpanish: "es-MX-JorgeNeural",
   speechLanguageMode: "detect",
@@ -169,6 +181,10 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     threadOrder: sanitizeStringArray(parsed.threadOrder),
     manuallyUnreadThreadKeys: sanitizeStringArray(parsed.manuallyUnreadThreadKeys),
     threadLastVisitedAtById: sanitizeTimestampRecord(parsed.threadLastVisitedAtById),
+    lastOpenedThreadKey:
+      typeof parsed.lastOpenedThreadKey === "string" && parsed.lastOpenedThreadKey.trim().length > 0
+        ? parsed.lastOpenedThreadKey
+        : null,
     speechVoice: parsed.speechVoice?.trim() || initialState.speechVoice,
     speechVoiceSpanish: parsed.speechVoiceSpanish?.trim() || initialState.speechVoiceSpanish,
     speechLanguageMode:
@@ -256,6 +272,7 @@ export function persistState(state: UiState): void {
         threadOrder: state.threadOrder,
         manuallyUnreadThreadKeys: state.manuallyUnreadThreadKeys,
         threadLastVisitedAtById: state.threadLastVisitedAtById,
+        lastOpenedThreadKey: state.lastOpenedThreadKey,
         speechVoice: state.speechVoice,
         speechVoiceSpanish: state.speechVoiceSpanish,
         speechLanguageMode: state.speechLanguageMode,
@@ -596,6 +613,8 @@ function dedupeAndCap(keys: readonly string[]): string[] {
 
 interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt: string) => void;
+  /** Remember the thread now on screen, so a cold start can return to it. */
+  setLastOpenedThread: (threadKey: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
@@ -623,6 +642,12 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   ...readPersistedState(),
   markThreadVisited: (threadId, visitedAt) =>
     set((state) => markThreadVisited(state, threadId, visitedAt)),
+  setLastOpenedThread: (threadKey) =>
+    set((state) =>
+      state.lastOpenedThreadKey === threadKey
+        ? state
+        : { ...state, lastOpenedThreadKey: threadKey },
+    ),
   markThreadUnread: (threadId, latestTurnCompletedAt) =>
     set((state) => markThreadUnread(state, threadId, latestTurnCompletedAt)),
   setThreadChangedFilesExpanded: (threadId, turnId, expanded) =>

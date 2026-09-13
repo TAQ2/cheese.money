@@ -21,6 +21,7 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 
+import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -35,6 +36,13 @@ import {
   claudeAuthFailureWithin,
   resetClaudeAuthFailureSignal,
 } from "../Drivers/claudeAuthFailureSignal.ts";
+import {
+  noteClaudeUsagePollActivity,
+  readLastClaudeUsagePollActivityMs,
+  resolveClaudeUsagePoll,
+  USAGE_IDLE_SUSPEND_MS,
+} from "../Drivers/claudeUsagePollGate.ts";
+import { isDecisionGradeUsage } from "../Drivers/ClaudeAccountUsage.ts";
 import {
   ROTATION_SESSION_ESCAPE_PERCENT,
   chooseClaudeRotationTarget,
@@ -136,10 +144,17 @@ const readFailoverSettings = Effect.fn("readFailoverSettings")(function* () {
     accountFailoverThresholdPercent?: unknown;
     accountRotationEnabled?: unknown;
   };
-  const failoverEnabled = config.accountFailoverEnabled === true;
-  // Rotation is ON unless explicitly switched off: absent means enabled, so
-  // the default experience is the smart one and unticking is the opt-out.
-  const rotationEnabled = config.accountRotationEnabled !== false;
+  // Both read against their schema default rather than for a literal `true`:
+  // a config written before either field existed left the server idle while
+  // the panel said otherwise. Failover defaults on, so absent means on.
+  //
+  // Rotation defaults OFF and stays that way. Its usage probe reads the Claude
+  // credential out of the login keychain on a timer whose first tick fires at
+  // startup, so a machine that has never granted /usr/bin/security access to
+  // that item would see an unexplained consent dialog the moment the app
+  // opens. Absent therefore means off, and the checkbox says why.
+  const failoverEnabled = config.accountFailoverEnabled !== false;
+  const rotationEnabled = config.accountRotationEnabled === true;
   if (!failoverEnabled && !rotationEnabled) return undefined;
 
   return {
@@ -165,11 +180,70 @@ const readFailoverSettings = Effect.fn("readFailoverSettings")(function* () {
  * Every early return is deliberate: doing nothing is always safe, and a
  * hand-over made on incomplete or stale information is worse than a late one.
  */
+/**
+ * Whether this tick may spend usage reads, and a note of the activity it saw.
+ *
+ * Reads are the scarce resource here: the endpoint rate limits per quota, so
+ * an idle machine asking every minute per account spends the budget that a
+ * hand-over decision needs later. Live activity refreshes the window; eight
+ * quiet minutes close it until something happens.
+ */
+const claudeUsagePollAllowed = Effect.fn("claudeUsagePollAllowed")(function* (logTag: string) {
+  const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
+  const turns = yield* ProjectionTurnRepository;
+  const now = yield* DateTime.now;
+  const nowMs = DateTime.toEpochMillis(now);
+  const snapshot = yield* backgroundPolicy.snapshot;
+  const since = DateTime.formatIso(
+    DateTime.subtractDuration(now, Duration.millis(USAGE_IDLE_SUSPEND_MS)),
+  );
+  // A turn counts even after it ends: a run that finished four minutes ago is
+  // a machine somebody is working on. `orElseSucceed(1)` on a failed count
+  // keeps the loops running — the gate exists to save reads, never to become
+  // a new way for the feature to go dark.
+  const runningTurns = yield* turns.countRunningSince(since).pipe(Effect.orElseSucceed(() => 1));
+  const clientActive = snapshot.activeForegroundLeaseCount > 0;
+  const turnActive = runningTurns > 0;
+  // Stamped for OBSERVED activity only. Stamping whenever the gate said yes
+  // refreshed the window on every tick, so `idleForMs` never exceeded the
+  // 60-second poll interval and the suspension could not engage: 240 polls
+  // over four idle hours, none suspended.
+  if (clientActive || turnActive) noteClaudeUsagePollActivity(nowMs);
+  const verdict = resolveClaudeUsagePoll({
+    clientActive,
+    turnActive,
+    lastActivityMs: readLastClaudeUsagePollActivityMs(),
+    nowMs,
+  });
+  if (verdict.poll) return true;
+  yield* Effect.logDebug(`${logTag}.idle-suspended`, {
+    idleForMs: verdict.idleForMs,
+    idleSuspendMs: USAGE_IDLE_SUSPEND_MS,
+  });
+  return false;
+});
+
+/**
+ * The profile as a hand-over may read it: a reading past the decision horizon
+ * is dropped, because the fetch now hands back the last known numbers at any
+ * age so a panel can date them. Showing an hour-old number is honest; MOVING
+ * an account on one is the mistake `USAGE_STALE_MS` exists to prevent.
+ */
+const withDecisionGradeUsage = (
+  profile: ClaudeAccountProfile,
+  nowMs: number,
+): ClaudeAccountProfile => {
+  if (!profile.usage || isDecisionGradeUsage(profile.usage, nowMs)) return profile;
+  const { usage: _outdated, ...rest } = profile;
+  return rest;
+};
+
 export const runClaudeAccountFailoverOnce = Effect.fn("runClaudeAccountFailoverOnce")(function* () {
   const turns = yield* ProjectionTurnRepository;
 
   const before = yield* readFailoverSettings();
   if (!before?.failoverEnabled) return undefined;
+  if (!(yield* claudeUsagePollAllowed("claude.account.failover"))) return undefined;
 
   // The mid-reply guard lives at the COMMIT, not here. Vetoing the evaluation
   // as well starves the whole feature for anyone whose machine is rarely
@@ -189,12 +263,14 @@ export const runClaudeAccountFailoverOnce = Effect.fn("runClaudeAccountFailoverO
   // Then one call for the account in use. Fetching every account's usage on
   // every tick spends a subprocess and an HTTPS request per account per
   // minute to answer a question that only matters once it is nearly spent.
-  const current = yield* probeClaudeProfile({
+  const probedCurrent = yield* probeClaudeProfile({
     homePath: currentKnown.homePath,
     isCurrent: true,
     includeUsage: true,
   }).pipe(Effect.orElseSucceed(() => undefined));
-  if (!current) return undefined;
+  if (!probedCurrent) return undefined;
+  const decisionNowMs = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
+  const current = withDecisionGradeUsage(probedCurrent, decisionNowMs);
 
   // Two distinct reasons to leave an account, each requiring its own
   // evidence. Plan limits need a READABLE number over the threshold. A
@@ -233,7 +309,10 @@ export const runClaudeAccountFailoverOnce = Effect.fn("runClaudeAccountFailoverO
         homePath: profile.homePath,
         isCurrent: false,
         includeUsage: true,
-      }).pipe(Effect.orElseSucceed(() => profile)),
+      }).pipe(
+        Effect.orElseSucceed(() => profile),
+        Effect.map((probed) => withDecisionGradeUsage(probed, decisionNowMs)),
+      ),
     { concurrency: "unbounded" },
   );
 
@@ -326,7 +405,7 @@ const commitClaudeAccountSwitch = Effect.fn("commitClaudeAccountSwitch")(functio
     [after.instanceId]: {
       ...instance,
       config: {
-        ...((instance.config as Record<string, unknown> | undefined) ?? {}),
+        ...(instance.config as Record<string, unknown> | undefined),
         homePath: decision.homePath,
       },
     },
@@ -362,6 +441,7 @@ export const runClaudeAccountRotationOnce = Effect.fn("runClaudeAccountRotationO
 ) {
   const before = yield* readFailoverSettings();
   if (!before?.rotationEnabled) return undefined;
+  if (!(yield* claudeUsagePollAllowed("claude.account.rotation"))) return undefined;
 
   // Mid-reply is the COMMIT's guard, not this one — see the note in
   // runClaudeAccountFailoverOnce. Evaluating always is what lets the answer be
@@ -378,11 +458,15 @@ export const runClaudeAccountRotationOnce = Effect.fn("runClaudeAccountRotationO
   // week) the rest of the fleet is never asked — the same economy the
   // failover loop practices, which matters doubly now that rotation is on
   // by default.
-  const current = yield* probeClaudeProfile({
-    homePath: currentKnown.homePath,
-    isCurrent: true,
-    includeUsage: true,
-  }).pipe(Effect.orElseSucceed(() => currentKnown));
+  const rotationNowMs = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
+  const current = withDecisionGradeUsage(
+    yield* probeClaudeProfile({
+      homePath: currentKnown.homePath,
+      isCurrent: true,
+      includeUsage: true,
+    }).pipe(Effect.orElseSucceed(() => currentKnown)),
+    rotationNowMs,
+  );
   if (!current.usage) return undefined;
   if (phase === "steady" && !rotationEngaged(current.usage)) return undefined;
 
@@ -393,7 +477,10 @@ export const runClaudeAccountRotationOnce = Effect.fn("runClaudeAccountRotationO
         homePath: profile.homePath,
         isCurrent: false,
         includeUsage: true,
-      }).pipe(Effect.orElseSucceed(() => profile)),
+      }).pipe(
+        Effect.orElseSucceed(() => profile),
+        Effect.map((probed) => withDecisionGradeUsage(probed, rotationNowMs)),
+      ),
     { concurrency: "unbounded" },
   );
 

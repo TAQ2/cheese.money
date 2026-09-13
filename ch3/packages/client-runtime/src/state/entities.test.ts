@@ -356,6 +356,7 @@ describe("environment entity projections", () => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: "2026-06-01T00:01:00.000Z",
           },
         }),

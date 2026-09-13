@@ -85,7 +85,7 @@ describe("detectSpeechLanguage", () => {
   it("keeps mostly-English text with a few Spanish words on the English path", () => {
     expect(
       detectSpeechLanguage(
-        "The Baubap dashboard is ready. The card named Cartera Vencida now shows the same numbers as the report you shared, and the filters work as expected.",
+        "The CH3 dashboard is ready. The card named Cartera Vencida now shows the same numbers as the report you shared, and the filters work as expected.",
       ),
     ).toBe("en");
   });

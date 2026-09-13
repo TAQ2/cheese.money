@@ -365,6 +365,25 @@ export function collectUpdatedProviderSnapshots(input: {
   return dedupeProvidersByInstanceId(matchedProviders);
 }
 
+/**
+ * What to show a person when an update was rejected.
+ *
+ * The server's `ServerProviderUpdateError` carries a `reason` written for a
+ * person — the updater's own words about what went wrong, plus what to do about
+ * it — so it is preferred over the generic sentence `Error.message` wraps it in.
+ */
+export function providerUpdateFailureMessage(error: unknown): string {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { readonly _tag?: unknown })._tag === "ServerProviderUpdateError" &&
+    typeof (error as { readonly reason?: unknown }).reason === "string"
+  ) {
+    return (error as { readonly reason: string }).reason;
+  }
+  return error instanceof Error ? error.message : "Provider update failed.";
+}
+
 export function firstFailedProviderUpdateMessage(
   results: ReadonlyArray<AtomCommandResult<unknown, unknown>>,
 ): string | null {
@@ -372,8 +391,7 @@ export function firstFailedProviderUpdateMessage(
   if (!failed || failed._tag !== "Failure") {
     return null;
   }
-  const error = squashAtomCommandFailure(failed);
-  return error instanceof Error ? error.message : "Provider update failed.";
+  return providerUpdateFailureMessage(squashAtomCommandFailure(failed));
 }
 
 function getUpdateFinishedAt(provider: ServerProvider): string | null {
@@ -600,7 +618,7 @@ export function firstRejectedProviderUpdateMessage(
   if (!rejected) {
     return null;
   }
-  return rejected.reason instanceof Error ? rejected.reason.message : "Provider update failed.";
+  return providerUpdateFailureMessage(rejected.reason);
 }
 
 /**

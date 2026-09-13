@@ -1,5 +1,5 @@
 import * as React from "react";
-import type { ContextMenuItem } from "@ch3tools/contracts";
+import type { ContextMenuItem, ThreadKanbanState } from "@ch3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@ch3tools/contracts/settings";
 import {
   getThreadSortTimestamp,
@@ -12,6 +12,7 @@ import type { ThreadRouteTarget } from "../threadRoutes";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
+import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "../lib/terminalContext";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
@@ -115,6 +116,7 @@ export function buildBulkTitleRegenerationContextMenuItem(input: {
 
 export interface ThreadStatusPill {
   label:
+    | "Agents"
     | "Working"
     | "Connecting"
     | "Completed"
@@ -126,9 +128,18 @@ export interface ThreadStatusPill {
   pulse: boolean;
 }
 
+/**
+ * Which thread's state a project row reports when its threads disagree.
+ *
+ * `Agents` sat level with `Working` and `Connecting`, and the rollup takes the
+ * strict maximum — so a project with one delegating thread and one working
+ * thread said whichever of them happened to sort first. Delegation is the more
+ * specific fact and every other part of this feature treats it that way.
+ */
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
-  "Pending Approval": 5,
-  "Awaiting Input": 4,
+  "Pending Approval": 6,
+  "Awaiting Input": 5,
+  Agents: 4,
   Working: 3,
   Connecting: 3,
   "Plan Ready": 2,
@@ -141,7 +152,9 @@ type ThreadStatusInput = Pick<
   | "hasPendingApprovals"
   | "hasPendingUserInput"
   | "interactionMode"
+  | "kanban"
   | "latestTurn"
+  | "liveDelegationCount"
   | "session"
 > & {
   lastVisitedAt?: string | undefined;
@@ -498,12 +511,35 @@ export function resolveThreadRowClassName(input: {
 // whether it finished, asked a question, or proposed a plan.
 // Unread completion is tracked separately: it describes whether a ready
 // thread needs attention, not what the thread is currently doing.
-export type SidebarV2Status = "approval" | "input" | "working" | "failed" | "ready";
+export type SidebarV2Status = "approval" | "input" | "working" | "delegating" | "failed" | "ready";
 
 type SidebarV2StatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "session"
+  | "latestTurn"
+  | "kanban"
+  | "liveDelegationCount"
 >;
+
+/**
+ * An agent's claim on a thread that no session can express: detached work
+ * (`thread_agent_working`) and orchestrator runs, which work through a bash
+ * engine rather than a provider session. Self-expiring, so a claim nobody
+ * released lapses on its own.
+ */
+export function isAgentWorkingLeaseActive(
+  thread: { readonly kanban?: Pick<ThreadKanbanState, "agentWorkingUntil"> | null | undefined },
+  nowMs: number = Date.now(),
+): boolean {
+  const until = thread.kanban?.agentWorkingUntil;
+  if (!until) {
+    return false;
+  }
+  const expiresAtMs = Date.parse(until);
+  return Number.isNaN(expiresAtMs) ? false : expiresAtMs > nowMs;
+}
 
 export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2Status {
   if (thread.hasPendingApprovals) {
@@ -512,11 +548,31 @@ export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2S
   if (thread.hasPendingUserInput) {
     return "input";
   }
-  if (thread.session?.status === "running" || thread.session?.status === "starting") {
+  // No session, but an agent holds the thread — an orchestrator run, or work
+  // launched detached. Working, as far as anyone reading the rail is concerned.
+  if (isAgentWorkingLeaseActive(thread)) {
     return "working";
   }
+  // Ahead of delegating: a turn left running by a session that died is a
+  // failure to report, not a subagent to animate.
   if (thread.session?.status === "error") {
     return "failed";
+  }
+  // Delegating outranks working, because the session keeps saying "running"
+  // for the whole time a subagent holds the turn — read the session first and
+  // every delegation reads as ordinary typing. Two ways in, one status out:
+  // either subagents are in flight, or the session went quiet while the turn
+  // stayed open, which is the same story told by whichever half of the runtime
+  // reports it. Turn-scoped on both sides, so nothing survives its own turn.
+  if (thread.latestTurn?.state === "running") {
+    const sessionSpeaking =
+      thread.session?.status === "running" || thread.session?.status === "starting";
+    if ((thread.liveDelegationCount ?? 0) > 0 || !sessionSpeaking) {
+      return "delegating";
+    }
+  }
+  if (thread.session?.status === "running" || thread.session?.status === "starting") {
+    return "working";
   }
   return "ready";
 }
@@ -707,16 +763,46 @@ export function selectThreadsToAutoArchive<
 
 /** The timestamp a working thread's elapsed label counts from: the running
     turn's start (request time until adoption), falling back to the session's
-    last transition when the turn projection lags behind. Malformed
-    timestamps fall through to the next candidate, not just missing ones. */
+    last transition when the turn projection lags behind, and finally to the
+    agent lease's start. Malformed timestamps fall through to the next
+    candidate, not just missing ones.
+
+    The lease is last because it is the weakest claim, but it is the ONLY one
+    an orchestrator row has: work held by a lease runs through a bash engine
+    with no provider session and no turn, so both earlier candidates are null
+    and the row rendered a bare "Working" with no number beside it while every
+    session-backed row next to it counted up. Deliberately the lease's START
+    and not its expiry — the expiry slides forward on every renewal, so
+    counting from it would restart the clock every time the daemon renewed. */
 export function resolveWorkingStartedAt(
-  thread: Pick<SidebarThreadSummary, "latestTurn" | "session">,
+  thread: Pick<SidebarThreadSummary, "latestTurn" | "session" | "kanban">,
 ): string | null {
+  const leaseStartedAt = thread.kanban?.agentWorkingSince ?? null;
   const turn = thread.latestTurn;
   if (turn && turn.completedAt === null) {
-    return firstValidTimestamp(turn.startedAt, turn.requestedAt, thread.session?.updatedAt);
+    return firstValidTimestamp(
+      turn.startedAt,
+      turn.requestedAt,
+      thread.session?.updatedAt,
+      leaseStartedAt,
+    );
   }
-  return firstValidTimestamp(thread.session?.updatedAt);
+  return firstValidTimestamp(thread.session?.updatedAt, leaseStartedAt);
+}
+
+/**
+ * Which rail statuses carry the ticking elapsed time.
+ *
+ * Both of the ones that mean "this turn is still going". `working` had it from
+ * the start; `delegating` did not, so a row handed to subagents lost the one
+ * number that says whether to wait or to look — and a delegation is exactly
+ * when somebody wants it, because there is nothing else moving on the row.
+ *
+ * The rest are deliberately without: `approval` and `input` are waiting on the
+ * PERSON, and putting a stopwatch on your own inaction reads as a countdown.
+ */
+export function statusShowsWorkingDuration(status: SidebarV2Status): boolean {
+  return status === "working" || status === "delegating";
 }
 
 export function formatWorkingDurationLabel(elapsedMs: number): string {
@@ -750,6 +836,18 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
+  // Subagents hold the turn while the session still reports itself as
+  // running, so this has to be read before the session is. Same rule as the
+  // v2 rail, so a thread does not change story when the setting is toggled.
+  if (thread.latestTurn?.state === "running" && (thread.liveDelegationCount ?? 0) > 0) {
+    return {
+      label: "Agents",
+      colorClass: "text-yellow-600 dark:text-yellow-400",
+      dotClass: "bg-yellow-500 dark:bg-yellow-400",
+      pulse: true,
+    };
+  }
+
   if (thread.session?.status === "running") {
     return {
       label: "Working",
@@ -762,6 +860,15 @@ export function resolveThreadStatusPill(input: {
   if (thread.session?.status === "starting") {
     return {
       label: "Connecting",
+      colorClass: "text-sky-600 dark:text-sky-300/80",
+      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: true,
+    };
+  }
+
+  if (isAgentWorkingLeaseActive(thread)) {
+    return {
+      label: "Working",
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
       pulse: true,
@@ -1019,4 +1126,48 @@ export function sortScopedProjectsForSidebar<
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
+}
+
+/**
+ * How much has to be typed before an unsent draft earns a row in the sidebar.
+ *
+ * Six characters — "more than five" — because the point is to catch real work,
+ * not a stray keystroke. Below it a draft stays where it always was: reachable
+ * from the New thread button for that project, and nowhere else.
+ */
+export const SIDEBAR_DRAFT_MIN_CHARACTERS = 6;
+
+/**
+ * The title a sidebar row shows for an unsent draft, or `null` when the draft
+ * has not earned one.
+ *
+ * A draft has no agent, no turn and no generated title, so the only honest
+ * label is what the person typed. First line only: a prompt is often a
+ * paragraph, and the rest of it says nothing a row can show.
+ *
+ * Whitespace is collapsed before counting, so ten newlines are not a draft.
+ */
+export function sidebarDraftTitle(
+  prompt: string | null | undefined,
+  maxLength = 60,
+): string | null {
+  if (typeof prompt !== "string") return null;
+  // Bounded before anything scans it: a draft can hold a pasted spec, and this
+  // runs per keystroke for a value that is never longer than `maxLength`.
+  // The sentinel goes first — it is not whitespace, so it would otherwise
+  // survive into the row as a tofu glyph, the same way it would in the
+  // composer's own title if that did not strip it too.
+  const head = prompt.slice(0, 1000).split(INLINE_TERMINAL_CONTEXT_PLACEHOLDER).join("");
+  const collapsed = head.replace(/\s+/g, " ").trim();
+  if (collapsed.length < SIDEBAR_DRAFT_MIN_CHARACTERS) return null;
+  const firstLine =
+    prompt
+      .split("\n")
+      .find((line) => line.trim().length > 0)
+      ?.trim() ?? collapsed;
+  const title = firstLine.replace(/\s+/g, " ");
+  // Sliced on the raw string rather than at a word boundary: a draft's first
+  // words are what identifies it, and a "smart" truncation that dropped the
+  // last word would make two drafts starting the same way look identical.
+  return title.length > maxLength ? `${title.slice(0, maxLength - 1).trimEnd()}…` : title;
 }

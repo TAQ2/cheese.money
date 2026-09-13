@@ -114,7 +114,19 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         // so jumping into the picker keeps the focused instance visible.
         return props.activeInstanceId;
       }
-      return favorites.length > 0 ? "favorites" : props.activeInstanceId;
+      // Opening ON Favorites is only useful if a favourite is still reachable.
+      // The list they filter is narrowed by the model-access policy, so a
+      // Premium user whose favourites are 4.x models — or a retired driver's —
+      // has favourites in settings and none in the picker, and the tab opens
+      // empty with no hint that another tab has anything in it.
+      const hasReachableFavorite = favorites.some((favorite) =>
+        instanceEntries.some(
+          (entry) =>
+            entry.instanceId === favorite.provider &&
+            entry.models.some((model) => model.slug === favorite.model),
+        ),
+      );
+      return hasReachableFavorite ? "favorites" : props.activeInstanceId;
     },
   );
   const keybindings = useMemo<ResolvedKeybindingsConfig>(
@@ -539,7 +551,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               ? {
                   disabledInstanceIds: lockedDisabledInstanceIds,
                   getDisabledInstanceTooltip: (entry: ProviderInstanceEntry) =>
-                    `${entry.displayName} is unavailable in this thread. Start a new thread to switch providers.`,
+                    // States the rule, not the symptom. "is unavailable in this
+                    // thread" read like a temporary outage — something to wait
+                    // out or retry — when it is a fixed constraint: the provider
+                    // is chosen once, when the conversation starts, and cannot
+                    // change while it runs.
+                    //
+                    // "conversation" rather than "thread" because that is the
+                    // word the rest of the UI uses for the same object.
+                    `You cannot change provider in the same conversation. ` +
+                    `Start a new conversation to use ${entry.displayName}.`,
                 }
               : {})}
           />

@@ -31,6 +31,7 @@ const modelSelection = { instanceId: "codex", model: "gpt-5" } as unknown as Mod
 function snapshot(overrides: Partial<QueuedSendSnapshot> = {}): QueuedSendSnapshot {
   return {
     text: "ship it",
+    prompt: "ship it",
     images: [],
     modelSelection,
     runtimeMode: "approval-required",
@@ -42,8 +43,20 @@ function snapshot(overrides: Partial<QueuedSendSnapshot> = {}): QueuedSendSnapsh
   };
 }
 
-function entry(ref: typeof threadA, overrides: Partial<QueuedSendSnapshot> = {}): QueuedSendEntry {
-  return { ref, snapshot: snapshot(overrides) };
+let nextEntryId = 0;
+
+function entry(
+  ref: typeof threadA,
+  overrides: Partial<QueuedSendSnapshot> = {},
+  options: { tracksDraft?: boolean } = {},
+): QueuedSendEntry {
+  nextEntryId += 1;
+  return {
+    id: `entry-${nextEntryId}`,
+    ref,
+    snapshot: snapshot(overrides),
+    tracksDraft: options.tracksDraft ?? true,
+  };
 }
 
 function draft(overrides: Partial<ComposerThreadDraftState> = {}): ComposerThreadDraftState {
@@ -86,8 +99,8 @@ function draftImage(): ComposerImageAttachment {
 
 describe("selectBackgroundQueuedEntries", () => {
   const entries = {
-    [scopedThreadKey(threadA)]: entry(threadA, { text: "a" }),
-    [scopedThreadKey(threadB)]: entry(threadB, { text: "b" }),
+    [scopedThreadKey(threadA)]: [entry(threadA, { text: "a" })],
+    [scopedThreadKey(threadB)]: [entry(threadB, { text: "b" })],
   };
 
   it("watches an armed thread while a different thread is active", () => {
@@ -96,7 +109,7 @@ describe("selectBackgroundQueuedEntries", () => {
     expect(background.map(({ threadKey }) => threadKey)).toEqual([scopedThreadKey(threadA)]);
   });
 
-  it("leaves the active thread to its own composer, so it cannot double-send", () => {
+  it("leaves the active thread's own draft to its composer, so it cannot double-send", () => {
     const background = selectBackgroundQueuedEntries(entries, scopedThreadKey(threadA));
 
     expect(background.map(({ entry: item }) => item.snapshot.text)).toEqual(["b"]);
@@ -110,6 +123,38 @@ describe("selectBackgroundQueuedEntries", () => {
     expect(selectBackgroundQueuedEntries(entries, scopedThreadKey(threadA))).toHaveLength(1);
     expect(selectBackgroundQueuedEntries({}, null)).toEqual([]);
   });
+
+  it("sends only the head, because that send is what everything behind it waits on", () => {
+    const stacked = {
+      [scopedThreadKey(threadA)]: [
+        entry(threadA, { text: "first" }, { tracksDraft: false }),
+        entry(threadA, { text: "second" }, { tracksDraft: false }),
+      ],
+    };
+
+    expect(
+      selectBackgroundQueuedEntries(stacked, null).map(({ entry: item }) => item.snapshot.text),
+    ).toEqual(["first"]);
+  });
+
+  it("owns a stacked message even on the active thread, because no composer carries it", () => {
+    const stacked = {
+      [scopedThreadKey(threadA)]: [
+        entry(threadA, { text: "stacked" }, { tracksDraft: false }),
+        entry(threadA, { text: "still being typed" }),
+      ],
+    };
+
+    expect(
+      selectBackgroundQueuedEntries(stacked, scopedThreadKey(threadA)).map(
+        ({ entry: item }) => item.snapshot.text,
+      ),
+    ).toEqual(["stacked"]);
+  });
+
+  it("skips a thread whose queue was emptied", () => {
+    expect(selectBackgroundQueuedEntries({ [scopedThreadKey(threadA)]: [] }, null)).toEqual([]);
+  });
 });
 
 describe("decideQueuedSend", () => {
@@ -120,10 +165,20 @@ describe("decideQueuedSend", () => {
     images: [],
     hasSendableContent: true,
     interactiveBuiltin: null,
+    dispatchInFlight: false,
   };
 
   it("sends once the turn is no longer running", () => {
     expect(decideQueuedSend(base)).toEqual({ kind: "send" });
+  });
+
+  it("waits while the entry claimed before it is still on its way to the server", () => {
+    // The ordering guarantee. `phase` cannot cover this: it only leaves
+    // `ready` once a server event has come back, and the next entry's watcher
+    // mounts in the same pass the claim happened in — so without this every
+    // stacked message went out at once, and one carrying an image could be
+    // overtaken by the message queued behind it.
+    expect(decideQueuedSend({ ...base, dispatchInFlight: true })).toEqual({ kind: "wait" });
   });
 
   it("waits while the turn is still running", () => {
@@ -290,5 +345,18 @@ describe("shouldClearDraftAfterQueuedSend", () => {
 
   it("treats a missing draft as already clear", () => {
     expect(shouldClearDraftAfterQueuedSend(frozen, null)).toBe(true);
+  });
+
+  it("never clears the composer for a stacked message it no longer holds", () => {
+    const stacked = entry(
+      threadA,
+      { draftSignature: draftSignatureOf({ prompt: "ship it" }) },
+      { tracksDraft: false },
+    );
+
+    // Stacking already cleared this text out of the composer. Matching again
+    // means the user retyped it, and deleting that would be data loss.
+    expect(shouldClearDraftAfterQueuedSend(stacked, draft({ prompt: "ship it" }))).toBe(false);
+    expect(shouldClearDraftAfterQueuedSend(stacked, null)).toBe(false);
   });
 });

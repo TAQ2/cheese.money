@@ -245,6 +245,7 @@ const createManager = (
 
       const manager = yield* TerminalManager.makeWithOptions({
         logsDir,
+        claudeShimDir: join(baseDir, "bin"),
         historyLineLimit,
         ptyAdapter,
         ...(options.shellResolver !== undefined ? { shellResolver: options.shellResolver } : {}),
@@ -1909,4 +1910,45 @@ it.layer(
       expect(process.killSignals).toContain("SIGKILL");
     }).pipe(Effect.provide(TestClock.layer())),
   );
+});
+
+describe("the POSIX process table", () => {
+  // One `ps -eo pid=,ppid=,comm=` per tick replaced four spawned commands that
+  // were all projections of this table. These two functions are what reads it,
+  // so the parsing is what has to be right.
+  const table = [
+    "  1     0 /sbin/launchd",
+    " 501     1 /bin/zsh",
+    " 502   501 /Applications/Xcode.app/Contents/MacOS/Some Tool",
+    " 503   502 node",
+    " 700     1 /usr/bin/unrelated",
+    "",
+  ].join("\n");
+
+  it("keeps a command that contains spaces whole", () => {
+    const { commandByPid } = TerminalManager.parsePosixProcessTable(table);
+    expect(commandByPid.get(502)).toBe("/Applications/Xcode.app/Contents/MacOS/Some Tool");
+    expect(commandByPid.get(503)).toBe("node");
+  });
+
+  it("names the lowest-numbered child, as pgrep -P did", () => {
+    const { childrenByParent } = TerminalManager.parsePosixProcessTable(
+      ["  9   501 later", "  7   501 earlier", ""].join("\n"),
+    );
+    expect(childrenByParent.get(501)?.[0]).toBe(7);
+  });
+
+  it("collects a terminal's whole subtree and nothing beside it", () => {
+    const { childrenByParent } = TerminalManager.parsePosixProcessTable(table);
+    const found = TerminalManager.collectPosixDescendants(501, childrenByParent);
+    expect([...found].sort((left, right) => left - right)).toEqual([501, 502, 503]);
+  });
+
+  it("ignores lines that are not a process", () => {
+    const { childrenByParent, commandByPid } = TerminalManager.parsePosixProcessTable(
+      ["PID PPID COMM", "   ", "abc def ghi", " 12   11 sh", ""].join("\n"),
+    );
+    expect(childrenByParent.get(11)).toEqual([12]);
+    expect(commandByPid.size).toBe(1);
+  });
 });

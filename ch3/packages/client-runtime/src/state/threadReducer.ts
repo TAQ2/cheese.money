@@ -252,27 +252,29 @@ export function applyThreadDetailEvent(
         updatedAt: event.payload.updatedAt,
       };
 
-      const existingMessage = thread.messages.find((entry) => entry.id === message.id);
-      const messages = existingMessage
-        ? Arr.map(thread.messages, (entry) =>
-            entry.id !== message.id
-              ? entry
-              : {
-                  ...entry,
-                  text: message.streaming
-                    ? `${entry.text}${message.text}`
-                    : message.text.length > 0
-                      ? message.text
-                      : entry.text,
-                  streaming: message.streaming,
-                  ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
-                  ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
-                  ...(message.attachments !== undefined
-                    ? { attachments: message.attachments }
-                    : {}),
-                },
-          )
-        : Arr.append(thread.messages, message);
+      // Streaming appends a delta to this message many times per second, so
+      // the update targets the one row by index instead of mapping the array.
+      const existingMessageIndex = thread.messages.findIndex((entry) => entry.id === message.id);
+      const existingMessage =
+        existingMessageIndex === -1 ? undefined : thread.messages[existingMessageIndex];
+      const messages =
+        existingMessage === undefined
+          ? Arr.append(thread.messages, message)
+          : thread.messages.slice();
+      if (existingMessage !== undefined) {
+        messages[existingMessageIndex] = {
+          ...existingMessage,
+          text: message.streaming
+            ? `${existingMessage.text}${message.text}`
+            : message.text.length > 0
+              ? message.text
+              : existingMessage.text,
+          streaming: message.streaming,
+          ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
+          ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
+          ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+        };
+      }
       // Update latestTurn for assistant messages bound to a turn. A completed
       // assistant message only settles the turn once the session is no longer
       // running it — providers may emit several assistant messages per turn
@@ -564,12 +566,16 @@ export function applyThreadDetailEvent(
 
     // ── Activities ──────────────────────────────────────────────────
     case "thread.activity-appended": {
-      const activities = pipe(
-        thread.activities,
-        Arr.filter((activity) => activity.id !== event.payload.activity.id),
-        Arr.append(event.payload.activity),
-        Arr.sort(activityOrder),
-      );
+      const appended = event.payload.activity;
+      const retained = thread.activities.filter((activity) => activity.id !== appended.id);
+      const last = retained[retained.length - 1];
+      // Activities arrive in sequence order, so the common case is an append
+      // that is already in place. Sorting the whole array on every tool call
+      // was O(n log n) per event on threads that run to tens of thousands.
+      const activities =
+        last === undefined || activityOrder(last, appended) <= 0
+          ? [...retained, appended]
+          : Arr.sort(activityOrder)([...retained, appended]);
 
       return {
         kind: "updated",

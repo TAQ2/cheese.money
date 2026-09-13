@@ -37,6 +37,38 @@ export const ProviderSession = Schema.Struct({
   // populates it (post-slice-4), routing flips to instance-id-only and the
   // legacy `provider` field is removed.
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  /**
+   * The continuation identity of the provider instance *build* that is
+   * actually serving this session, as opposed to the instance id, which
+   * survives a rebuild.
+   *
+   * Switching a Claude account repoints the same instance at another
+   * `CLAUDE_CONFIG_DIR`, so the id alone cannot tell a live session started
+   * under the old account from one started under the new one — the key can,
+   * because Claude and Codex both derive it from the home directory their
+   * processes are spawned with.
+   *
+   * Stamped by `ProviderService.listSessions` from the adapter the session
+   * was listed on. Optional because a producer that predates it still
+   * decodes.
+   */
+  instanceContinuationKey: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * WHICH ACCOUNT this session is signed in as — `email|organization`,
+   * resolved once at session start from the very config directory the process
+   * was spawned with, not from settings read later.
+   *
+   * A session outlives the setting that chose its account, so this is the only
+   * honest answer to "who is answering this thread". It exists so a caller can
+   * see that a live session is running on an account other than the one now
+   * selected, instead of showing one account's usage beside another account's
+   * reply.
+   *
+   * Claude only. Codex and OpenCode have no account of this shape and leave it
+   * undefined; so does a Claude config directory that names nobody, because
+   * inventing a key there would file one account's work under another.
+   */
+  accountKey: Schema.optional(TrimmedNonEmptyString),
   status: ProviderSessionStatus,
   runtimeMode: RuntimeMode,
   cwd: Schema.optional(TrimmedNonEmptyString),

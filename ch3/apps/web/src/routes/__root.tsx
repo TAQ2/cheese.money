@@ -52,6 +52,7 @@ import {
   createKeybindingsUpdateToastController,
   type KeybindingsUpdateToastController,
 } from "../components/KeybindingsUpdateToast.logic";
+import { DesktopAgentActivitySync } from "../components/DesktopAgentActivitySync";
 import { QueuedSendWatcher } from "../components/QueuedSendWatcher";
 
 export const Route = createRootRoute({
@@ -135,6 +136,7 @@ function RootRouteView() {
         <SshPasswordPromptDialog />
         <SlowRpcRequestToastCoordinator />
         {primaryEnvironmentAuthenticated ? <QueuedSendWatcher /> : null}
+        <DesktopAgentActivitySync />
         <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}

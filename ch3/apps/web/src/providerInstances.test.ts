@@ -337,8 +337,9 @@ describe("getDefaultProviderInstanceModel", () => {
 describe("resolveDefaultProviderModelSelection", () => {
   it.each([
     ["codex", "codex", "gpt-5.6"],
-    ["claudeAgent", "claudeAgent", "claude-fable-5"],
+    ["claudeAgent", "claudeAgent", "claude-fable-5-1"],
     ["cursor", "cursor", "composer-2"],
+    ["opencode", "opencode", "openai/gpt-5"],
   ])("uses the only available %s instance", (driver, instanceId, modelSlug) => {
     const providers = [
       provider({

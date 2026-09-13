@@ -18,8 +18,10 @@ import {
   PrStatusTooltipContent,
   resolveThreadPr,
   terminalStatusFromRunningIds,
+  ThreadQueuedSendIndicator,
   ThreadStatusLabel,
   ThreadWorktreeIndicator,
+  useThreadQueuedSendCount,
 } from "./ThreadStatusIndicators";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { useAtomValue } from "@effect/atom-react";
@@ -47,6 +49,7 @@ import {
   type ScopedThreadRef,
   type ResolvedKeybindingsConfig,
   type SidebarProjectGroupingMode,
+  type ScopedProjectRef,
   ThreadId,
 } from "@ch3tools/contracts";
 import {
@@ -128,6 +131,7 @@ import { Kbd } from "./ui/kbd";
 import {
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
+  getDesktopUpdateDownloadConfirmationMessage,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -187,7 +191,9 @@ import {
   ThreadStatusPill,
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
+import { SidebarDraftRow } from "./sidebar/SidebarDraftRow";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { useCopyConversationId, useCopyThreadId } from "~/hooks/useCopyConversationId";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
@@ -374,6 +380,9 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     environmentId: thread.environmentId,
     threadId: thread.id,
   });
+  // Projects mode renders these rows, not SidebarV2's, so the queued badge
+  // has to be wired here too or it is missing from half the sidebar.
+  const queuedSendCount = useThreadQueuedSendCount(threadRef);
   const isMobile = useIsMobile();
   const discoveredPorts = useThreadDiscoveredPorts({
     environmentId: thread.environmentId,
@@ -763,6 +772,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
             </Tooltip>
           )}
           <ThreadWorktreeIndicator thread={thread} />
+          <ThreadQueuedSendIndicator threadId={thread.id} queuedCount={queuedSendCount} />
           {terminalStatus && (
             <Tooltip>
               <TooltipTrigger
@@ -892,6 +902,8 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 
 interface SidebarProjectThreadListProps {
   projectKey: string;
+  /** Which project's unsent draft belongs at the top of this list. */
+  projectRef: ScopedProjectRef;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
   hiddenThreadStatus: ThreadStatusPill | null;
@@ -985,6 +997,21 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
       ref={attachThreadListAutoAnimateRef}
       className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden border-l-0 px-1 py-0 sm:mx-1 sm:px-1.5"
     >
+      {/*
+        Above the threads, not inside them: an unsent draft is the newest thing
+        in the project by definition, and it is the one row people come back to
+        the sidebar looking for.
+      */}
+      {shouldShowThreadPanel ? (
+        <SidebarDraftRow
+          projectRef={props.projectRef}
+          renderItem={(row) => (
+            <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
+              {row}
+            </SidebarMenuSubItem>
+          )}
+        />
+      ) : null}
       {shouldShowThreadPanel && showEmptyThreadState ? (
         <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
           <div
@@ -1104,6 +1131,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     isManualProjectSorting,
     dragHandleProps,
   } = props;
+  // Memoised: `scopeProjectRef` returns a fresh object, and passing a new one
+  // every render defeats `SidebarProjectThreadList`'s `memo` — every render of
+  // this project would re-render its whole thread list.
+  const projectRef = useMemo(
+    () => scopeProjectRef(project.environmentId, project.id),
+    [project.environmentId, project.id],
+  );
   const threadSortOrder = useClientSettings<SidebarThreadSortOrder>(
     (settings) => settings.sidebarThreadSortOrder,
   );
@@ -1137,46 +1171,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const removeFromSelection = useThreadSelectionStore((state) => state.removeFromSelection);
   const setSelectionAnchor = useThreadSelectionStore((state) => state.setAnchor);
-  const { copyToClipboard: copyThreadIdToClipboard } = useCopyToClipboard<{
-    threadId: ThreadId;
-  }>({
-    onCopy: (ctx) => {
-      toastManager.add({
-        type: "success",
-        title: "Thread ID copied",
-        description: ctx.threadId,
-      });
-    },
-    onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to copy thread ID",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    },
-  });
-  const { copyToClipboard: copyConversationIdToClipboard } = useCopyToClipboard<{
-    sessionId: string;
-  }>({
-    onCopy: (ctx) => {
-      toastManager.add({
-        type: "success",
-        title: "Conversation ID copied",
-        description: ctx.sessionId,
-      });
-    },
-    onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to copy conversation ID",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    },
-  });
+  const copyThreadId = useCopyThreadId();
+  const copyConversationId = useCopyConversationId();
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{
     path: string;
   }>({
@@ -2261,41 +2257,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
       if (clicked === "copy-thread-id") {
-        copyThreadIdToClipboard(thread.id, { threadId: thread.id });
+        copyThreadId(thread.id);
         return;
       }
       if (clicked === "copy-conversation-id") {
-        // The provider CLI's own id (what `claude --resume` takes), which lives
-        // in the thread's resume cursor rather than the read model.
-        const result = await getProviderSessionId({
-          environmentId: threadRef.environmentId,
-          input: { threadId: threadRef.threadId },
-        });
-        if (result._tag === "Failure") {
-          if (isAtomCommandInterrupted(result)) return;
-          const error = squashAtomCommandFailure(result);
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not read conversation ID",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            }),
-          );
-          return;
-        }
-        const sessionId = result.value.sessionId;
-        if (sessionId === null) {
-          // No provider session yet, so there is nothing to resume from.
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "No conversation ID yet",
-              description: "This thread has not started a provider session.",
-            }),
-          );
-          return;
-        }
-        copyConversationIdToClipboard(sessionId, { sessionId });
+        await copyConversationId(threadRef);
         return;
       }
       if (clicked !== "delete") return;
@@ -2324,8 +2290,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     },
     [
       appSettingsConfirmThreadDelete,
+      copyConversationId,
       copyPathToClipboard,
-      copyThreadIdToClipboard,
+      copyThreadId,
       deleteThread,
       handleNewThread,
       markThreadUnread,
@@ -2444,6 +2411,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       <SidebarProjectThreadList
         projectKey={project.projectKey}
+        projectRef={projectRef}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
         hiddenThreadStatus={hiddenThreadStatus}
@@ -3628,6 +3596,9 @@ export default function Sidebar() {
     if (desktopUpdateButtonDisabled || desktopUpdateButtonAction === "none") return;
 
     if (desktopUpdateButtonAction === "download") {
+      if (!window.confirm(getDesktopUpdateDownloadConfirmationMessage(desktopUpdateState))) {
+        return;
+      }
       void bridge
         .downloadUpdate()
         .then((result) => {

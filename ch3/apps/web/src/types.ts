@@ -1,3 +1,7 @@
+import {
+  DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_RUNTIME_MODE as CONTRACT_DEFAULT_RUNTIME_MODE,
+} from "@ch3tools/contracts";
 import type {
   ChatImageAttachment as ContractChatImageAttachment,
   OrchestrationCheckpointFile,
@@ -17,9 +21,11 @@ import type {
 } from "@ch3tools/client-runtime/state/shell";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
-export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+// One source for both defaults: the contracts package. The web names are kept
+// because the whole client reads them, but the values are not restated here.
+export const DEFAULT_RUNTIME_MODE: RuntimeMode = CONTRACT_DEFAULT_RUNTIME_MODE;
 
-export const DEFAULT_INTERACTION_MODE: ProviderInteractionMode = "default";
+export const DEFAULT_INTERACTION_MODE: ProviderInteractionMode = DEFAULT_PROVIDER_INTERACTION_MODE;
 export const DEFAULT_THREAD_TERMINAL_HEIGHT = 280;
 export const DEFAULT_THREAD_TERMINAL_ID = "term-1";
 export const MAX_TERMINALS_PER_GROUP = 4;

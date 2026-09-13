@@ -65,6 +65,7 @@ import {
   type ClaudeInstanceMap,
 } from "../provider/Drivers/claudeInstanceHome.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { installClaudeAccountShim, withClaudeAccountShimOnPath } from "./claudeAccountShim.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
 
 export {
@@ -82,7 +83,14 @@ export {
 
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
-const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
+/**
+ * How often a terminal is asked what is running inside it.
+ *
+ * Two seconds rather than one: the answer drives a label and a "still busy"
+ * dot, neither of which a person reads at 1 Hz, and every tick is a process
+ * table read per open terminal.
+ */
+const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_OPEN_COLS = 120;
@@ -616,16 +624,6 @@ function isRetryableShellSpawnError(error: PtyAdapter.PtySpawnError): boolean {
   );
 }
 
-function parseFirstChildPidFromPgrep(stdout: string): number | null {
-  for (const line of stdout.split(/\r?\n/g)) {
-    const n = Number.parseInt(line.trim(), 10);
-    if (Number.isInteger(n) && n > 0) {
-      return n;
-    }
-  }
-  return null;
-}
-
 function windowsInspectSubprocess(
   terminalPid: number,
   platform: NodeJS.Platform,
@@ -700,6 +698,73 @@ function windowsInspectSubprocess(
   );
 }
 
+/**
+ * One row of the process table, as `ps -eo pid=,ppid=,comm=` prints it.
+ *
+ * The command can contain spaces — it is a path — so only the first two fields
+ * are split on whitespace and the rest is taken whole.
+ */
+export function parsePosixProcessTable(stdout: string): {
+  readonly childrenByParent: ReadonlyMap<number, ReadonlyArray<number>>;
+  readonly commandByPid: ReadonlyMap<number, string>;
+} {
+  const childrenByParent = new Map<number, Array<number>>();
+  const commandByPid = new Map<number, string>();
+  for (const line of stdout.split(/\r?\n/g)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const match = /^(\d+)\s+(\d+)\s*(.*)$/.exec(trimmed);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
+    const children = childrenByParent.get(ppid) ?? [];
+    children.push(pid);
+    childrenByParent.set(ppid, children);
+    const command = (match[3] ?? "").trim();
+    if (command.length > 0) commandByPid.set(pid, command);
+  }
+  // Ascending pid, so "the child" is the same process `pgrep -P` used to name
+  // and does not depend on how the kernel happened to order the table.
+  for (const children of childrenByParent.values()) {
+    children.sort((left, right) => left - right);
+  }
+  return { childrenByParent, commandByPid };
+}
+
+/** Every descendant of a pid, including it. */
+export function collectPosixDescendants(
+  rootPid: number,
+  childrenByParent: ReadonlyMap<number, ReadonlyArray<number>>,
+): ReadonlyArray<number> {
+  const found = new Set<number>([rootPid]);
+  const pending = [rootPid];
+  while (pending.length > 0) {
+    const parentPid = pending.pop();
+    if (parentPid === undefined) continue;
+    for (const child of childrenByParent.get(parentPid) ?? []) {
+      if (found.has(child)) continue;
+      found.add(child);
+      pending.push(child);
+    }
+  }
+  return [...found];
+}
+
+/**
+ * What is running inside a terminal, from one look at the process table.
+ *
+ * This used to spawn between three and six processes per terminal per second:
+ * `pgrep -P`, sometimes `ps -eo pid=,ppid=`, `ps -p <pid> -o comm=`, sometimes
+ * `ps -p <pid> -o args=`, and then a second `ps -eo pid=,ppid=` for the
+ * descendant walk — the highest spawn rate in the server, running whenever a
+ * terminal existed, which for our users is always. All four were projections of
+ * the same table; `comm=` is the one column that was missing from it.
+ *
+ * The `args=` read survives as a fallback for the case it was written for: a
+ * process whose `comm` is empty. That costs a second spawn on the rare tick
+ * where it happens, rather than on every tick.
+ */
 const posixInspectSubprocess = Effect.fn("terminal.posixInspectSubprocess")(function* (
   terminalPid: number,
   platform: NodeJS.Platform,
@@ -709,140 +774,66 @@ const posixInspectSubprocess = Effect.fn("terminal.posixInspectSubprocess")(func
   ProcessRunner.ProcessRunner
 > {
   const processRunner = yield* ProcessRunner.ProcessRunner;
-  const runPgrep = processRunner
-    .run({
-      command: "pgrep",
-      args: ["-P", String(terminalPid)],
-      timeout: "1 second",
-      maxOutputBytes: 32_768,
-      outputMode: "truncate",
-      timeoutBehavior: "timedOutResult",
-    })
-    .pipe(
-      Effect.mapError(
-        (cause) =>
-          new TerminalSubprocessCheckError({
-            cause,
-            terminalPid,
-            command: "pgrep",
-          }),
+  const idle: TerminalSubprocessInspectResult = {
+    hasRunningSubprocess: false,
+    childCommand: null,
+    processIds: [],
+  };
+
+  const tableResult = yield* Effect.exit(
+    processRunner
+      .run({
+        command: "ps",
+        args: ["-eo", "pid=,ppid=,comm="],
+        timeout: "1 second",
+        maxOutputBytes: 524_288,
+        outputMode: "truncate",
+        timeoutBehavior: "timedOutResult",
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new TerminalSubprocessCheckError({
+              cause,
+              terminalPid,
+              command: "ps",
+            }),
+        ),
       ),
+  );
+  if (tableResult._tag === "Failure" || tableResult.value.code !== 0) {
+    return idle;
+  }
+
+  const { childrenByParent, commandByPid } = parsePosixProcessTable(tableResult.value.stdout);
+  const childPid = childrenByParent.get(terminalPid)?.[0];
+  if (childPid === undefined) {
+    return idle;
+  }
+
+  let rawComm = commandByPid.get(childPid) ?? null;
+  if (rawComm === null) {
+    const argsResult = yield* Effect.exit(
+      processRunner.run({
+        command: "ps",
+        args: ["-p", String(childPid), "-o", "args="],
+        timeout: "1 second",
+        maxOutputBytes: 16_384,
+        outputMode: "truncate",
+        timeoutBehavior: "timedOutResult",
+      }),
     );
-
-  const runPs = processRunner
-    .run({
-      command: "ps",
-      args: ["-eo", "pid=,ppid="],
-      timeout: "1 second",
-      maxOutputBytes: 262_144,
-      outputMode: "truncate",
-      timeoutBehavior: "timedOutResult",
-    })
-    .pipe(
-      Effect.mapError(
-        (cause) =>
-          new TerminalSubprocessCheckError({
-            cause,
-            terminalPid,
-            command: "ps",
-          }),
-      ),
-    );
-
-  let childPid: number | null = null;
-
-  const pgrepResult = yield* Effect.exit(runPgrep);
-  if (pgrepResult._tag === "Success") {
-    if (pgrepResult.value.code === 0) {
-      childPid = parseFirstChildPidFromPgrep(pgrepResult.value.stdout);
-    } else if (pgrepResult.value.code === 1) {
-      return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
-    }
-  }
-
-  if (childPid === null) {
-    const psResult = yield* Effect.exit(runPs);
-    if (psResult._tag === "Failure" || psResult.value.code !== 0) {
-      return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
-    }
-    for (const line of psResult.value.stdout.split(/\r?\n/g)) {
-      const [pidRaw, ppidRaw] = line.trim().split(/\s+/g);
-      const pid = Number(pidRaw);
-      const ppid = Number(ppidRaw);
-      if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
-      if (ppid === terminalPid) {
-        childPid = pid;
-        break;
-      }
-    }
-  }
-
-  if (childPid === null) {
-    return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
-  }
-
-  const runComm = processRunner.run({
-    command: "ps",
-    args: ["-p", String(childPid), "-o", "comm="],
-    timeout: "1 second",
-    maxOutputBytes: 8_192,
-    outputMode: "truncate",
-    timeoutBehavior: "timedOutResult",
-  });
-
-  const commResult = yield* Effect.exit(runComm);
-  let rawComm: string | null = null;
-  if (commResult._tag === "Success" && commResult.value && commResult.value.code === 0) {
-    rawComm = commResult.value.stdout.trim();
-  }
-
-  if (!rawComm || rawComm.length === 0) {
-    const runArgs = processRunner.run({
-      command: "ps",
-      args: ["-p", String(childPid), "-o", "args="],
-      timeout: "1 second",
-      maxOutputBytes: 16_384,
-      outputMode: "truncate",
-      timeoutBehavior: "timedOutResult",
-    });
-    const argsResult = yield* Effect.exit(runArgs);
-    if (argsResult._tag === "Success" && argsResult.value && argsResult.value.code === 0) {
+    if (argsResult._tag === "Success" && argsResult.value.code === 0) {
       const first = argsResult.value.stdout.trim().split(/\s+/)[0] ?? "";
       rawComm = first.length > 0 ? first : null;
     }
   }
 
   const normalized = rawComm ? normalizeChildCommandName(rawComm, platform) : null;
-  const processIds = new Set<number>([terminalPid]);
-  const psResult = yield* Effect.exit(runPs);
-  if (psResult._tag === "Success" && psResult.value.code === 0) {
-    const childrenByParent = new Map<number, number[]>();
-    for (const line of psResult.value.stdout.split(/\r?\n/g)) {
-      const [pidRaw, ppidRaw] = line.trim().split(/\s+/g);
-      const pid = Number(pidRaw);
-      const ppid = Number(ppidRaw);
-      if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
-      const children = childrenByParent.get(ppid) ?? [];
-      children.push(pid);
-      childrenByParent.set(ppid, children);
-    }
-    const pending = [terminalPid];
-    while (pending.length > 0) {
-      const parentPid = pending.pop();
-      if (parentPid === undefined) continue;
-      for (const child of childrenByParent.get(parentPid) ?? []) {
-        if (processIds.has(child)) continue;
-        processIds.add(child);
-        pending.push(child);
-      }
-    }
-  } else {
-    processIds.add(childPid);
-  }
   return {
     hasRunningSubprocess: true,
     childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
-    processIds: [...processIds],
+    processIds: collectPosixDescendants(terminalPid, childrenByParent),
   };
 });
 
@@ -1149,29 +1140,35 @@ function createTerminalSpawnEnv(
   baseEnv: NodeJS.ProcessEnv,
   runtimeEnv?: Record<string, string> | null,
   claudeAccount?: TerminalClaudeAccount | null,
+  shimDir?: string | null,
 ): NodeJS.ProcessEnv {
-  const spawnEnv: NodeJS.ProcessEnv = {};
+  let spawnEnv: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value === undefined) continue;
     if (shouldExcludeTerminalEnvKey(key)) continue;
     spawnEnv[key] = value;
   }
+  // The shim first on PATH — so `claude` resolves the SELECTED account when it
+  // is invoked rather than inheriting whichever one this shell was born with —
+  // and no inherited `CLAUDE_CONFIG_DIR` left to outrank it, in any casing.
+  // Shared with orchestrator runs, which need exactly the same thing.
+  if (shimDir) spawnEnv = withClaudeAccountShimOnPath(spawnEnv, shimDir);
   if (claudeAccount) {
     spawnEnv.CH3_SETTINGS_PATH = claudeAccount.settingsPath;
-    // Windows environment names are case-insensitive, so an inherited
-    // `Claude_Config_Dir` is the SAME variable to the CLI while being a
-    // different key in this plain object. Deleting only the canonical spelling
-    // would leave it behind and let it outrank the selected account.
-    for (const key of Object.keys(spawnEnv)) {
-      if (key !== "CLAUDE_CONFIG_DIR" && key.toUpperCase() === "CLAUDE_CONFIG_DIR") {
-        delete spawnEnv[key];
-      }
-    }
-    if (claudeAccount.configDir === null) {
-      delete spawnEnv.CLAUDE_CONFIG_DIR;
-    } else {
+    // Stated explicitly for a terminal, which is opened *as* an account: the
+    // shim would resolve the same answer, and this makes it true from the
+    // first command rather than from the first `claude`.
+    if (claudeAccount.configDir !== null) {
       spawnEnv.CLAUDE_CONFIG_DIR = claudeAccount.configDir;
     }
+  }
+  // First on PATH, so `claude` resolves the SELECTED account when it is
+  // invoked rather than inheriting whichever one this shell was born with.
+  // A shell opened before a switch would otherwise keep running as the old
+  // account for its whole life — silently, against the wrong limits.
+  if (shimDir) {
+    const existing = spawnEnv.PATH ?? spawnEnv.Path ?? "";
+    spawnEnv.PATH = existing.length > 0 ? `${shimDir}:${existing}` : shimDir;
   }
   // Applied last: an explicit per-terminal env is the caller stating exactly
   // what it wants, which outranks the ambient account selection.
@@ -1194,6 +1191,11 @@ function normalizedRuntimeEnv(
 
 interface TerminalManagerOptions {
   logsDir: string;
+  /**
+   * Where the `claude` shim is written. The same directory people put on their
+   * own PATH — see `claudeAccountShim`.
+   */
+  claudeShimDir: string;
   historyLineLimit?: number;
   ptyAdapter: PtyAdapter.PtyAdapter["Service"];
   shellResolver?: () => string;
@@ -1254,13 +1256,24 @@ export const resolveTerminalClaudeAccount = Effect.fn("resolveTerminalClaudeAcco
 );
 
 export const make = Effect.fn("TerminalManager.make")(function* () {
-  const { terminalLogsDir, settingsPath } = yield* ServerConfig.ServerConfig;
+  const { terminalLogsDir, claudeShimDir, settingsPath } = yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const serverSettings = yield* ServerSettingsService;
   const path = yield* Path.Path;
+  const platform = yield* HostProcessPlatform;
+  // Written at boot, not only when a terminal opens: the directory goes on
+  // somebody's PATH by hand, so it has to exist and be current for the shells
+  // CH3 never spawns — the tmux session an orchestration run lives in.
+  yield* installClaudeAccountShim({
+    shimDir: claudeShimDir,
+    settingsPath,
+    nodePath: process.execPath,
+    platform,
+  });
   return yield* makeWithOptions({
     logsDir: terminalLogsDir,
+    claudeShimDir,
     ptyAdapter,
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
@@ -1292,8 +1305,22 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const runFork = Effect.runForkWith(context);
 
   const logsDir = options.logsDir;
+  const shimDir = options.claudeShimDir;
   const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
   const platform = yield* HostProcessPlatform;
+
+  /**
+   * The directory to put first on a terminal's PATH, or `null` where no shim
+   * can exist.
+   *
+   * Written once at boot rather than per spawn. The settings path and the Node
+   * binary are the same on every spawn, so a per-spawn write only rewrote two
+   * identical files — and that file is now a documented `PATH` entry, where a
+   * truncate-then-write during an external `claude` invocation is a broken
+   * exec rather than a wasted syscall.
+   */
+  const claudeShimDirForSpawn = platform === "win32" ? null : shimDir;
+
   // Terminals must inherit the user's full environment (minus the blocklist
   // applied in createTerminalSpawnEnv) — an allowlist here silently strips
   // things like PSModulePath, DISPLAY, proxies, and toolchain variables.
@@ -1996,7 +2023,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
             const claudeAccount = options.claudeAccount ? yield* options.claudeAccount() : null;
-            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv, claudeAccount);
+            const claudeShimPath = claudeAccount ? claudeShimDirForSpawn : null;
+            const terminalEnv = createTerminalSpawnEnv(
+              baseEnv,
+              session.runtimeEnv,
+              claudeAccount,
+              claudeShimPath,
+            );
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;

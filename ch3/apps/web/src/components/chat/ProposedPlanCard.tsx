@@ -39,14 +39,26 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
   threadRef,
   cwd,
   workspaceRoot,
+  forceExpanded = false,
 }: {
   planMarkdown: string;
   environmentId: EnvironmentId;
   threadRef?: ScopedThreadRef | undefined;
   cwd: string | undefined;
   workspaceRoot: string | undefined;
+  /**
+   * Shows the whole plan regardless of the collapse control — the find bar has
+   * taken the reader into this plan, and a collapsed one renders a preview that
+   * the match may not even be part of. It stays true until the bar closes.
+   */
+  forceExpanded?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [collapseOverridden, setCollapseOverridden] = useState(false);
+  // Same reason as the collapsible user message: find presses this card's own
+  // control instead of holding it open past it, so "Collapse plan" is never a
+  // button that does nothing.
+  if (forceExpanded && !collapseOverridden) setCollapseOverridden(true);
+  const expanded = collapseOverridden;
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
   const [savePath, setSavePath] = useState("");
   const [isSavingToWorkspace, setIsSavingToWorkspace] = useState(false);
@@ -150,7 +162,12 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <Badge variant="secondary">Plan</Badge>
-          <p className="truncate text-sm font-medium text-foreground">{title}</p>
+          {/* In find's scope with the body: the title is the plan's first
+              heading, which the body then omits — leaving it out would count a
+              match the reader can see and never highlight it. */}
+          <p data-find-scope="true" className="truncate text-sm font-medium text-foreground">
+            {title}
+          </p>
         </div>
         <Menu>
           <MenuTrigger
@@ -170,7 +187,10 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
         </Menu>
       </div>
       <div className="mt-4">
-        <div className={cn("relative", canCollapse && !expanded && "max-h-104 overflow-hidden")}>
+        <div
+          data-find-scope="true"
+          className={cn("relative", canCollapse && !expanded && "max-h-104 overflow-hidden")}
+        >
           {canCollapse && !expanded ? (
             <ChatMarkdown
               text={collapsedPreview ?? ""}
@@ -196,7 +216,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
               size="sm"
               variant="outline"
               data-scroll-anchor-ignore
-              onClick={() => setExpanded((value) => !value)}
+              onClick={() => setCollapseOverridden((value) => !value)}
             >
               {expanded ? "Collapse plan" : "Expand plan"}
             </Button>

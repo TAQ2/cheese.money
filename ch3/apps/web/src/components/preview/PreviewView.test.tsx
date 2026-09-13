@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   closePictureInPicture: vi.fn(async (_tabId: string): Promise<void> => undefined),
   pictureInPicture: false,
   showEmptyState: false,
+  navUrl: "http://example.com/",
+  openInBrowser: null as (() => void) | null,
 }));
 
 vi.mock("~/state/session", () => ({
@@ -65,7 +67,7 @@ vi.mock("~/previewStateStore", () => ({
             tabId: "tab-1",
             navStatus: {
               _tag: "Success",
-              url: "http://example.com/",
+              url: mocks.navUrl,
               title: "Example",
             },
             canGoBack: false,
@@ -154,6 +156,7 @@ vi.mock("./previewBridge", () => ({
 vi.mock("./PreviewChromeRow", () => ({
   PreviewChromeRow: (props: {
     onSubmit: (url: string) => void;
+    onOpenInBrowser?: () => void;
     onPictureInPicture?: () => void;
     pictureInPicture?: boolean;
     trailingActions?: {
@@ -161,6 +164,7 @@ vi.mock("./PreviewChromeRow", () => ({
     };
   }) => {
     mocks.submittedUrl = props.onSubmit;
+    mocks.openInBrowser = props.onOpenInBrowser ?? null;
     mocks.togglePictureInPicture = props.onPictureInPicture ?? null;
     mocks.toggleNativePictureInPicture =
       props.trailingActions?.props.onNativePictureInPicture ?? null;
@@ -215,6 +219,18 @@ describe("PreviewView navigation", () => {
     mocks.closePictureInPicture.mockClear();
     mocks.pictureInPicture = false;
     mocks.showEmptyState = false;
+    mocks.navUrl = "http://example.com/";
+    mocks.openInBrowser = null;
+  });
+
+  it.each([
+    ["http://example.com/", true],
+    ["file:///Users/conradws/Downloads/report.html", false],
+  ])("offers 'open in browser' for %s: %s", (url, offered) => {
+    mocks.navUrl = url;
+    renderToStaticMarkup(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />);
+
+    expect(mocks.openInBrowser !== null).toBe(offered);
   });
 
   it.each([

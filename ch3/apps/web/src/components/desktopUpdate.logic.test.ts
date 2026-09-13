@@ -2,10 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@ch3tools/contracts";
 
 import {
+  DESKTOP_UPDATE_IN_PROGRESS_MESSAGE,
   canCheckForUpdate,
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateDownloadConfirmationMessage,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -103,7 +105,35 @@ describe("desktop update button state", () => {
     };
     expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(isDesktopUpdateButtonDisabled(state)).toBe(true);
-    expect(getDesktopUpdateButtonTooltip(state)).toContain("42%");
+    // install.sh narrates its log into `message`; before its first line the
+    // tooltip is the standing sentence, never a percentage the app cannot know.
+    expect(getDesktopUpdateButtonTooltip(state)).toBe(DESKTOP_UPDATE_IN_PROGRESS_MESSAGE);
+  });
+});
+
+describe("update copy", () => {
+  it("says the update closes and reopens CH3 by itself, before it runs", () => {
+    const message = getDesktopUpdateDownloadConfirmationMessage({
+      currentVersion: "0.0.32-b36",
+      availableVersion: "0.0.32-b37",
+    });
+    expect(message).toContain("0.0.32-b36 → 0.0.32-b37");
+    expect(message).toContain("reopen by itself");
+    expect(message).toContain("do not open it yourself");
+  });
+
+  it("shows the installer's own last line while updating, and a standing sentence before it", () => {
+    const base: DesktopUpdateState = {
+      ...baseState,
+      status: "downloading",
+      currentVersion: "0.0.32-b36",
+      availableVersion: "0.0.32-b37",
+      downloadPercent: 0,
+    };
+    expect(getDesktopUpdateButtonTooltip(base)).toBe(DESKTOP_UPDATE_IN_PROGRESS_MESSAGE);
+    expect(getDesktopUpdateButtonTooltip({ ...base, message: "🛑 Quitting CH3…" })).toBe(
+      "🛑 Quitting CH3…",
+    );
   });
 });
 
@@ -195,7 +225,7 @@ describe("desktop update UI helpers", () => {
     expect(getArm64IntelBuildWarningDescription(state)).toContain("Intel build");
   });
 
-  it("changes the warning copy when a native build update is ready to download", () => {
+  it("changes the warning copy when a native build update is ready to install", () => {
     const state: DesktopUpdateState = {
       ...baseState,
       hostArch: "arm64",
@@ -205,7 +235,7 @@ describe("desktop update UI helpers", () => {
       availableVersion: "1.1.0",
     };
 
-    expect(getArm64IntelBuildWarningDescription(state)).toContain("Download the available update");
+    expect(getArm64IntelBuildWarningDescription(state)).toContain("Install the available update");
   });
 
   it("includes the downloaded version in the install confirmation copy", () => {

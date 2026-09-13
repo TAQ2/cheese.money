@@ -149,8 +149,6 @@ export const DEFAULT_TEXT_GENERATION_MODEL = "gpt-5.6-luna";
 export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {
   [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-sonnet-5",
-  [CURSOR_DRIVER_KIND]: "auto",
-  [GROK_DRIVER_KIND]: "grok-build",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
 };
 
@@ -159,7 +157,7 @@ export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   Record<ProviderDriverKind, string>
 > = {
   [CODEX_DRIVER_KIND]: DEFAULT_TEXT_GENERATION_MODEL,
-  [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
+  [CLAUDE_DRIVER_KIND]: "claude-sonnet-5",
   [CURSOR_DRIVER_KIND]: "composer-2",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
 };
@@ -176,28 +174,32 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "gpt-5.3-spark": "gpt-5.3-codex-spark",
   },
   [CLAUDE_DRIVER_KIND]: {
+    // The Task tool takes this short name, so a delegation can name Fable
+    // without it ever resolving to the real slug — and therefore without
+    // being recognised as a metered model.
+    fable: "claude-fable-5-1",
+    "fable-5": "claude-fable-5-1",
+    "fable-5-1": "claude-fable-5-1",
+    "fable-5.1": "claude-fable-5-1",
+    "claude-fable-5.1": "claude-fable-5-1",
+    // The retired slug, kept so a conversation that ran on Fable 5 still
+    // resolves when it is reopened. Every thread records the slug it ran on,
+    // and a recorded slug the catalogue no longer lists fell through to the
+    // tier default: the chip said Sonnet over a Fable conversation, the next
+    // turn really went to Sonnet, and Fable could not be picked back because
+    // the context ceiling judged the switch from "Sonnet". A successor alias
+    // is the migration.
+    "claude-fable-5": "claude-fable-5-1",
     opus: "claude-opus-5",
     "opus-5": "claude-opus-5",
     "claude-opus-5.0": "claude-opus-5",
     "claude-opus-5-0": "claude-opus-5",
-    "opus-4.8": "claude-opus-4-8",
-    "claude-opus-4.8": "claude-opus-4-8",
-    "opus-4.7": "claude-opus-4-7",
-    "claude-opus-4.7": "claude-opus-4-7",
-    "opus-4.6": "claude-opus-4-6",
-    "claude-opus-4.6": "claude-opus-4-6",
-    "claude-opus-4-6-20251117": "claude-opus-4-6",
     sonnet: "claude-sonnet-5",
     "sonnet-5": "claude-sonnet-5",
     "claude-sonnet-5.0": "claude-sonnet-5",
     "claude-sonnet-5-0": "claude-sonnet-5",
-    "sonnet-4.6": "claude-sonnet-4-6",
-    "claude-sonnet-4.6": "claude-sonnet-4-6",
-    "claude-sonnet-4-6-20251117": "claude-sonnet-4-6",
-    haiku: "claude-haiku-4-5",
-    "haiku-4.5": "claude-haiku-4-5",
-    "claude-haiku-4.5": "claude-haiku-4-5",
-    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+    "claude-fable-5.0": "claude-fable-5-1",
+    "claude-fable-5-0": "claude-fable-5-1",
   },
   [CURSOR_DRIVER_KIND]: {
     composer: "composer-2",
@@ -215,10 +217,31 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
 
 // ── Provider display names ────────────────────────────────────────────
 
+/**
+ * The one place a driver kind becomes a name a user reads. Every client label
+ * resolves through here, so a provider is renamed once rather than in each
+ * surface that happens to print it.
+ *
+ * The server snapshot's `displayName` must carry the same string as the label
+ * here, because `resolveInstanceDisplayName` treats a snapshot name that
+ * differs from this label as a deliberate per-instance name and prefers it.
+ */
 export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>> = {
   [CODEX_DRIVER_KIND]: "Codex",
   [CLAUDE_DRIVER_KIND]: "Claude",
+  [OPENCODE_DRIVER_KIND]: "OpenCode",
   [CURSOR_DRIVER_KIND]: "Cursor",
   [GROK_DRIVER_KIND]: "Grok",
-  [OPENCODE_DRIVER_KIND]: "OpenCode",
 };
+
+/**
+ * Driver kinds this build deliberately stopped shipping. Empty today: the
+ * slugs stay decodable in settings whatever happens, and the user-facing
+ * surfaces filter this set when one is retired.
+ */
+export const RETIRED_PROVIDER_DRIVER_KINDS: ReadonlyArray<ProviderDriverKind> = [];
+
+/** Whether a driver kind is one this build deliberately stopped shipping. */
+export function isRetiredProviderDriverKind(kind: ProviderDriverKind): boolean {
+  return RETIRED_PROVIDER_DRIVER_KINDS.includes(kind);
+}

@@ -6,6 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { TestClock } from "effect/testing";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
@@ -34,6 +35,57 @@ const makeRepositoryIdentityResolverTestLayer = (options: {
     }),
   ).pipe(Layer.provide(ProcessRunner.layer));
 
+/**
+ * A `ProcessRunner` that answers git without spawning it, and counts the asks.
+ *
+ * The subject here is how many subprocesses a repeated lookup costs, so the
+ * subprocess has to be the thing under the microscope rather than a real one.
+ */
+const recordingProcessRunner = (record: Array<ReadonlyArray<string>>) =>
+  Layer.succeed(ProcessRunner.ProcessRunner, {
+    run: (input) =>
+      Effect.sync(() => {
+        record.push([input.command, ...input.args]);
+        const stdout = input.args.includes("--show-toplevel")
+          ? "/tmp/repo\n"
+          : "origin\thttps://github.com/acme/repo.git (fetch)\n";
+        return {
+          stdout,
+          stderr: "",
+          code: ChildProcessSpawner.ExitCode(0),
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        };
+      }),
+  });
+
+it.effect("resolves the same directory twice without asking git twice", () => {
+  const spawns: Array<ReadonlyArray<string>> = [];
+  return Effect.gen(function* () {
+    const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+
+    const first = yield* resolver.resolve("/tmp/repo/nested");
+    const second = yield* resolver.resolve("/tmp/repo/nested");
+
+    expect(second).toStrictEqual(first);
+    // Two spawns for the first lookup — the root, then the remote — and none
+    // for the second. Deriving the cache key used to spawn every time, so a
+    // cache hit still cost a process; the shell snapshot does this once per
+    // project on every reconnect.
+    expect(spawns).toHaveLength(2);
+    expect(spawns[0]).toContain("--show-toplevel");
+    expect(spawns[1]).toContain("remote");
+  }).pipe(
+    Effect.provide(
+      Layer.effect(
+        RepositoryIdentityResolver.RepositoryIdentityResolver,
+        RepositoryIdentityResolver.make({ cacheCapacity: 16 }),
+      ).pipe(Layer.provide(recordingProcessRunner(spawns))),
+    ),
+  );
+});
+
 it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
   it.effect("normalizes equivalent GitHub remotes into a stable repository identity", () =>
     Effect.gen(function* () {
@@ -43,7 +95,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       });
 
       yield* git(cwd, ["init"]);
-      yield* git(cwd, ["remote", "add", "origin", "git@github.com:CH3Tools/ch3.git"]);
+      yield* git(cwd, ["remote", "add", "origin", "git@github.com:ch3/ch3.git"]);
 
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const identity = yield* resolver.resolve(cwd);
@@ -52,11 +104,11 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       const resolvedCwd = yield* fileSystem.realPath(cwd);
 
       expect(identity).not.toBeNull();
-      expect(identity?.canonicalKey).toBe("github.com/ch3tools/ch3");
+      expect(identity?.canonicalKey).toBe("github.com/ch3/ch3");
       expect(normalizeResolvedPath(resolvedIdentityRoot)).toBe(normalizeResolvedPath(resolvedCwd));
-      expect(identity?.displayName).toBe("ch3tools/ch3");
+      expect(identity?.displayName).toBe("ch3/ch3");
       expect(identity?.provider).toBe("github");
-      expect(identity?.owner).toBe("ch3tools");
+      expect(identity?.owner).toBe("ch3");
       expect(identity?.name).toBe("ch3");
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
@@ -72,7 +124,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
 
       yield* fileSystem.makeDirectory(nestedWorkspace, { recursive: true });
       yield* git(repoRoot, ["init"]);
-      yield* git(repoRoot, ["remote", "add", "origin", "git@github.com:CH3Tools/ch3.git"]);
+      yield* git(repoRoot, ["remote", "add", "origin", "git@github.com:ch3/ch3.git"]);
 
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const identity = yield* resolver.resolve(nestedWorkspace);
@@ -81,7 +133,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       const resolvedRepoRoot = yield* fileSystem.realPath(repoRoot);
 
       expect(identity).not.toBeNull();
-      expect(identity?.canonicalKey).toBe("github.com/ch3tools/ch3");
+      expect(identity?.canonicalKey).toBe("github.com/ch3/ch3");
       expect(normalizeResolvedPath(resolvedIdentityRoot)).toBe(
         normalizeResolvedPath(resolvedRepoRoot),
       );
@@ -118,15 +170,15 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
 
       yield* git(cwd, ["init"]);
       yield* git(cwd, ["remote", "add", "origin", "git@github.com:julius/ch3.git"]);
-      yield* git(cwd, ["remote", "add", "upstream", "git@github.com:CH3Tools/ch3.git"]);
+      yield* git(cwd, ["remote", "add", "upstream", "git@github.com:ch3/ch3.git"]);
 
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const identity = yield* resolver.resolve(cwd);
 
       expect(identity).not.toBeNull();
       expect(identity?.locator.remoteName).toBe("upstream");
-      expect(identity?.canonicalKey).toBe("github.com/ch3tools/ch3");
-      expect(identity?.displayName).toBe("ch3tools/ch3");
+      expect(identity?.canonicalKey).toBe("github.com/ch3/ch3");
+      expect(identity?.displayName).toBe("ch3/ch3");
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 
@@ -138,15 +190,15 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       });
 
       yield* git(cwd, ["init"]);
-      yield* git(cwd, ["remote", "add", "origin", "git@gitlab.com:CH3Tools/platform/ch3.git"]);
+      yield* git(cwd, ["remote", "add", "origin", "git@gitlab.com:ch3/platform/ch3.git"]);
 
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const identity = yield* resolver.resolve(cwd);
 
       expect(identity).not.toBeNull();
-      expect(identity?.canonicalKey).toBe("gitlab.com/ch3tools/platform/ch3");
-      expect(identity?.displayName).toBe("ch3tools/platform/ch3");
-      expect(identity?.owner).toBe("ch3tools");
+      expect(identity?.canonicalKey).toBe("gitlab.com/ch3/platform/ch3");
+      expect(identity?.displayName).toBe("ch3/platform/ch3");
+      expect(identity?.owner).toBe("ch3");
       expect(identity?.name).toBe("ch3");
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
@@ -166,7 +218,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
         const initialIdentity = yield* resolver.resolve(cwd);
         expect(initialIdentity).toBeNull();
 
-        yield* git(cwd, ["remote", "add", "origin", "git@github.com:CH3Tools/ch3.git"]);
+        yield* git(cwd, ["remote", "add", "origin", "git@github.com:ch3/ch3.git"]);
 
         for (const _attempt of [1, 2, 3]) {
           const cachedIdentity = yield* resolver.resolve(cwd);
@@ -177,7 +229,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
 
         const refreshedIdentity = yield* resolver.resolve(cwd);
         expect(refreshedIdentity).not.toBeNull();
-        expect(refreshedIdentity?.canonicalKey).toBe("github.com/ch3tools/ch3");
+        expect(refreshedIdentity?.canonicalKey).toBe("github.com/ch3/ch3");
         expect(refreshedIdentity?.name).toBe("ch3");
       }).pipe(
         Effect.provide(
@@ -200,25 +252,25 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       });
 
       yield* git(cwd, ["init"]);
-      yield* git(cwd, ["remote", "add", "origin", "git@github.com:CH3Tools/ch3.git"]);
+      yield* git(cwd, ["remote", "add", "origin", "git@github.com:ch3/ch3.git"]);
 
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const initialIdentity = yield* resolver.resolve(cwd);
       expect(initialIdentity).not.toBeNull();
-      expect(initialIdentity?.canonicalKey).toBe("github.com/ch3tools/ch3");
+      expect(initialIdentity?.canonicalKey).toBe("github.com/ch3/ch3");
 
-      yield* git(cwd, ["remote", "set-url", "origin", "git@github.com:CH3Tools/ch3-next.git"]);
+      yield* git(cwd, ["remote", "set-url", "origin", "git@github.com:ch3/ch3-next.git"]);
 
       const cachedIdentity = yield* resolver.resolve(cwd);
       expect(cachedIdentity).not.toBeNull();
-      expect(cachedIdentity?.canonicalKey).toBe("github.com/ch3tools/ch3");
+      expect(cachedIdentity?.canonicalKey).toBe("github.com/ch3/ch3");
 
       yield* TestClock.adjust(Duration.millis(180));
 
       const refreshedIdentity = yield* resolver.resolve(cwd);
       expect(refreshedIdentity).not.toBeNull();
-      expect(refreshedIdentity?.canonicalKey).toBe("github.com/ch3tools/ch3-next");
-      expect(refreshedIdentity?.displayName).toBe("ch3tools/ch3-next");
+      expect(refreshedIdentity?.canonicalKey).toBe("github.com/ch3/ch3-next");
+      expect(refreshedIdentity?.displayName).toBe("ch3/ch3-next");
       expect(refreshedIdentity?.name).toBe("ch3-next");
     }).pipe(
       Effect.provide(

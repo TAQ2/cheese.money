@@ -10,16 +10,19 @@ import {
   type ChangeRequestTerminology,
 } from "../sourceControlPresentation";
 
-export type GitActionIconName = "commit" | "push" | "pr";
+export type GitActionIconName = "commit" | "push" | "pr" | "pull" | "publish";
 
 export type GitDialogAction = "commit" | "push" | "create_pr";
 
 export interface GitActionMenuItem {
-  id: "commit" | "push" | "pr";
+  id: "commit" | "pull" | "push" | "pr" | "publish";
   label: string;
   disabled: boolean;
   icon: GitActionIconName;
-  kind: "open_dialog" | "open_pr";
+  // Pull and publish moved here when the always-visible slot became "View
+  // <change request>". They were only ever quick actions, so leaving them out
+  // of the menu would have deleted the only way to reach them.
+  kind: "open_dialog" | "open_pr" | "run_pull" | "open_publish";
   dialogAction?: GitDialogAction;
 }
 
@@ -132,11 +135,27 @@ export function buildMenuItems(
   };
 
   if (!hasPrimaryRemote) {
-    return [commitItem];
+    return [
+      commitItem,
+      {
+        id: "publish",
+        label: "Publish repository",
+        disabled: isBusy,
+        icon: "publish",
+        kind: "open_publish",
+      },
+    ];
   }
 
   return [
     commitItem,
+    {
+      id: "pull",
+      label: "Pull",
+      disabled: isBusy || !isBehind,
+      icon: "pull",
+      kind: "run_pull",
+    },
     {
       id: "push",
       label: "Push",
@@ -187,7 +206,6 @@ export function resolveQuickAction(
   const hasChanges = gitStatus.hasWorkingTreeChanges;
   const hasOpenPr = gitStatus.pr?.state === "open";
   const isAhead = gitStatus.aheadCount > 0;
-  const hasDefaultBranchDelta = (gitStatus.aheadOfDefaultCount ?? gitStatus.aheadCount) > 0;
   const isBehind = gitStatus.behindCount > 0;
   const isDiverged = isAhead && isBehind;
   const terminology = resolveChangeRequestTerminology(gitStatus);
@@ -199,6 +217,14 @@ export function resolveQuickAction(
       kind: "show_hint",
       hint: `Create and checkout a ref before pushing or opening a ${terminology.singular}.`,
     };
+  }
+
+  // PR-first: once a change request is open it is where the work is going,
+  // so it owns the always-visible slot. Commit and Push stay one click away
+  // in the menu, which offers them independently of this choice. The default
+  // ref is exempt — there is nothing to view from main.
+  if (hasOpenPr && !isDefaultRef) {
+    return { label: `View ${terminology.shortLabel}`, disabled: false, kind: "open_pr" };
   }
 
   if (hasChanges) {
@@ -291,21 +317,13 @@ export function resolveQuickAction(
   if (hasOpenPr && gitStatus.hasUpstream) {
     return { label: `View ${terminology.shortLabel}`, disabled: false, kind: "open_pr" };
   }
-
-  if (hasDefaultBranchDelta && !isDefaultRef) {
-    return {
-      label: `Create ${terminology.shortLabel}`,
-      disabled: false,
-      kind: "run_action",
-      action: "create_pr",
-    };
-  }
-
   return {
-    label: "Commit",
-    disabled: true,
+    label: `View ${terminology.shortLabel}`,
+    disabled: false,
     kind: "show_hint",
-    hint: "Branch is up to date. No action needed.",
+    hint: isDefaultRef
+      ? `No ${terminology.singular} for this conversation — ${gitStatus.refName ?? "this ref"} is the default branch. Create a branch first, then use Create ${terminology.shortLabel} in the menu.`
+      : `No ${terminology.singular} for this conversation yet. Use Create ${terminology.shortLabel} in the menu to open one.`,
   };
 }
 

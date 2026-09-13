@@ -14,7 +14,10 @@ import * as LogLevel from "effect/LogLevel";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-export const DEFAULT_PORT = 3773;
+// One port away from upstream's 3773: the readiness probe cannot tell the
+// two servers apart, so sharing a port makes one app adopt the other's
+// backend. A distinct default is what makes coexistence real.
+export const DEFAULT_PORT = 3873;
 
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
 export type RuntimeMode = typeof RuntimeMode.Type;
@@ -32,6 +35,15 @@ export interface ServerDerivedPaths {
   readonly settingsPath: string;
   readonly providerStatusCacheDir: string;
   readonly worktreesDir: string;
+  /**
+   * Where CH3 keeps the clones it made itself. See `project/ManagedClones`.
+   *
+   * A directory CH3 owns by construction, which is the whole safety
+   * argument: a clone below this root was made by CH3 and may be fetched
+   * and fast-forwarded, and a clone anywhere else belongs to the engineer and
+   * is never written to.
+   */
+  readonly managedClonesDir: string;
   readonly attachmentsDir: string;
   /** Synthesized speech, cached by content so a replay costs nothing. */
   readonly speechCacheDir: string;
@@ -41,6 +53,18 @@ export interface ServerDerivedPaths {
   readonly providerLogsDir: string;
   readonly providerEventLogPath: string;
   readonly terminalLogsDir: string;
+  /**
+   * Where the `claude` shim lives, so a terminal resolves the selected account
+   * when it runs `claude` rather than when the shell was born.
+   *
+   * Under the state directory, on the same side of the dev/userdata split as
+   * the settings the shim reads. Sharing one directory across both would mean
+   * starting a dev server rewrites the installed app's shim to resolve
+   * accounts from the dev database — silently repointing every terminal on the
+   * machine, which is the failure this whole mechanism exists to prevent.
+   * See `terminal/claudeAccountShim`.
+   */
+  readonly claudeShimDir: string;
   readonly anonymousIdPath: string;
   readonly environmentIdPath: string;
   readonly serverRuntimeStatePath: string;
@@ -121,6 +145,7 @@ export const deriveServerPaths = Effect.fn(function* (
     settingsPath: join(stateDir, "settings.json"),
     providerStatusCacheDir,
     worktreesDir: join(baseDir, "worktrees"),
+    managedClonesDir: join(baseDir, "managed-clones"),
     attachmentsDir,
     speechCacheDir,
     logsDir,
@@ -129,6 +154,7 @@ export const deriveServerPaths = Effect.fn(function* (
     providerLogsDir,
     providerEventLogPath: join(providerLogsDir, "events.log"),
     terminalLogsDir: join(logsDir, "terminals"),
+    claudeShimDir: join(stateDir, "bin"),
     anonymousIdPath: join(stateDir, "anonymous-id"),
     environmentIdPath: join(stateDir, "environment-id"),
     serverRuntimeStatePath: join(stateDir, "server-runtime.json"),
@@ -146,6 +172,7 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),
+      fs.makeDirectory(derivedPaths.claudeShimDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.attachmentsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.speechCacheDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.worktreesDir, { recursive: true }),

@@ -20,6 +20,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "../ui/sidebar";
+import { useStageBackdropMotion } from "../stageBackdropMotion";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdatePill } from "./SidebarUpdatePill";
 
@@ -38,33 +39,52 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
     environmentIdentificationMode === "pill"
       ? resolveEnvironmentIdentificationPillLabel(stageLabel)
       : null;
+  const { hostRef, onPointerMove, onPointerLeave } = useStageBackdropMotion<HTMLDivElement>();
 
   return (
     <SidebarHeader
       className={cn(
-        "@container/sidebar-header relative h-[var(--workspace-topbar-height)] shrink-0 flex-row items-center px-3 py-0 md:px-0",
+        "@container/sidebar-header stage-motion-host relative h-[var(--workspace-topbar-height)] shrink-0 flex-row items-center px-3 py-0 md:px-0",
         isElectron && "drag-region",
       )}
+      onPointerLeave={onPointerLeave}
+      onPointerMove={onPointerMove}
+      ref={hostRef}
     >
       {backdropVariant ? <SidebarStageBackdrop variant={backdropVariant} /> : null}
       <SidebarTrigger
         className={cn(
           "relative z-10 md:hidden",
           backdropVariant &&
-            "[:hover,[data-pressed]]:bg-white/15 focus-visible:ring-white/90 focus-visible:ring-offset-blue-700 [&_svg]:stroke-white/90! [&_svg]:opacity-100! [&_svg]:hover:stroke-white!",
+            "[:hover,[data-pressed]]:bg-white/15 focus-visible:ring-white/90 focus-visible:ring-offset-violet-700 [&_svg]:stroke-white/90! [&_svg]:opacity-100! [&_svg]:hover:stroke-white!",
         )}
       />
-      <SidebarBrand onBackdrop={backdropVariant !== null} />
-      {pillLabel ? (
-        <Badge
-          className="relative z-10 ml-1 rounded-full px-1.5 text-muted-foreground"
-          data-environment-identification="pill"
-          size="sm"
-          variant="secondary"
-        >
-          {pillLabel}
-        </Badge>
-      ) : null}
+      {/*
+        Three columns: a leading gutter that reserves the traffic lights and the
+        toggle, the lockup, and whatever is left. The gutter and the trailing
+        column are both `1fr`, so the lockup centres on the sidebar itself
+        rather than on the run beside the controls — and the gutter's `min`
+        stops it there, so on a narrow sidebar the mark parks beside the toggle
+        instead of climbing onto it. The template lives in
+        `.sidebar-brand-run`. The pill rides in the middle column so it stays
+        beside the mark rather than being flung to the far edge.
+      */}
+      <div className="sidebar-brand-run relative z-10 min-w-0 flex-1">
+        <span aria-hidden />
+        <span className="flex min-w-0 items-center gap-1">
+          <SidebarBrand onBackdrop={backdropVariant !== null} />
+          {pillLabel ? (
+            <Badge
+              className="rounded-full px-1.5 text-muted-foreground"
+              data-environment-identification="pill"
+              size="sm"
+              variant="secondary"
+            >
+              {pillLabel}
+            </Badge>
+          ) : null}
+        </span>
+      </div>
     </SidebarHeader>
   );
 });
@@ -74,29 +94,55 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
     <Link
       aria-label="Go to threads"
       className={cn(
-        "sidebar-brand relative z-10 ml-[var(--workspace-titlebar-content-left)] h-7 w-fit min-w-0 shrink-0 items-center gap-1 overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2",
+        "sidebar-brand relative z-10 h-11 w-fit min-w-0 shrink items-center gap-1 overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2",
         onBackdrop ? "text-white" : "text-foreground",
       )}
       to="/"
     >
-      <CH3Wordmark />
+      <CH3Wordmark onBackdrop={onBackdrop} />
     </Link>
   );
 }
 
-function CH3Wordmark() {
+/**
+ * The CH3 titlebar lockup.
+ *
+ * Keeps the two-tone rhythm of the mark it replaces: a solid leading syllable
+ * against a lighter tail, split Bau|Dex to match the app icon's two rows. The
+ * gradient is what gives it the glassy read — a bright top edge falling to a
+ * dimmer base, exactly as an embossed metal wordmark catches light.
+ *
+ * Set at 2.5x the 0.875rem it used to be. `leading-none` is load-bearing at
+ * that size: an arbitrary font size inherits the body's 1.5 line height, which
+ * would make one line of text taller than the 52px titlebar it sits in.
+ */
+function CH3Wordmark({ onBackdrop }: { onBackdrop: boolean }) {
   return (
-    <svg
+    <span
       aria-label="CH3"
-      className="h-2.5 w-auto shrink-0"
-      viewBox="11.776 42.6 104.448 45.568"
-      xmlns="http://www.w3.org/2000/svg"
+      className="flex shrink-0 items-baseline text-[2.1875rem] leading-none font-semibold tracking-tight"
     >
-      <path
-        d="M38.976 45.328C33.275 41.548 26.359 41.706 20.779 45.742C15.197 49.778 11.776 57.097 11.776 65C11.776 72.903 15.197 80.222 20.779 84.258C26.359 88.294 33.275 88.452 38.976 84.672L38.976 75.08C38.016 77 36.976 78.6 35.376 78.6L28.976 78.6C25.22 78.6 22.176 75.556 22.176 71.8L22.176 58.2C22.176 54.444 25.22 51.4 28.976 51.4L35.376 51.4C36.976 51.4 38.016 53 38.976 54.92ZM43.776 42.6H54.176V59.8H65.376V42.6H75.776V87.4H65.376V68.6H54.176V87.4H43.776V42.6ZM97.664 88.168C94.549 88.168 91.456 87.763 88.384 86.952C85.312 86.099 82.709 84.904 80.576 83.368L84.608 75.432C86.315 76.669 88.299 77.651 90.56 78.376C92.821 79.101 95.104 79.464 97.408 79.464C100.011 79.464 102.059 78.952 103.552 77.928C105.045 76.904 105.792 75.496 105.792 73.704C105.792 71.997 105.131 70.653 103.808 69.672C102.485 68.691 100.352 68.2 97.408 68.2H92.672V61.352L105.152 47.208L106.304 50.92H82.816V42.6H114.176V49.32L101.76 63.464L96.512 60.456H99.52C105.024 60.456 109.184 61.693 112 64.168C114.816 66.643 116.224 69.821 116.224 73.704C116.224 76.221 115.563 78.589 114.24 80.808C112.917 82.984 110.891 84.755 108.16 86.12C105.429 87.485 101.931 88.168 97.664 88.168Z"
-        fill="currentColor"
-      />
-    </svg>
+      <span
+        className={cn(
+          "bg-clip-text text-transparent",
+          onBackdrop
+            ? "bg-linear-to-b from-white to-white/70"
+            : "bg-linear-to-b from-foreground to-foreground/65",
+        )}
+      >
+        Bau
+      </span>
+      <span
+        className={cn(
+          "font-medium bg-clip-text text-transparent",
+          onBackdrop
+            ? "bg-linear-to-b from-white/80 to-white/45"
+            : "bg-linear-to-b from-muted-foreground to-muted-foreground/55",
+        )}
+      >
+        Dex
+      </span>
+    </span>
   );
 }
 

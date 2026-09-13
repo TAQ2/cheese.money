@@ -251,6 +251,45 @@ export function terminalScrollRestoreLine(
   return Math.max(0, baseYAfter - linesFromBottom);
 }
 
+/**
+ * What to append when the server's buffer has moved on, or null when only a
+ * full replay can express the change.
+ *
+ * The server keeps a bounded scrollback (5,000 lines) and trims from the
+ * HEAD, so every terminal that outlives that cap stops being a pure append:
+ * each update drops leading lines while adding trailing ones. Treating that
+ * as "diverged" and replaying the whole buffer is correct but brutal — the
+ * replay issues RIS, which invalidates every selection coordinate, so a
+ * highlight could not survive a single line of output on any long-running
+ * terminal. Nobody could copy anything.
+ *
+ * A trim is still an append with a shorter start: find the longest suffix of
+ * what we already showed that opens what the server now holds, and write only
+ * what follows it. The search is bounded — an overlap longer than the window
+ * is indistinguishable from an unrelated buffer at this cost — and falls back
+ * to null, i.e. the replay, when nothing lines up (a `clear`, a new session).
+ */
+export function terminalBufferAppendSuffix(
+  previous: string,
+  current: string,
+  maxOverlap = 262_144,
+): string | null {
+  if (previous.length === 0) return current;
+  if (current.startsWith(previous)) return current.slice(previous.length);
+  // Only a shorter-headed buffer can be a trim; anything else diverged.
+  if (current.length === 0) return null;
+  const window = Math.min(previous.length, current.length, maxOverlap);
+  for (let overlap = window; overlap > 0; overlap -= 1) {
+    if (
+      previous.charCodeAt(previous.length - overlap) === current.charCodeAt(0) &&
+      previous.endsWith(current.slice(0, overlap))
+    ) {
+      return current.slice(overlap);
+    }
+  }
+  return null;
+}
+
 export function resolveTerminalSelectionActionPosition(options: {
   bounds: { left: number; top: number; width: number; height: number };
   selectionRect: { right: number; bottom: number } | null;
@@ -782,19 +821,19 @@ export function TerminalViewport({
       return;
     }
 
-    if (
-      current.buffer.length >= previous.buffer.length &&
-      current.buffer.startsWith(previous.buffer)
-    ) {
+    const appendable = terminalBufferAppendSuffix(previous.buffer, current.buffer);
+    if (appendable !== null) {
       // Appending BELOW the viewport invalidates neither the scroll position
       // (xterm only follows the tail when the viewport is already at the
-      // bottom) nor a selection made above it. This path therefore touches
-      // neither — it used to clear the selection unconditionally, which is why
-      // a highlight vanished the instant any output arrived.
-      terminal.write(current.buffer.slice(previous.buffer.length));
+      // bottom) nor a selection made above it, so this path touches neither.
+      // A head trim reaches here too: once a terminal outgrows the server's
+      // 5,000-line cap every update trims and appends at once, and routing
+      // that to the replay below is what made a highlight impossible to hold
+      // on any long-running terminal.
+      terminal.write(appendable);
     } else {
-      // The buffer diverged — the server trimmed its head past our scrollback
-      // cap, so the tail cannot simply be appended. `writeTerminalBuffer`
+      // Nothing of what we showed opens what the server now holds — a
+      // `clear`, a restart, a new session. `writeTerminalBuffer`
       // issues RIS (c) and replays everything, which discards scrollback
       // and slams the viewport to the bottom. That is the jank: on a busy
       // terminal the head is trimmed continuously, so every scroll-up was

@@ -22,6 +22,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { RuntimeErrorClass } from "./providerRuntime.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -122,9 +123,18 @@ export const RuntimeMode = Schema.Literals([
   "full-access",
 ]);
 export type RuntimeMode = typeof RuntimeMode.Type;
-export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+/**
+ * What a new thread starts as when nobody has configured otherwise: routine
+ * actions go through, risky ones still ask. `defaultRuntimeMode` in settings
+ * overrides it per user.
+ */
+export const DEFAULT_RUNTIME_MODE: RuntimeMode = "auto";
 export const ProviderInteractionMode = Schema.Literals(["default", "plan"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;
+/**
+ * What a new thread starts as when nobody has configured otherwise: build.
+ * `defaultInteractionMode` in settings overrides it per user.
+ */
 export const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = "default";
 export const ProviderRequestKind = Schema.Literals(["command", "file-read", "file-change"]);
 export type ProviderRequestKind = typeof ProviderRequestKind.Type;
@@ -278,6 +288,7 @@ export const OrchestrationSession = Schema.Struct({
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
+  lastErrorClass: Schema.optional(Schema.NullOr(RuntimeErrorClass)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationSession = typeof OrchestrationSession.Type;
@@ -396,6 +407,39 @@ export const ThreadKanbanState = Schema.Struct({
       on this, not wall-clock, because checkpoint capture rewrites a turn's
       completedAt after the fact. Optional so persisted pre-field rows decode. */
   classifiedTurnId: Schema.optional(Schema.NullOr(TurnId)),
+  /**
+   * Lease asserting the agent still owns this thread, as an absolute expiry.
+   *
+   * The board otherwise infers "the agent is busy" from things it can observe —
+   * a streaming session, a live turn, a subprocess under a terminal it spawned.
+   * Deliberately detached work defeats all three: `nohup ... & disown` reparents
+   * the run to pid 1, a tmux session gives it no controlling terminal, and a
+   * queued remote job never touches this machine. The launcher therefore states
+   * ownership instead of the board guessing at it.
+   *
+   * It is an expiry rather than a boolean because the process holding it can be
+   * SIGKILLed before it can retract it: a lapsed lease heals itself, where a
+   * stuck flag would strand the card in the agent lane forever. Optional so
+   * persisted pre-field rows decode.
+   */
+  agentWorkingUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the lease above STARTED, as opposed to when it next expires.
+   *
+   * The expiry slides forward on every renewal, so it can say the run has not
+   * ended but never how long it has been going. A row held by a lease has no
+   * session and no turn either — that is the whole point of the lease — so
+   * there is no other timestamp on the thread that means "this work began".
+   * Without this field an orchestrator row can only say "Working", with no
+   * number, while every session-backed row beside it counts up.
+   *
+   * Derived, never sent: the decider stamps it when a lease starts, carries it
+   * unchanged through renewals, and clears it on release. A caller cannot set
+   * it, so a renewal that forgot to pass it cannot silently reset the clock.
+   * A lease that lapsed and is claimed again is new work and gets a new stamp.
+   * Optional so persisted pre-field rows decode.
+   */
+  agentWorkingSince: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type ThreadKanbanState = typeof ThreadKanbanState.Type;
 
@@ -435,6 +479,13 @@ export const OrchestrationThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
+  /**
+   * Windowing marker, not domain state: snapshots carry only the newest
+   * activities, and this is true when older ones exist server-side (fetched
+   * on demand via `threadActivitiesPage`). Absent — payloads from pre-window
+   * servers, and every non-snapshot producer — means fully loaded.
+   */
+  hasMoreActivities: Schema.optionalKey(Schema.Boolean),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
 });
@@ -487,6 +538,12 @@ export const OrchestrationThreadShell = Schema.Struct({
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
   hasPendingUserInput: Schema.Boolean,
+  /**
+   * Subagents in flight on the thread's newest turn. Optional so payloads
+   * from pre-delegation servers still decode, and read as live only while
+   * that turn is still running — the count is turn-scoped, not thread-scoped.
+   */
+  liveDelegationCount: Schema.optional(NonNegativeInt),
   hasActionableProposedPlan: Schema.Boolean,
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
@@ -576,6 +633,27 @@ export const OrchestrationThreadDetailSnapshot = Schema.Struct({
   thread: OrchestrationThread,
 });
 export type OrchestrationThreadDetailSnapshot = typeof OrchestrationThreadDetailSnapshot.Type;
+
+/**
+ * A page of a thread's activities older than a cursor, for readers scrolling
+ * back past the snapshot's window. `beforeSequence` is exclusive: the page
+ * holds activities with `sequence < beforeSequence`, ascending, and the last
+ * page also carries any legacy rows that predate per-activity sequences.
+ */
+export const OrchestrationThreadActivitiesPageInput = Schema.Struct({
+  beforeSequence: NonNegativeInt,
+  /** Server-capped; omitted means the server's default page size. */
+  limit: Schema.optionalKey(NonNegativeInt),
+});
+export type OrchestrationThreadActivitiesPageInput =
+  typeof OrchestrationThreadActivitiesPageInput.Type;
+
+export const OrchestrationThreadActivitiesPage = Schema.Struct({
+  activities: Schema.Array(OrchestrationThreadActivity),
+  /** True while pages older than this one remain. */
+  hasMoreBefore: Schema.Boolean,
+});
+export type OrchestrationThreadActivitiesPage = typeof OrchestrationThreadActivitiesPage.Type;
 
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
@@ -706,6 +784,8 @@ const ThreadKanbanUpdateCommand = Schema.Struct({
   keywords: Schema.optional(Schema.Array(Schema.String)),
   /** Classifier only: the turn this classification read. */
   classifiedTurnId: Schema.optional(TurnId),
+  /** Absolute expiry of the agent-ownership lease; null clears it. */
+  agentWorkingUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** User-requested re-run: the classification reactor picks this up from the
       resulting event and re-reads the conversation on demand. */
   reclassify: Schema.optional(Schema.Literal(true)),
@@ -804,6 +884,22 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/**
+ * Re-attempts starting a turn for a message that already exists on the
+ * thread, after a prior `thread.turn.start` dispatch got the message
+ * persisted but failed before the provider turn launched. Deliberately not
+ * `thread.turn.start` again: that would re-append the message and duplicate
+ * the chat bubble. This carries no message payload — the decider looks the
+ * text back up by `messageId`.
+ */
+const ThreadTurnRetryCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn.retry"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadApprovalRespondCommand = Schema.Struct({
   type: Schema.Literal("thread.approval.respond"),
   commandId: CommandId,
@@ -837,6 +933,13 @@ const ThreadSessionStopCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadSessionStartCommand = Schema.Struct({
+  type: Schema.Literal("thread.session.start"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
@@ -855,10 +958,12 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadInteractionModeSetCommand,
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
+  ThreadTurnRetryCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadSessionStartCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -881,10 +986,12 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadInteractionModeSetCommand,
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
+  ThreadTurnRetryCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadSessionStartCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -1034,6 +1141,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.reverted",
   "thread.messages-rewound",
   "thread.session-stop-requested",
+  "thread.session-start-requested",
   "thread.session-set",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
@@ -1246,6 +1354,11 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const ThreadSessionStartRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
@@ -1413,6 +1526,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.session-stop-requested"),
     payload: ThreadSessionStopRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.session-start-requested"),
+    payload: ThreadSessionStartRequestedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

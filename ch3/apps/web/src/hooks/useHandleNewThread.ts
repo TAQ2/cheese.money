@@ -4,7 +4,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@ch3tools/client-runtime/environment";
-import { DEFAULT_RUNTIME_MODE, type ScopedProjectRef } from "@ch3tools/contracts";
+import type { ScopedProjectRef } from "@ch3tools/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
@@ -21,6 +21,7 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { readThreadShell, useProjects, useThread } from "../state/entities";
+import { resolveCarriedModelSelection, resolveNewThreadModes } from "./useHandleNewThread.logic";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import { primaryServerSettingsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
@@ -88,8 +89,13 @@ export function useNewThreadHandler() {
       const composerModelSelection = composerActiveProvider
         ? (carrySourceComposer?.modelSelectionByProvider[composerActiveProvider] ?? null)
         : null;
-      const carryModelSelection =
-        composerModelSelection ?? carrySourceShell?.modelSelection ?? null;
+      // The one thing a new thread must NOT carry is the model — see
+      // `resolveCarriedModelSelection` for why every new thread opens on the
+      // default model.
+      const carryModelSelection = resolveCarriedModelSelection({
+        composerSelection: composerModelSelection,
+        shellSelection: carrySourceShell?.modelSelection,
+      });
       const carryRuntimeMode =
         carrySourceComposer?.runtimeMode ??
         carrySourceShell?.runtimeMode ??
@@ -165,11 +171,21 @@ export function useNewThreadHandler() {
                     newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
                   }),
                 };
+          // Same rule as the env context above, and for the same reason: a
+          // draft persisted before this build holds the mode it was seeded
+          // with — `full-access` for anyone who used CH3 before the default
+          // changed, `auto` for anyone whose settings had not loaded when it was
+          // made — and resurrecting it would quietly reinstate that mode on
+          // every project a colleague already has. Clearing it puts the draft
+          // back on the configured default. Carried modes still win.
+          const resurrectedModes = resolveNewThreadModes({
+            carriedRuntimeMode: carryRuntimeMode,
+            carriedInteractionMode: carryInteractionMode,
+          });
           if (workspaceContext) {
             setDraftThreadContext(reusableStoredDraftThread.draftId, {
               ...workspaceContext,
-              ...(carryRuntimeMode ? { runtimeMode: carryRuntimeMode } : {}),
-              ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
+              ...resurrectedModes,
             });
             if (carryModelSelection) {
               // The carried selection is a complete snapshot of the viewed
@@ -191,8 +207,7 @@ export function useNewThreadHandler() {
             {
               threadId: reusableStoredDraftThread.threadId,
               ...workspaceContext,
-              ...(carryRuntimeMode ? { runtimeMode: carryRuntimeMode } : {}),
-              ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
+              ...resurrectedModes,
             },
           );
           if (
@@ -258,14 +273,16 @@ export function useNewThreadHandler() {
               envMode: initialEnvMode,
               newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
             }),
-          runtimeMode: carryRuntimeMode ?? DEFAULT_RUNTIME_MODE,
-          ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
+          ...resolveNewThreadModes({
+            carriedRuntimeMode: carryRuntimeMode,
+            carriedInteractionMode: carryInteractionMode,
+          }),
         });
         applyStickyState(draftId);
         if (carryModelSelection) {
-          // After sticky state so the viewed thread's exact selection
-          // (model + options like effort and context window) wins over the
-          // globally sticky one. replaceOptions: the carried selection is a
+          // After sticky state so the viewed thread's options — effort, context
+          // window — win over the globally sticky ones. The model is the tier
+          // default either way. replaceOptions: the carried selection is a
           // complete snapshot — absent options mean "no options", not "keep
           // whatever sticky state just wrote".
           setModelSelection(draftId, carryModelSelection, { replaceOptions: true });

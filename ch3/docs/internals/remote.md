@@ -15,7 +15,7 @@ the connection layer, never by splitting the runtime.
 
 ```text
 ┌──────────────────────────────────────────────┐
-│ Client (desktop / mobile / web)              │
+│ Client (desktop / web)                       │
 │  known environments, connection supervisor   │
 └───────────────┬──────────────────────────────┘
                 │ resolves one access endpoint
@@ -38,8 +38,8 @@ One running CH3 server instance. It owns provider availability and auth, model a
 and threads, terminal processes, filesystem access, git operations, and server settings.
 
 It is identified by a stable `environmentId`, persisted by the server at `<stateDir>/environment-id`
-and generated on first start (`apps/server/src/environment/ServerEnvironment.ts`). Desktop, mobile,
-and web all reason about the same concept.
+and generated on first start (`apps/server/src/environment/ServerEnvironment.ts`). Desktop and web
+reason about the same concept.
 
 ### Known environments and connection targets
 
@@ -137,13 +137,13 @@ how the server got started or who manages the process.
 ### Direct WebSocket access
 
 `wss://ch3.example.com` or `ws://10.0.0.15:3773`, paired as a bearer target. This is the base model.
-It works for desktop, mobile, and web with no client-side process management. Browser security rules
+It works for desktop and web with no client-side process management. Browser security rules
 are part of it: a hosted HTTPS client cannot connect to plain `ws://` or `http://` LAN backends.
 
 ### Relay-tunneled access
 
 Managed CH3 Connect relay tunnels use `RelayConnectionTarget` and are the answer when the host is
-behind NAT, inbound ports are unavailable, or mobile must reach a desktop-hosted environment. From
+behind NAT, inbound ports are unavailable, or a client must reach a desktop-hosted environment. From
 the client's perspective this is still an ordinary WebSocket connection; the route is mediated. The
 relay Worker only brokers credentials and a managed endpoint; application traffic then flows over
 the provisioned Cloudflare tunnel hostname for the life of the connection, not through the relay
@@ -187,7 +187,7 @@ it separate from access.
   came from SSH launch for reconnect and lifecycle UX only; that metadata never changes the protocol
   or the identity model.
 - **Client-managed local publish.** A local server is published through the relay with
-  `ch3 connect link`, exposing a desktop-hosted environment to mobile without router or firewall
+  `ch3 connect link`, exposing a desktop-hosted environment to other clients without router or firewall
   changes.
 
 The same `ExecutionEnvironment` can be reached several of these ways. Only the launch and access
@@ -215,10 +215,10 @@ backend is reachable from an HTTPS browser context.
 ## Version coordination
 
 Remote environments stay online while clients move to newer releases. The environment descriptor
-carries the running server version and may advertise a safe replacement path, so the UI can show the
-right action without making the transport responsible for process management. The connection
-supervisor owns the resulting disconnect and reconnect like any other involuntary close. See
-[server-updates.md](./server-updates.md).
+carries the running server version, so the UI can warn about drift and name the machine to update
+without making the transport responsible for process management. Servers do not replace
+themselves: updating CH3 on the machine that runs the server is the only path, and the
+connection supervisor owns the resulting disconnect and reconnect like any other involuntary close.
 
 ## Future work
 

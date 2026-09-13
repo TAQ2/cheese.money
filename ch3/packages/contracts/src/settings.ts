@@ -4,7 +4,13 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { DEFAULT_TEXT_GENERATION_MODEL, ProviderOptionSelections } from "./model.ts";
-import { ModelSelection } from "./orchestration.ts";
+import {
+  DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_RUNTIME_MODE,
+  ModelSelection,
+  ProviderInteractionMode,
+  RuntimeMode,
+} from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
@@ -72,10 +78,26 @@ export const EnvironmentIdentificationMode = Schema.Literals(["artwork", "pill",
 export type EnvironmentIdentificationMode = typeof EnvironmentIdentificationMode.Type;
 export const DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE: EnvironmentIdentificationMode = "artwork";
 
+/**
+ * The response style a fresh conversation starts on, before anyone in this
+ * install has changed the preference.
+ *
+ * Must equal the `name:` in `assets/output-styles/caveman.md` — mirrored as
+ * `PREFERRED_OUTPUT_STYLE` in `apps/web/src/components/BranchToolbar.logic.ts`,
+ * which is what actually matches it against the styles a driver advertises.
+ * `"default"` (the CLI's own no-style sentinel, see `DEFAULT_OUTPUT_STYLE` in
+ * that same file) is a valid value here too — it is how "None for all new
+ * conversations" is stored.
+ */
+export const DEFAULT_OUTPUT_STYLE_PREFERENCE = "Caveman";
+
 export const ClientSettingsSchema = Schema.Struct({
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  defaultOutputStyle: TrimmedNonEmptyString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_OUTPUT_STYLE_PREFERENCE)),
+  ),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -320,17 +342,42 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "~/.claude", clearWhenEmpty: "omit" },
       }),
     ),
+    /**
+     * Fail over to another signed-in account when this one runs out of plan
+     * limit. ON by default, like the two below: the accounts exist to be used
+     * as a pool, and an install that has to be configured before it behaves
+     * that way spends the first person's quota answering a question they did
+     * not know they had been asked.
+     */
     accountFailoverEnabled: Schema.Boolean.pipe(
-      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
     /**
      * Proactive account rotation (start on the best-positioned account,
-     * re-evaluate after 60% of the session). ON by default — declared here
-     * so a decode of the config blob preserves an explicit opt-out instead
-     * of silently re-enabling.
+     * re-evaluate after 60% of the session). OFF by default: the probe that
+     * scores accounts reads the Claude credential from the login keychain on
+     * a timer whose first tick fires at startup, which prompts for consent
+     * on any machine that has not already granted it. Opt in per instance.
      */
     accountRotationEnabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    /**
+     * Keep-warm riddles: every 25 minutes, ask one signed-in account that is
+     * NOT the selected one for a short riddle on Haiku 4.5, rotating through
+     * them. An unselected account transacts nothing, so its session window
+     * never turns over and its credential goes unexercised until failover
+     * tries to hand real work to it.
+     *
+     * ON by default, unlike the two settings above. Their opt-in exists
+     * because their usage probe reads the login keychain on a timer that
+     * first fires at startup; this loop never probes usage and its first tick
+     * is delayed a full interval, so it cannot produce a keychain dialog at
+     * launch.
+     */
+    accountRiddleKeepWarmEnabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
@@ -360,9 +407,67 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    /**
+     * The three tools below ship OFF, which is the opposite of the CLI's own
+     * default, and the reason is that each one is paid for in every session
+     * whether or not it is used: a tool costs its definition in the context
+     * window before anybody calls it.
+     *
+     * Where the cost lands is not where people expect. An agent turn runs
+     * through the Agent SDK, and the CLI does not load the Artifact tool or
+     * the Chrome integration for that entrypoint at all — measured, unchanged
+     * to the token. They load in INTERACTIVE sessions: a CH3 terminal, and
+     * every orchestrator agent, which runs `claude` as a TUI in a tmux pane
+     * and does so dozens of times in one run.
+     *
+     * Off is therefore the honest default for a tool nobody at CH3 has
+     * asked for, and each one is a switch rather than a decision made for
+     * everybody: turn it on here and the next session carries it.
+     */
+    artifactToolEnabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Artifact tool",
+        description:
+          "Let Claude publish HTML documents to the web. Off keeps its definitions out of every terminal session's context.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
+    chromeIntegrationEnabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Claude in Chrome",
+        description:
+          "Let Claude drive your browser through the Chrome extension. Off keeps its tools out of every terminal session's context.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
+    /**
+     * The connectors are the ones your claude.ai account carries — Gmail,
+     * Drive, Calendar. Unauthorized they are two stub tools each and cost
+     * almost nothing; authorize one and it brings its whole surface into every
+     * session on this machine, wanted or not. Off by default for that second
+     * case, which is the one nobody sees coming.
+     */
+    claudeAiConnectorsEnabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "claude.ai connectors",
+        description:
+          "Load the Gmail, Drive and Calendar servers from your claude.ai account into Claude sessions.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
   },
   {
-    order: ["binaryPath", "homePath", "launchArgs"],
+    order: [
+      "binaryPath",
+      "homePath",
+      "launchArgs",
+      "artifactToolEnabled",
+      "chromeIntegrationEnabled",
+      "claudeAiConnectorsEnabled",
+    ],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -435,7 +540,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     binaryPath: makeBinaryPathSetting("opencode").pipe(
       Schema.annotateKey({
         title: "Binary path",
-        description: "Path to the OpenCode binary.",
+        description: "Path to the `opencode` binary.",
         providerSettingsForm: {
           placeholder: "opencode",
           clearWhenEmpty: "omit",
@@ -476,7 +581,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
         description:
           "Shell command whose first two lines are shown under the composer. Runs in the thread's directory. Leave blank to show nothing.",
         providerSettingsForm: {
-          placeholder: "~/.config/opencode/scripts/maple-usage.sh --oneline",
+          placeholder: "~/.config/opencode/scripts/usage.sh --oneline",
           clearWhenEmpty: "omit",
         },
       }),
@@ -559,7 +664,32 @@ export const BackgroundActivitySettings = Schema.Struct({
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
 export const ServerSettings = Schema.Struct({
-  enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Token-by-token output while a response is in progress.
+   *
+   * On by default, and never off by default. Watching the answer arrive is
+   * what makes a long turn legible; shipping it dark meant most people never
+   * found the switch and judged the app by the spinner.
+   */
+  enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Whether the one-time turn-on of {@link enableAssistantStreaming} has run
+   * on this install.
+   *
+   * Changing the default alone only reaches people whose settings file never
+   * mentioned the key — the encoder omits anything still at its default, so an
+   * explicit `false` from the era when off WAS the default would survive the
+   * update and keep the feature dark for exactly the people who saw it fail
+   * once. This marker turns it on for them a single time.
+   *
+   * Deliberately absent from `ServerSettingsPatch`: no client sets it. It is
+   * written by the loader and persisted by the next ordinary settings write,
+   * so a person who turns streaming back off keeps it off — the marker is
+   * already true by then and the flip never runs again.
+   */
+  assistantStreamingDefaultedOn: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
   // Legacy flat fields retained for old settings files and old clients. New
@@ -579,6 +709,14 @@ export const ServerSettings = Schema.Struct({
   ),
   defaultThreadEnvMode: ThreadEnvMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("local" as const satisfies ThreadEnvMode)),
+  ),
+  // What a new thread starts on. The per-thread controls in the composer still
+  // win for that thread; these only decide where a fresh one begins.
+  defaultRuntimeMode: RuntimeMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
+  ),
+  defaultInteractionMode: ProviderInteractionMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   newWorktreesStartFromOrigin: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
@@ -731,6 +869,8 @@ export const ServerSettingsPatch = Schema.Struct({
   providerHealthRefreshInterval: Schema.optionalKey(Schema.DurationFromMillis),
   backgroundActivityProfile: Schema.optionalKey(BackgroundActivityProfile),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
+  defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
+  defaultInteractionMode: Schema.optionalKey(ProviderInteractionMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
@@ -769,6 +909,7 @@ export const ClientSettingsPatch = Schema.Struct({
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
+  defaultOutputStyle: Schema.optionalKey(TrimmedNonEmptyString),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   usageBandHidden: Schema.optionalKey(Schema.Boolean),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
