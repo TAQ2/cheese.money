@@ -305,11 +305,8 @@ function NightlySkyArt({ compact = false }: { compact?: boolean }) {
 /**
  * Drafting paper: grid, rulers and dimension annotations.
  *
- * Purple rather than blueprint blue — the motif is what the name refers to,
- * and the ink is CH3's. Every hue here sits in a 248-279deg band centred on
- * `--ch3-brand` (262deg), and each colour kept the saturation and lightness
- * of the blue it replaced, so nothing about contrast against the white
- * wordmark and the traffic lights changed. The paper gradient reads its three
+ * Blueprint blue, which is the motif the name refers to and CH3's own ink.
+ * The paper gradient reads its three
  * stops from `--stage-bp-*` in `index.css`, which is where the light and dark
  * ramps live; the glows and the ink are here, next to the stops they belong
  * to.
