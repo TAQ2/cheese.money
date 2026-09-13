@@ -73,6 +73,7 @@ import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import * as ClaudeCliInstaller from "./provider/ClaudeCliInstaller.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import { installMissingRequiredProviders } from "./provider/requiredProviderInstall.ts";
+import { syncMapleProviderIntoOpenCode } from "./provider/maple/MapleOpenCodeSync.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as CH3ProjectFileLoader from "./project/CH3ProjectFileLoader.ts";
@@ -362,6 +363,19 @@ const RequiredProviderInstallLive = Layer.effectDiscard(
   ),
 );
 
+/**
+ * Bring OpenCode's own config up to date with the Maple catalogue.
+ *
+ * OpenCode offers only what its `opencode.json` names, so a model Maple ships
+ * stays invisible in the picker until that file is edited. Forked and
+ * discarded like the install above: a refusal is logged and the server carries
+ * on, because a stale block costs a couple of models in a list and a failed
+ * boot costs everything.
+ */
+const MapleOpenCodeSyncLive = Layer.effectDiscard(
+  Effect.forkScoped(syncMapleProviderIntoOpenCode(process.env)),
+);
+
 const PreviewLayerLive = Layer.empty.pipe(
   Layer.provideMerge(PreviewManager.layer),
   Layer.provideMerge(PortScannerLayerLive),
@@ -491,6 +505,7 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
 
 const RuntimeServicesLive = Layer.mergeAll(
   RequiredProviderInstallLive,
+  MapleOpenCodeSyncLive,
   // Runs for the life of the server so the sample before a death outlives it.
   MemoryHeartbeat.layer,
 ).pipe(Layer.provideMerge(ServerRuntimeStartup.layer), Layer.provideMerge(RuntimeDependenciesLive));
