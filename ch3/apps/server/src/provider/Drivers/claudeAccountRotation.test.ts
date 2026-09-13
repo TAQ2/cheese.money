@@ -122,6 +122,26 @@ describe("chooseClaudeRotationTarget", () => {
     ).toBeNull();
   });
 
+  it("answers the advisory question even for an unengaged incumbent, moving nobody", () => {
+    // The settings panel asks this to highlight a row. It has to answer while
+    // the incumbent still has headroom — the moment it stays silent there, the
+    // panel calls a barely-used account ideal on no evidence.
+    const decision = chooseClaudeRotationTarget({
+      nowMs: NOW,
+      phase: "advisory",
+      profiles: [
+        account(
+          "idle",
+          { sessionPercent: 5, weekPercent: 30, weekResetsAt: daysFromNow(7) },
+          { isCurrent: true },
+        ),
+        account("richer", { sessionPercent: 0, weekPercent: 16, weekResetsAt: daysFromNow(7) }),
+      ],
+    });
+    expect(decision?.to.organizationName).toBe("richer");
+    expect(decision?.reason).toContain("best positioned");
+  });
+
   it("seats the best account at startup once the incumbent is engaged", () => {
     // Past the engagement threshold the choice has been spent rather than
     // overridden, and a boot is the cheapest moment to move.

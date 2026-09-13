@@ -143,7 +143,7 @@ export const ROTATION_ENGAGE_SESSION_PERCENT = 60;
  */
 export const STARTUP_MIN_GAIN_PER_DAY = 2;
 
-export type RotationPhase = "startup" | "steady";
+export type RotationPhase = "startup" | "steady" | "advisory";
 
 /**
  * Whether the steady loop should evaluate at all — exported so the reactor
@@ -192,18 +192,25 @@ function scoreEligible(profile: ClaudeAccountProfile, nowMs: number): ScoredProf
  * failing its own gates does NOT force a switch here — that is exhaustion,
  * and the failover path owns it with its own rules.
  *
- * BOTH phases respect the engagement gate: an incumbent under 60% of its
- * session is left alone, whoever else is better positioned. Startup used to
- * skip it, on the reasoning that "the incumbent was not chosen, merely
- * inherited". That is false across a restart — the account seated at boot is
- * usually the one somebody deliberately selected before quitting, and
- * silently re-seating it is indistinguishable from the app losing the choice.
+ * Both phases that MOVE an account respect the engagement gate: an incumbent
+ * under 60% of its session is left alone, whoever else is better positioned.
+ * Startup used to skip it, on the reasoning that "the incumbent was not
+ * chosen, merely inherited". That is false across a restart — the account
+ * seated at boot is usually the one somebody deliberately selected before
+ * quitting, and silently re-seating it is indistinguishable from the app
+ * losing the choice.
  *
- * What remains different is only the margin. "steady" demands the full
- * hysteresis margins; "startup" accepts any improvement past
- * STARTUP_MIN_GAIN_PER_DAY, because once the incumbent IS engaged a boot is
- * the cheapest moment to move and there is no flap to protect against within
- * a single launch.
+ * Those two differ only in margin. "steady" demands the full hysteresis
+ * margins; "startup" accepts any improvement past STARTUP_MIN_GAIN_PER_DAY,
+ * because once the incumbent IS engaged a boot is the cheapest moment to move
+ * and there is no flap to protect against within a single launch.
+ *
+ * "advisory" answers a different question and moves nobody: which account is
+ * best positioned right now, gate or no gate. The settings panel asks it to
+ * highlight a row, and it must answer while the incumbent is still untouched —
+ * a panel that says "already ideal" because the session window merely just
+ * opened is telling the user something the numbers do not support. Keep it out
+ * of every path that switches accounts.
  */
 export function chooseClaudeRotationTarget(input: {
   readonly profiles: ReadonlyArray<ClaudeAccountProfile>;
@@ -214,7 +221,7 @@ export function chooseClaudeRotationTarget(input: {
   const current = input.profiles.find((profile) => profile.isCurrent);
   if (!current?.usage) return null;
 
-  if (!rotationEngaged(current.usage)) {
+  if (phase !== "advisory" && !rotationEngaged(current.usage)) {
     return null;
   }
 
@@ -264,8 +271,11 @@ export function chooseClaudeRotationTarget(input: {
       phase === "startup"
         ? `starting on ${best.profile.organizationName ?? best.profile.displayPath} — best ` +
           `positioned to spend (${Math.round(best.rate)}%/day vs ${Math.round(currentRate)}%/day)`
-        : `${best.profile.organizationName ?? best.profile.displayPath} has more weekly allowance ` +
-          `expiring before its reset (${Math.round(best.rate)}%/day vs ${Math.round(currentRate)}%/day)` +
-          ` — resting ${current.organizationName ?? current.displayPath}`,
+        : phase === "advisory"
+          ? `${best.profile.organizationName ?? best.profile.displayPath} is best positioned to ` +
+            `spend (${Math.round(best.rate)}%/day vs ${Math.round(currentRate)}%/day)`
+          : `${best.profile.organizationName ?? best.profile.displayPath} has more weekly allowance ` +
+            `expiring before its reset (${Math.round(best.rate)}%/day vs ${Math.round(currentRate)}%/day)` +
+            ` — resting ${current.organizationName ?? current.displayPath}`,
   };
 }

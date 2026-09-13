@@ -349,10 +349,11 @@ export interface ClaudeAccountRecommendation {
  *   here" while the reactor was two minutes from resting it. Whichever the
  *   highlight had shown, one of the two was lying.
  *
- *   `startup` as the fallback — steady returns null while the incumbent is
+ *   `advisory` as the fallback — steady returns null while the incumbent is
  *   inside its stickiness window, and reporting THAT as "already ideal" would
  *   credit the account for nothing more than a session that just opened.
- *   Startup is the seating question with stickiness removed.
+ *   Advisory is the same comparison with both stickiness and the engagement
+ *   gate removed, and it moves nobody: this panel reports, the reactor acts.
  *
  * Null means the recommendation is not knowable: with no usage read for the
  * account in use there is nothing to compare against, and saying "this one" on
@@ -374,7 +375,7 @@ export function recommendClaudeAccount(input: {
     chooseClaudeRotationTarget({
       profiles: input.profiles,
       nowMs: input.nowMs,
-      phase: "startup",
+      phase: "advisory",
     });
   if (decision) {
     return { homePath: decision.to.homePath, detail: decision.reason, isCurrent: false };
