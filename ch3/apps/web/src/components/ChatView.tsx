@@ -58,7 +58,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouter } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import {
   isAtomCommandInterrupted,
@@ -78,6 +78,7 @@ import { useDiffPanelStore } from "../diffPanelStore";
 import {
   collapseExpandedComposerCursor,
   describeInteractiveBuiltin,
+  resolveBlockedContextReset,
   resolveInterceptedComposerBuiltin,
   parseComposerResumeSessionId,
   parseStandaloneComposerSlashCommand,
@@ -96,7 +97,8 @@ import {
   isLatestTurnSettled,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
-import { getAnchoredTurnMetrics, type TimelineScrollMode } from "./chat/timelineScrollAnchoring";
+import { type TimelineScrollMode } from "./chat/timelineScrollAnchoring";
+import { McpMark } from "./mcp/McpMark";
 import {
   buildPendingUserInputAnswers,
   derivePendingUserInputProgress,
@@ -111,10 +113,9 @@ import {
   resolvePlanFollowUpSubmission,
 } from "../proposedPlan";
 import {
-  DEFAULT_INTERACTION_MODE,
-  DEFAULT_RUNTIME_MODE,
   DEFAULT_THREAD_TERMINAL_ID,
   MAX_TERMINALS_PER_GROUP,
+  type ChatImageAttachment,
   type ChatMessage,
   type SessionPhase,
   type Thread,
@@ -158,11 +159,14 @@ import {
   CheckCircle2Icon,
   ChevronDownIcon,
   GitBranchIcon,
+  ImageIcon,
   TriangleAlertIcon,
   WifiOffIcon,
+  XIcon,
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
+import { McpSignInLink } from "./mcp/McpSignInLink";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
 import { type NewProjectScriptInput } from "./ProjectScriptsControl";
@@ -178,19 +182,29 @@ import { NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import { useClientSettings, useEnvironmentSettings } from "../hooks/useSettings";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
-import { resolveAppModelSelectionForInstance } from "../modelSelection";
+import { resolveNewThreadModes } from "../hooks/useHandleNewThread.logic";
+import {
+  resolveAppModelSelectionForInstance,
+  withNewThreadDefaultModel,
+  withoutInheritedOutputStyle,
+} from "../modelSelection";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
 import {
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
 } from "../logicalProject";
+import {
+  acceptComposerImageFiles,
+  composerImageFileFromAttachment,
+  compressComposerImageFiles,
+} from "../composerImageAttachments";
 import { buildDraftThreadRouteParams } from "../threadRoutes";
 import {
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
   useComposerDraftStore,
   useEffectiveComposerModelState,
-  type DraftId,
+  DraftId,
 } from "../composerDraftStore";
 import {
   formatTerminalContextLabel,
@@ -212,7 +226,7 @@ import {
   serverEnvironment,
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
-import { threadEnvironment } from "../state/threads";
+import { environmentThreads, threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
@@ -229,6 +243,18 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { FindInThreadBar } from "./chat/FindInThreadBar";
+import { findMatchesInThread } from "./chat/findInThread";
+import {
+  deriveUnsettledTurnId,
+  isTimelineSettledAtEnd,
+  resolveTimelineDistanceFromEnd,
+  shouldSnapTimelineToEndAfterTurnSettle,
+  TIMELINE_PROGRAMMATIC_SCROLL_WINDOW_MS,
+  TIMELINE_SCROLL_SETTLE_MAX_WAIT_MS,
+  TIMELINE_SCROLL_SETTLE_STABLE_FRAMES,
+  type AgentModelContext,
+} from "./chat/MessagesTimeline.logic";
 import {
   composerTextForQuotedSelection,
   quotableSelectionText,
@@ -244,6 +270,7 @@ import {
   resolveEffectiveEnvMode,
   resolveLocalCheckoutBranchMismatch,
   resolveOutputStyleChipState,
+  resolveOutputStyleToSeed,
 } from "./BranchToolbar.logic";
 import {
   getProviderStatusBannerKey,
@@ -293,6 +320,8 @@ import {
   revokeUserMessagePreviewUrls,
   shouldWriteThreadErrorToCurrentServerThread,
   startNewThreadForProject,
+  buildTurnStartFailureReportPrompt,
+  threadHasStarted,
   waitForStartedServerThread,
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
@@ -313,7 +342,6 @@ import {
   AlertDialogTitle,
 } from "./ui/alert-dialog";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { ServerUpdateAction, ServerUpdateProgress } from "./ServerUpdateAction";
 import {
   buildVersionMismatchDismissalKey,
   dismissVersionMismatch,
@@ -322,13 +350,39 @@ import {
   resolveServerSelfUpdateCapability,
   serverUpdateGuidance,
 } from "../versionSkew";
-import { useAssetUrls } from "../assets/assetUrls";
+import { ServerUpdateAction } from "./ServerUpdateAction";
+import { useAssetUrl, useAssetUrls } from "../assets/assetUrls";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_THREAD_ACTIVITIES: ReadonlyArray<never> = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+
+/**
+ * How long the MCP dialog's "Start session" waits for the session to go live.
+ *
+ * A session boot is a provider process starting and reporting in; on a cold
+ * machine that is seconds, not instants, so the wait has to be generous. It
+ * also has to end: a start that failed on the server arrives as nothing at
+ * all, and a button that says "Starting…" until the dialog is closed is the
+ * lying spinner this app does not ship.
+ */
+const MCP_SESSION_START_TIMEOUT_MS = 30_000;
+
+const MCP_NO_SESSION_MESSAGE =
+  "No active session right now (idle sessions are stopped to save resources).";
+
+/**
+ * A draft thread has no session because it has never had one, so the sentence
+ * above — which explains that an idle session was stopped — is simply untrue
+ * there, and it sits under a dialog with nothing to start.
+ */
+const MCP_DRAFT_NO_SESSION_MESSAGE =
+  "This conversation has not started yet. Send the first message and its MCP servers will be listed here.";
+
+const MCP_SESSION_START_FAILED_MESSAGE =
+  "The session did not start. Check that this thread's provider is installed and its project folder still exists, then try again.";
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
   const composerAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -407,6 +461,7 @@ const PreviewPanel = lazy(() =>
 const DiffPanel = lazy(() => import("./DiffPanel"));
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
+const EMPTY_FIND_MATCHES: ReturnType<typeof findMatchesInThread> = [];
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
   "textarea",
@@ -1148,6 +1203,58 @@ function chatActionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "An error occurred.";
 }
 
+/**
+ * Puts one image a message was sent with back into the rewind dialog.
+ *
+ * Renders nothing. Editing a message resends it, so the edit has to start from
+ * the whole message, and the bytes for an image already sent are on the server:
+ * reaching them means an asset URL, and an asset URL is a query that settles a
+ * render or two later. Mounting one of these per attachment is what lets the
+ * wait happen per image, off the path that opens the dialog.
+ *
+ * What it fetches goes to `onRestore`, which is the same call a dropped file
+ * makes — so a restored image is capped, compressed and removable exactly like
+ * one the user just picked.
+ *
+ * Once per mount, guarded: the URL is refreshed on a timer, and re-adding an
+ * image the user has just removed would make the remove button a lie. Mount
+ * these keyed on the selected message so switching rows starts a fresh set.
+ */
+function RewindMessageAttachment(props: {
+  readonly environmentId: EnvironmentId;
+  readonly attachment: ChatImageAttachment;
+  readonly onRestore: (files: ReadonlyArray<File>) => void;
+}) {
+  const { attachment, onRestore } = props;
+  const url = useAssetUrl(props.environmentId, {
+    _tag: "attachment",
+    attachmentId: attachment.id,
+  });
+  const restoredRef = useRef(false);
+  // Mounted for as long as this attachment is the selected message's. Switching
+  // messages unmounts the whole set (they are keyed on the selection), and the
+  // fetch below outlives that: without this, message A's screenshot landed on
+  // message B's edit, and the slot it had already claimed was never given back.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // Set on the way in as well as cleared on the way out: StrictMode mounts,
+    // cleans up and mounts again in dev, and a flag only ever cleared stays
+    // false for the rest of the component's life.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (url === null || restoredRef.current) return;
+    restoredRef.current = true;
+    void composerImageFileFromAttachment(url, attachment).then((file) => {
+      if (mountedRef.current && file !== null) onRestore([file]);
+    });
+  }, [attachment, onRestore, url]);
+  return null;
+}
+
 function ChatViewContent(props: ChatViewProps) {
   const {
     environmentId,
@@ -1175,6 +1282,9 @@ function ChatViewContent(props: ChatViewProps) {
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
+  const loadOlderThreadActivities = useAtomCommand(environmentThreads.loadOlderActivities, {
+    reportFailure: false,
+  });
   const getThreadMcpStatus = useAtomCommand(threadEnvironment.getMcpStatus, {
     reportFailure: false,
   });
@@ -1204,10 +1314,14 @@ function ChatViewContent(props: ChatViewProps) {
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, {
     reportFailure: false,
   });
+  const startThreadSession = useAtomCommand(threadEnvironment.startSession, {
+    reportFailure: false,
+  });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
+  const retryThreadTurn = useAtomCommand(threadEnvironment.retryTurn, { reportFailure: false });
   const respondToThreadApproval = useAtomCommand(threadEnvironment.respondToApproval, {
     reportFailure: false,
   });
@@ -1246,6 +1360,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const activeServerThread = serverThread ?? loadingServerThread;
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
+  const setLastOpenedThread = useUiStateStore((store) => store.setLastOpenedThread);
   const activeThreadLastVisitedAt = useUiStateStore(
     (store) => store.threadLastVisitedAtById[routeThreadKey],
   );
@@ -1260,6 +1375,7 @@ function ChatViewContent(props: ChatViewProps) {
   const timestampFormat = settings.timestampFormat;
   const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
   const navigate = useNavigate();
+  const router = useRouter();
   const { resolvedTheme } = useTheme();
   // Granular store selectors — avoid subscribing to prompt changes.
   const composerRuntimeMode = useComposerDraftStore(
@@ -1273,6 +1389,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
+  const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const setComposerDraftTerminalContexts = useComposerDraftStore(
     (store) => store.setTerminalContexts,
   );
@@ -1476,9 +1593,19 @@ function ChatViewContent(props: ChatViewProps) {
             threadId,
             draftThread,
             fallbackDraftProject?.defaultModelSelection ?? NO_PROVIDER_MODEL_SELECTION,
+            {
+              runtimeMode: primaryServerSettings.defaultRuntimeMode,
+              interactionMode: primaryServerSettings.defaultInteractionMode,
+            },
           )
         : undefined,
-    [draftThread, fallbackDraftProject?.defaultModelSelection, threadId],
+    [
+      draftThread,
+      fallbackDraftProject?.defaultModelSelection,
+      primaryServerSettings.defaultInteractionMode,
+      primaryServerSettings.defaultRuntimeMode,
+      threadId,
+    ],
   );
   // Promotion is data-driven: the draft route keeps rendering while the
   // server thread (same pre-allocated ref) starts, so live state must not
@@ -1488,9 +1615,20 @@ function ChatViewContent(props: ChatViewProps) {
   const threadError = isServerThread
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
-  const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
+  // Only the session's own error carries a classification; a local override
+  // (e.g. "select a base branch...") is never auth-shaped.
+  const threadErrorClass =
+    isServerThread && !localServerError
+      ? (activeServerThread?.session?.lastErrorClass ?? null)
+      : null;
+  // Nothing recorded on the thread yet means it is about to start as a new
+  // one, so the configured new-thread defaults are what the composer shows.
+  const runtimeMode =
+    composerRuntimeMode ?? activeThread?.runtimeMode ?? primaryServerSettings.defaultRuntimeMode;
   const interactionMode =
-    composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
+    composerInteractionMode ??
+    activeThread?.interactionMode ??
+    primaryServerSettings.defaultInteractionMode;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
@@ -1548,14 +1686,6 @@ function ChatViewContent(props: ChatViewProps) {
     [activeThread],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
-  const [timelineAnchor, setTimelineAnchor] = useState<{
-    readonly threadKey: string | null;
-    readonly messageId: MessageId | null;
-  }>({ threadKey: activeThreadKey, messageId: null });
-  if (timelineAnchor.threadKey !== activeThreadKey) {
-    setTimelineAnchor({ threadKey: activeThreadKey, messageId: null });
-  }
-  const timelineAnchorMessageId = timelineAnchor.messageId;
   const activeRightPanelKind = useRightPanelStore((state) =>
     selectActiveRightPanel(state.byThreadKey, activeThreadRef),
   );
@@ -1620,6 +1750,8 @@ function ChatViewContent(props: ChatViewProps) {
     return openTerminalThreadKeys.filter((nextThreadKey) => existingThreadKeys.has(nextThreadKey));
   }, [draftThreadKeys, openTerminalThreadKeys, serverThreadKeys]);
   const activeLatestTurn = activeThread?.latestTurn ?? null;
+  const activeRunningTurnId =
+    activeThread?.session?.status === "running" ? activeThread.session.activeTurnId : null;
   const sourcePlanThreadRef = useMemo(() => {
     const sourceThreadId = activeLatestTurn?.sourceProposedPlan?.threadId;
     if (!activeThread || !sourceThreadId || sourceThreadId === activeThread.id) {
@@ -1849,8 +1981,10 @@ function ChatViewContent(props: ChatViewProps) {
       setLogicalProjectDraftThreadId(logicalProjectKey, activeProjectRef, nextDraftId, {
         threadId: nextThreadId,
         createdAt: new Date().toISOString(),
-        runtimeMode: DEFAULT_RUNTIME_MODE,
-        interactionMode: DEFAULT_INTERACTION_MODE,
+        ...resolveNewThreadModes({
+          carriedRuntimeMode: null,
+          carriedInteractionMode: null,
+        }),
         ...input,
       });
       await navigate({
@@ -1866,6 +2000,7 @@ function ChatViewContent(props: ChatViewProps) {
       getDraftSessionByLogicalProjectKey,
       isServerThread,
       navigate,
+      primaryServerSettings,
       projectGroupingSettings,
       routeKind,
       setDraftThreadContext,
@@ -1883,6 +2018,17 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [openOrReuseProjectDraftThread],
   );
+
+  // Where a cold start comes back to. Recorded on the thread actually on
+  // screen rather than derived from the visit map, whose values are thread
+  // update times and would point at the newest thread rather than the last one
+  // opened.
+  useEffect(() => {
+    if (!serverThread?.id) return;
+    setLastOpenedThread(
+      scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
+    );
+  }, [serverThread?.environmentId, serverThread?.id, setLastOpenedThread]);
 
   useEffect(() => {
     if (!serverThread?.id) return;
@@ -1938,30 +2084,18 @@ function ChatViewContent(props: ChatViewProps) {
       : "server";
   const serverUpdateEnvironmentId = activeThread?.environmentId ?? null;
   const versionMismatchSelfUpdate = resolveServerSelfUpdateCapability(serverConfig);
-  const serverUpdateState = useAtomValue(
-    serverEnvironment.updateStateAtom(serverUpdateEnvironmentId),
-  );
   const systemComposerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
-    const updateRunning = serverUpdateState.status === "running";
     const unavailableConnection = activeEnvironmentUnavailableState?.connection ?? null;
     const environmentReconnecting =
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
-    // Reconnecting to a version-skewed server with no update in flight
-    // usually means the server is restarting mid-update and a refresh wiped
-    // the in-memory update state. Fold the reconnect and version banners
-    // into one calm line instead of stacking "Failed to connect" on
-    // "versions differ". A failed update never folds: its error and retry
-    // action must stay visible.
-    const reconnectingThroughVersionSkew =
-      serverUpdateState.status === "idle" && environmentReconnecting && versionMismatch !== null;
-    // While an update runs, transient connect blips are expected (the server
-    // restarts) and the update banner already shows progress. Hard failure
-    // phases still surface so the Reconnect action stays reachable.
-    const suppressUnavailableBanner = updateRunning && environmentReconnecting;
-    if (activeEnvironmentUnavailableState && unavailableConnection && !suppressUnavailableBanner) {
+    // Reconnecting to a version-skewed server usually means it is restarting
+    // on a new build. Fold the reconnect and version banners into one calm
+    // line instead of stacking "Failed to connect" on "versions differ".
+    const reconnectingThroughVersionSkew = environmentReconnecting && versionMismatch !== null;
+    if (activeEnvironmentUnavailableState && unavailableConnection) {
       if (reconnectingThroughVersionSkew) {
         items.push({
           id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
@@ -2012,62 +2146,41 @@ function ChatViewContent(props: ChatViewProps) {
     if (
       serverUpdateEnvironmentId &&
       !reconnectingThroughVersionSkew &&
-      (serverUpdateState.status !== "idle" ||
-        (showVersionMismatchBanner && versionMismatch && versionMismatchDismissKey))
+      showVersionMismatchBanner &&
+      versionMismatch &&
+      versionMismatchDismissKey
     ) {
-      const updateInProgress = serverUpdateState.status === "running";
-      const updateFailed = serverUpdateState.status === "failed";
       items.push({
         id: `server-version:${serverUpdateEnvironmentId}`,
-        variant: updateFailed ? "error" : updateInProgress ? "default" : "warning",
-        icon: updateInProgress ? (
-          <span
-            className="size-1.5 animate-status-pulse rounded-full bg-foreground"
-            aria-hidden="true"
-          />
-        ) : (
-          <TriangleAlertIcon />
+        variant: "warning",
+        icon: <TriangleAlertIcon />,
+        title: "Client and server versions differ",
+        description: (
+          <>
+            Client {versionMismatch.clientVersion} is connected to {versionMismatchServerLabel}{" "}
+            {versionMismatch.serverVersion}.{" "}
+            {serverUpdateGuidance(versionMismatchSelfUpdate, versionMismatchServerLabel)}
+          </>
         ),
-        title:
-          updateInProgress || updateFailed
-            ? `${updateFailed ? "Could not update" : "Updating"} ${versionMismatchServerLabel}`
-            : "Client and server versions differ",
-        description:
-          updateInProgress || updateFailed ? (
-            <ServerUpdateProgress
-              fromVersion={serverUpdateState.fromVersion}
-              state={serverUpdateState}
-            />
-          ) : versionMismatch ? (
-            <>
-              Client {versionMismatch.clientVersion} is connected to {versionMismatchServerLabel}{" "}
-              {versionMismatch.serverVersion}.{" "}
-              {serverUpdateGuidance(versionMismatchSelfUpdate, versionMismatchServerLabel)}
-            </>
-          ) : null,
         // The desktop-managed guidance is already the description; the action
         // slot would only repeat it.
-        actions:
-          updateInProgress ||
-          !versionMismatch ||
-          versionMismatchSelfUpdate === "desktop-managed" ? undefined : (
-            <ServerUpdateAction
-              environmentId={serverUpdateEnvironmentId}
-              serverLabel={versionMismatchServerLabel}
-              selfUpdate={versionMismatchSelfUpdate}
-              targetVersion={versionMismatch.clientVersion}
-              {...(updateFailed ? { label: "Retry update" } : {})}
-            />
-          ),
-        ...(updateInProgress || updateFailed || !versionMismatchDismissKey
+        ...(versionMismatchSelfUpdate === "desktop-managed"
           ? {}
           : {
-              dismissLabel: "Dismiss version mismatch warning",
-              onDismiss: () => {
-                dismissVersionMismatch(versionMismatchDismissKey);
-                setDismissedVersionMismatchKey(versionMismatchDismissKey);
-              },
+              actions: (
+                <ServerUpdateAction
+                  environmentId={serverUpdateEnvironmentId}
+                  serverLabel={versionMismatchServerLabel}
+                  selfUpdate={versionMismatchSelfUpdate}
+                  targetVersion={versionMismatch.clientVersion}
+                />
+              ),
             }),
+        dismissLabel: "Dismiss version mismatch warning",
+        onDismiss: () => {
+          dismissVersionMismatch(versionMismatchDismissKey);
+          setDismissedVersionMismatchKey(versionMismatchDismissKey);
+        },
       });
     }
     return items;
@@ -2077,7 +2190,6 @@ function ChatViewContent(props: ChatViewProps) {
     navigate,
     setDismissedVersionMismatchKey,
     showVersionMismatchBanner,
-    serverUpdateState,
     versionMismatch,
     versionMismatchDismissKey,
     serverUpdateEnvironmentId,
@@ -2433,6 +2545,67 @@ function ChatViewContent(props: ChatViewProps) {
   // left open, a keystroke — so a conversation copy is never a stale one.
   const timelineEntriesRef = useRef(timelineEntries);
   timelineEntriesRef.current = timelineEntries;
+
+  // Find in conversation. Null while the bar is closed, which is also what
+  // clears every highlight — there is one way out and it is the same one.
+  const [findState, setFindState] = useState<{
+    readonly query: string;
+    readonly activeIndex: number;
+    /** Bumped on every press of the shortcut, to refocus an open bar. */
+    readonly focusToken: number;
+    /**
+     * The conversation this search belongs to. Compared on read rather than
+     * cleared by the effect below alone: the effect runs AFTER the first
+     * render of the next thread, and that render would otherwise hand the old
+     * query to the new thread's timeline, which unfolds a turn in it.
+     */
+    readonly threadKey: string | null;
+  } | null>(null);
+  const findQuery =
+    findState === null || findState.threadKey !== routeThreadKey ? null : findState.query;
+  const findMatches = useMemo(
+    () =>
+      findQuery === null ? EMPTY_FIND_MATCHES : findMatchesInThread(timelineEntries, findQuery),
+    [findQuery, timelineEntries],
+  );
+  // A reply arriving mid-search can change the match list under the reader, so
+  // the position is clamped at read time rather than trusted from state.
+  const findActiveIndex =
+    findMatches.length === 0 ? 0 : Math.min(findState?.activeIndex ?? 0, findMatches.length - 1);
+  const activeFindMatch = findMatches[findActiveIndex];
+  // Another conversation is another search. The bar closes with it, which is
+  // also what drops its highlights.
+  useEffect(() => {
+    setFindState(null);
+  }, [routeThreadKey]);
+  const openFindInThread = useCallback(() => {
+    setFindState((existing) =>
+      existing === null
+        ? { query: "", activeIndex: 0, focusToken: 1, threadKey: routeThreadKey }
+        : { ...existing, focusToken: existing.focusToken + 1, threadKey: routeThreadKey },
+    );
+  }, [routeThreadKey]);
+  const timelineFind = useMemo(
+    () =>
+      findQuery === null
+        ? undefined
+        : {
+            query: findQuery,
+            activeEntryId: activeFindMatch?.entryId ?? null,
+            activeOccurrenceIndex: activeFindMatch?.occurrenceIndex ?? 0,
+          },
+    [activeFindMatch, findQuery],
+  );
+  const stepFindMatch = useCallback(
+    (direction: 1 | -1) => {
+      setFindState((existing) => {
+        if (existing === null || findMatches.length === 0) return existing;
+        const next = (findActiveIndex + direction + findMatches.length) % findMatches.length;
+        return { ...existing, activeIndex: next };
+      });
+    },
+    [findActiveIndex, findMatches.length],
+  );
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
@@ -2526,6 +2699,23 @@ function ChatViewContent(props: ChatViewProps) {
     return providerStatuses.find((status) => status.instanceId === defaultInstanceId) ?? null;
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
 
+  // What the subagent roster needs to name each delegation's model. A Task
+  // call that names no model inherits the session's, so the thread's own
+  // selection is what those agents are really running on — paired with the
+  // driver behind that selection, because model aliases are per-driver.
+  const threadModelSelection = activeThread?.modelSelection ?? null;
+  const agentModelContext = useMemo<AgentModelContext>(
+    () => ({
+      inheritedModel: threadModelSelection?.model ?? null,
+      driverKind:
+        (threadModelSelection
+          ? providerStatuses.find((status) => status.instanceId === threadModelSelection.instanceId)
+              ?.driver
+          : undefined) ?? selectedProvider,
+    }),
+    [threadModelSelection, providerStatuses, selectedProvider],
+  );
+
   // Response style for the composer's chip. It rides the same per-thread
   // provider options the traits menu writes, resolved for the instance that
   // will actually run the turn, so the chip and the turn never disagree.
@@ -2538,26 +2728,86 @@ function ChatViewContent(props: ChatViewProps) {
       selectedProvider,
       selectedInstanceId: outputStyleInstanceId,
       threadModelSelection: activeThread?.modelSelection,
+      // A started conversation resolves to the model it ran on, exactly as the
+      // composer does. Without this the reading here fell to the tier default
+      // for any started thread the draft store had no record of, and the
+      // style-seeding effect below wrote that default into the draft as if
+      // somebody had picked it — which is how a Fable conversation reopened on
+      // Sonnet.
+      threadHasStarted: threadHasStarted(activeThread),
       projectModelSelection: activeProject?.defaultModelSelection,
       settings,
     });
   const outputStyleOptions = outputStyleInstanceId
     ? outputStyleModelOptions?.[outputStyleInstanceId]
     : undefined;
+  // One reading of the style this conversation has pinned, for both the chip
+  // and the effect that seeds the default below. `getOutputStyleSelection`
+  // answers `undefined` for "nobody picked one"; normalising it once here is
+  // what stops the two from disagreeing about what "nothing picked" looks like.
+  const pickedOutputStyle = getOutputStyleSelection(outputStyleOptions) ?? null;
+  const preferredOutputStyle = settings.defaultOutputStyle;
   const outputStyleChip = useMemo(
     () =>
       resolveOutputStyleChipState({
         availableStyles: activeProviderStatus?.outputStyles,
         activeStyle: activeProviderStatus?.activeOutputStyle,
-        pickedStyle: getOutputStyleSelection(outputStyleOptions) ?? null,
+        pickedStyle: pickedOutputStyle,
+        preferredStyle: preferredOutputStyle,
       }),
     [
       activeProviderStatus?.activeOutputStyle,
       activeProviderStatus?.outputStyles,
-      outputStyleOptions,
+      pickedOutputStyle,
+      preferredOutputStyle,
     ],
   );
   const setProviderModelOptions = useComposerDraftStore((store) => store.setProviderModelOptions);
+
+  // Start every conversation on the response style Settings → General has
+  // configured (Caveman, unless the user set it to None).
+  //
+  // Written as a real selection rather than left implicit, because the chip's
+  // label and the turn's `outputStyle` setting read from the same place — a
+  // default that lived only in the label would show Caveman while the run used
+  // whatever the CLI had configured.
+  //
+  // Guarded on "no selection at all", so it fires once per conversation and
+  // never argues with somebody who chose otherwise. Picking None is itself a
+  // selection, so moving away sticks for that thread.
+  useEffect(() => {
+    if (!outputStyleInstanceId || !outputStyleModel) return;
+    const initial = resolveOutputStyleToSeed({
+      pickedStyle: pickedOutputStyle,
+      availableStyles: activeProviderStatus?.outputStyles,
+      preferredStyle: preferredOutputStyle,
+    });
+    if (!initial) return;
+    setProviderModelOptions(
+      composerDraftTarget,
+      selectedProvider,
+      withOutputStyleSelection(outputStyleOptions, initial),
+      {
+        instanceId: outputStyleInstanceId,
+        model: outputStyleModel,
+        // Not sticky: this is the default every conversation returns to, not a
+        // preference carried forward. Without this, moving away once would
+        // make that the starting style for every later thread.
+        persistSticky: false,
+      },
+    );
+  }, [
+    activeProviderStatus?.outputStyles,
+    composerDraftTarget,
+    outputStyleInstanceId,
+    outputStyleModel,
+    outputStyleOptions,
+    pickedOutputStyle,
+    preferredOutputStyle,
+    selectedProvider,
+    setProviderModelOptions,
+  ]);
+
   const onOutputStyleChange = useCallback(
     (outputStyle: string) => {
       if (!outputStyleInstanceId) return;
@@ -2568,7 +2818,10 @@ function ChatViewContent(props: ChatViewProps) {
         {
           instanceId: outputStyleInstanceId,
           model: outputStyleModel,
-          persistSticky: true,
+          // Per-conversation, like the default it replaces. Sticky would mean
+          // one switch away from Caveman silently became the starting style for
+          // every thread after it.
+          persistSticky: false,
         },
       );
     },
@@ -3786,57 +4039,40 @@ function ChatViewContent(props: ChatViewProps) {
     new Debouncer(() => setShowScrollToBottom(true), { wait: 150 }),
   );
   const timelineScrollModeRef = useRef<TimelineScrollMode>("following-end");
-  const pendingTimelineAnchorRef = useRef<MessageId | null>(null);
-  const positionedTimelineAnchorRef = useRef<MessageId | null>(null);
-  const settledTimelineAnchorRef = useRef<MessageId | null>(null);
-  const activeTimelineAnchorIndexRef = useRef<number | null>(null);
+  // LegendList keeps its own "am I at the end" heuristic and pins the list on
+  // every layout while it holds. Rendering it from the mode makes this one
+  // decision instead of two: the list stops pinning the moment the reader
+  // scrolls away, and resumes when they come back to the edge.
+  const [followTimelineEnd, setFollowTimelineEnd] = useState(true);
+  const setTimelineScrollMode = useCallback((mode: TimelineScrollMode) => {
+    timelineScrollModeRef.current = mode;
+    setFollowTimelineEnd(mode === "following-end");
+  }, []);
   const anchorUserScrollGenerationRef = useRef(0);
   const liveFollowUserScrollGenerationRef = useRef<number | null>(0);
-  const pendingAnchorScrollRestoreRef = useRef<{
-    readonly messageId: MessageId;
-    readonly offset: number;
-    readonly userScrollGeneration: number;
-  } | null>(null);
-  const anchorScrollRestoreFrameRef = useRef<number | null>(null);
+  // The reader's distance from the end as of the last scroll or timeline
+  // change, and which turn is still unsettled — together they answer "was the
+  // reader watching the turn that just folded" without measuring after the
+  // fold has already moved them.
+  const timelineDistanceFromEndRef = useRef<number | null>(null);
+  const unsettledTurnIdRef = useRef<TurnId | null>(null);
+  // Until when a scroll event is this view's own doing — a scroll-to-end after
+  // a send, a settle, the pill — rather than a jump for the timeline's
+  // reading-anchor guard to undo.
+  const programmaticTimelineScrollUntilRef = useRef(0);
+  const expectProgrammaticTimelineScroll = useCallback(() => {
+    programmaticTimelineScrollUntilRef.current =
+      Date.now() + TIMELINE_PROGRAMMATIC_SCROLL_WINDOW_MS;
+  }, []);
+  const isProgrammaticTimelineScrollExpected = useCallback(
+    () => Date.now() < programmaticTimelineScrollUntilRef.current,
+    [],
+  );
   const cancelTimelineLiveFollowForUserNavigation = useCallback(() => {
     anchorUserScrollGenerationRef.current += 1;
-    timelineScrollModeRef.current = "free-scrolling";
+    setTimelineScrollMode("free-scrolling");
     liveFollowUserScrollGenerationRef.current = null;
-    pendingTimelineAnchorRef.current = null;
-    positionedTimelineAnchorRef.current = null;
-    settledTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
-    pendingAnchorScrollRestoreRef.current = null;
-    if (anchorScrollRestoreFrameRef.current !== null) {
-      cancelAnimationFrame(anchorScrollRestoreFrameRef.current);
-      anchorScrollRestoreFrameRef.current = null;
-    }
   }, []);
-  const cancelTimelineLiveFollowForUserNavigationRef = useRef(
-    cancelTimelineLiveFollowForUserNavigation,
-  );
-  useEffect(() => {
-    cancelTimelineLiveFollowForUserNavigationRef.current =
-      cancelTimelineLiveFollowForUserNavigation;
-  }, [cancelTimelineLiveFollowForUserNavigation]);
-  const getActiveTimelineTurnMetrics = useCallback(
-    (list?: LegendListRef | null) => {
-      const resolvedList = list ?? legendListRef.current;
-      const anchorIndex = activeTimelineAnchorIndexRef.current;
-      const state = resolvedList?.getState();
-      if (!resolvedList || !state || anchorIndex === null) {
-        return null;
-      }
-
-      return getAnchoredTurnMetrics({
-        state,
-        anchorIndex,
-        composerOverlayHeight,
-        anchorOffset: CHAT_LIST_ANCHOR_OFFSET,
-      });
-    },
-    [composerOverlayHeight],
-  );
   const timelineRealContentOverflowsViewport = useCallback(
     (list?: LegendListRef | null) => {
       const resolvedList = list ?? legendListRef.current;
@@ -3869,141 +4105,58 @@ function ChatViewContent(props: ChatViewProps) {
 
   // Live-follow stays active after send/thread-open until an actual list scroll
   // gesture opts out.
-  const scrollToEnd = useCallback((animated = false) => {
+  //
+  // One jump is not enough: the list is virtualised and jumps to where it
+  // estimates the end to be, and every unmeasured row that renders taller
+  // than its estimate moves the real end further down after the jump has
+  // landed — which is how the pill "pushed you down" on a long thread and
+  // stopped short. So the jump is re-issued every frame until the measured
+  // distance to the end has held at zero for a few frames, or the budget
+  // runs out. A reader scrolling meanwhile bumps the generation and ends it.
+  const settleTimelineAtEndFrameRef = useRef<number | null>(null);
+  const cancelTimelineSettle = useCallback(() => {
+    if (settleTimelineAtEndFrameRef.current !== null) {
+      cancelAnimationFrame(settleTimelineAtEndFrameRef.current);
+      settleTimelineAtEndFrameRef.current = null;
+    }
+  }, []);
+  useEffect(() => cancelTimelineSettle, [cancelTimelineSettle]);
+  const scrollToEnd = useCallback(() => {
     isAtEndRef.current = true;
-    timelineScrollModeRef.current = "following-end";
+    setTimelineScrollMode("following-end");
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    pendingTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
-    void legendListRef.current?.scrollToEnd?.({ animated });
-  }, []);
-  useEffect(() => {
-    let removeListeners: (() => void) | null = null;
-    const frame = requestAnimationFrame(() => {
-      const scrollNode = legendListRef.current?.getScrollableNode();
-      if (!scrollNode) {
+    cancelTimelineSettle();
+    const generation = anchorUserScrollGenerationRef.current;
+    const startedAt = Date.now();
+    let stableFrames = 0;
+    const step = () => {
+      settleTimelineAtEndFrameRef.current = null;
+      const list = legendListRef.current;
+      if (!list || anchorUserScrollGenerationRef.current !== generation) {
         return;
       }
-      const handleManualNavigation = () => {
-        cancelTimelineLiveFollowForUserNavigationRef.current();
-      };
-      scrollNode.addEventListener("wheel", handleManualNavigation, {
-        passive: true,
-      });
-      scrollNode.addEventListener("touchmove", handleManualNavigation, {
-        passive: true,
-      });
-      scrollNode.addEventListener("pointerdown", handleManualNavigation, {
-        passive: true,
-      });
-      removeListeners = () => {
-        scrollNode.removeEventListener("wheel", handleManualNavigation);
-        scrollNode.removeEventListener("touchmove", handleManualNavigation);
-        scrollNode.removeEventListener("pointerdown", handleManualNavigation);
-      };
-    });
-
-    return () => {
-      cancelAnimationFrame(frame);
-      removeListeners?.();
-    };
-  }, [activeThread?.id]);
-
-  const onTimelineAnchorReady = useCallback((messageId: MessageId, anchorIndex: number) => {
-    if (pendingTimelineAnchorRef.current === messageId) {
-      pendingTimelineAnchorRef.current = null;
-    }
-    activeTimelineAnchorIndexRef.current = anchorIndex;
-    if (positionedTimelineAnchorRef.current === messageId) {
-      return;
-    }
-    positionedTimelineAnchorRef.current = messageId;
-    settledTimelineAnchorRef.current = null;
-    const positionAnchor = (remainingAttempts: number) => {
-      requestAnimationFrame(() => {
-        if (positionedTimelineAnchorRef.current !== messageId) {
+      if (isTimelineSettledAtEnd(list.getState())) {
+        stableFrames += 1;
+        if (stableFrames >= TIMELINE_SCROLL_SETTLE_STABLE_FRAMES) {
           return;
         }
-        const list = legendListRef.current;
-        if (!list) {
-          if (remainingAttempts > 0) {
-            positionAnchor(remainingAttempts - 1);
-          }
-          return;
-        }
-        const scrollNode = list.getScrollableNode();
-        let finished = false;
-        const finishAnimatedPositioning = () => {
-          if (finished) {
-            return;
-          }
-          finished = true;
-          window.clearTimeout(fallbackTimer);
-          scrollNode.removeEventListener("scrollend", finishAnimatedPositioning);
-          if (positionedTimelineAnchorRef.current !== messageId) {
-            return;
-          }
-          const scrollOffset = list.getState().scroll;
-          void list.scrollToOffset({ offset: scrollOffset, animated: false });
-          settledTimelineAnchorRef.current = messageId;
-        };
-        const fallbackTimer = window.setTimeout(finishAnimatedPositioning, 750);
-        scrollNode.addEventListener("scrollend", finishAnimatedPositioning, { once: true });
-        void list.scrollToIndex({
-          index: anchorIndex,
-          animated: true,
-          viewPosition: 0,
-          viewOffset: CHAT_LIST_ANCHOR_OFFSET,
-        });
-      });
-    };
-    requestAnimationFrame(() => positionAnchor(12));
-  }, []);
-  const onTimelineAnchorSizeChanged = useCallback((messageId: MessageId) => {
-    if (settledTimelineAnchorRef.current !== messageId) {
-      return;
-    }
-    if (liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current) {
-      return;
-    }
-    const scrollOffset = legendListRef.current?.getState().scroll;
-    if (scrollOffset === undefined) {
-      return;
-    }
-    if (pendingAnchorScrollRestoreRef.current === null) {
-      pendingAnchorScrollRestoreRef.current = {
-        messageId,
-        offset: scrollOffset,
-        userScrollGeneration: anchorUserScrollGenerationRef.current,
-      };
-    }
-    if (anchorScrollRestoreFrameRef.current !== null) {
-      return;
-    }
-    anchorScrollRestoreFrameRef.current = requestAnimationFrame(() => {
-      anchorScrollRestoreFrameRef.current = null;
-      const pending = pendingAnchorScrollRestoreRef.current;
-      pendingAnchorScrollRestoreRef.current = null;
-      if (
-        pending &&
-        settledTimelineAnchorRef.current === pending.messageId &&
-        pending.userScrollGeneration === anchorUserScrollGenerationRef.current
-      ) {
-        const list = legendListRef.current;
-        const currentScrollOffset = list?.getState().scroll;
-        if (
-          typeof currentScrollOffset === "number" &&
-          Math.abs(currentScrollOffset - pending.offset) <= 2
-        ) {
-          void list?.scrollToOffset({ offset: pending.offset, animated: false });
-        }
+      } else {
+        stableFrames = 0;
+        expectProgrammaticTimelineScroll();
+        void list.scrollToEnd?.({ animated: false });
       }
-    });
-  }, []);
-
+      if (Date.now() - startedAt < TIMELINE_SCROLL_SETTLE_MAX_WAIT_MS) {
+        settleTimelineAtEndFrameRef.current = requestAnimationFrame(step);
+      }
+    };
+    step();
+  }, [cancelTimelineSettle, expectProgrammaticTimelineScroll]);
   const onIsAtEndChange = useCallback((isAtEnd: boolean) => {
+    timelineDistanceFromEndRef.current = resolveTimelineDistanceFromEnd(
+      legendListRef.current?.getState(),
+    );
     if (
       !isAtEnd &&
       liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current
@@ -4015,23 +4168,69 @@ function ChatViewContent(props: ChatViewProps) {
     if (isAtEndRef.current === isAtEnd) return;
     isAtEndRef.current = isAtEnd;
     if (isAtEnd) {
-      timelineScrollModeRef.current = "following-end";
+      setTimelineScrollMode("following-end");
       liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
       showScrollDebouncer.current.cancel();
       setShowScrollToBottom(false);
     } else {
-      timelineScrollModeRef.current = "free-scrolling";
+      setTimelineScrollMode("free-scrolling");
       liveFollowUserScrollGenerationRef.current = null;
       showScrollDebouncer.current.maybeExecute();
     }
   }, []);
 
+  // Older activities exist beyond the loaded window: nearing the top pages
+  // the next window in. Prepended rows hold the reader in place through the
+  // list's maintainVisibleContentPosition, so follow-end state is untouched.
+  const pagingEnvironmentId = activeThread?.environmentId ?? null;
+  const pagingThreadId = activeThread?.id ?? null;
+  const onTimelineStartReached = useCallback(() => {
+    if (pagingEnvironmentId === null || pagingThreadId === null) {
+      return;
+    }
+    void loadOlderThreadActivities({
+      environmentId: pagingEnvironmentId,
+      input: { threadId: pagingThreadId },
+    });
+  }, [loadOlderThreadActivities, pagingEnvironmentId, pagingThreadId]);
+
   useEffect(() => {
     if (!activeThread?.id) {
       return;
     }
-    if (liveFollowUserScrollGenerationRef.current !== anchorUserScrollGenerationRef.current) {
-      return;
+
+    // The settle edge: the turn that was streaming has folded its work rows
+    // away. A reader who was near the end but not following — a click had
+    // paused follow, or they sat a few hundred pixels up watching the stream —
+    // was looking at rows that no longer exist, and with every visible row
+    // deleted the list has no anchor to compensate with, so the view lands
+    // screenfuls back. Their reading position before the fold decides it: the
+    // distance sampled on the previous pass, not the one measured after the
+    // collapse already moved them.
+    const unsettledTurnId = deriveUnsettledTurnId(activeLatestTurn, activeRunningTurnId);
+    const previousUnsettledTurnId = unsettledTurnIdRef.current;
+    unsettledTurnIdRef.current = unsettledTurnId;
+    const turnJustSettled = previousUnsettledTurnId !== null && unsettledTurnId === null;
+    const distanceBeforeThisChange = timelineDistanceFromEndRef.current;
+    timelineDistanceFromEndRef.current = resolveTimelineDistanceFromEnd(
+      legendListRef.current?.getState(),
+    );
+
+    const following =
+      liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current;
+    if (!following) {
+      if (
+        !turnJustSettled ||
+        !shouldSnapTimelineToEndAfterTurnSettle({
+          distanceFromEnd: distanceBeforeThisChange,
+          scrollLength: legendListRef.current?.getState().scrollLength,
+        })
+      ) {
+        return;
+      }
+      // Re-engages live-follow; the frames below re-pin once the folded
+      // layout has actually landed.
+      scrollToEnd();
     }
 
     let secondFrame: number | null = null;
@@ -4040,31 +4239,8 @@ function ChatViewContent(props: ChatViewProps) {
         if (liveFollowUserScrollGenerationRef.current !== anchorUserScrollGenerationRef.current) {
           return;
         }
-        if (pendingTimelineAnchorRef.current !== null) {
-          return;
-        }
-        if (
-          positionedTimelineAnchorRef.current !== null &&
-          settledTimelineAnchorRef.current !== positionedTimelineAnchorRef.current
-        ) {
-          return;
-        }
         const list = legendListRef.current;
         if (!list) {
-          return;
-        }
-
-        if (timelineScrollModeRef.current === "anchoring-new-turn") {
-          const metrics = getActiveTimelineTurnMetrics(list);
-          if (!metrics) {
-            return;
-          }
-          if (metrics.scrollDeltaToRevealEnd <= 1) {
-            return;
-          }
-
-          const nextOffset = list.getState().scroll + metrics.scrollDeltaToRevealEnd;
-          void list.scrollToOffset({ offset: nextOffset, animated: false });
           return;
         }
 
@@ -4075,6 +4251,7 @@ function ChatViewContent(props: ChatViewProps) {
           return;
         }
 
+        expectProgrammaticTimelineScroll();
         void list.scrollToEnd?.({ animated: false });
       });
     });
@@ -4087,20 +4264,19 @@ function ChatViewContent(props: ChatViewProps) {
     };
   }, [
     activeThread?.id,
+    activeLatestTurn,
+    activeRunningTurnId,
     timelineEntries,
-    getActiveTimelineTurnMetrics,
     timelineRealContentOverflowsViewport,
+    scrollToEnd,
+    expectProgrammaticTimelineScroll,
   ]);
 
   useEffect(() => {
     setPullRequestDialogState(null);
     isAtEndRef.current = true;
-    timelineScrollModeRef.current = "following-end";
+    setTimelineScrollMode("following-end");
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    pendingTimelineAnchorRef.current = null;
-    positionedTimelineAnchorRef.current = null;
-    settledTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
     if (planSidebarOpenOnNextThreadRef.current) {
@@ -4351,8 +4527,20 @@ function ChatViewContent(props: ChatViewProps) {
         readonly busy: string | null;
         /** Outcome line from the latest action (success or failure). */
         readonly notice: string | null;
+        /**
+         * The sign-in URL the CLI printed, when the latest action started one.
+         * Shown with a copy control so a long consent URL (Google Calendar's
+         * carries twelve scopes, ~1.2 KB) always reaches the browser even when
+         * the OS "open link" call truncates it. Null when no sign-in is pending.
+         */
+        readonly signInUrl: string | null;
       }
-    | { readonly kind: "error"; readonly message: string }
+    | {
+        readonly kind: "error";
+        readonly message: string;
+        readonly reason: "no-session" | "unsupported" | "failed";
+        readonly target: { environmentId: EnvironmentId; threadId: ThreadId };
+      }
     | null
   >(null);
   const openMcpStatusDialog = useCallback(
@@ -4368,17 +4556,25 @@ function ChatViewContent(props: ChatViewProps) {
           detail: string;
         }> | null;
         // The most common failure is benign: CH3 stops idle provider
-        // sessions, and the status control needs a live one. Say that,
-        // with the way out — instead of a dead-end generic error.
-        const message =
+        // sessions, and the status control needs a live one. The "Start
+        // session" button below (no-session reason only) offers the way out.
+        const reason: "no-session" | "unsupported" | "failed" =
           error?.reason === "no-session"
-            ? "No active session right now (idle sessions are stopped to save resources). Send any message in this thread — the session starts and boots your MCP servers — then run /mcp again."
+            ? "no-session"
             : error?.reason === "unsupported"
+              ? "unsupported"
+              : "failed";
+        const message =
+          reason === "no-session"
+            ? isServerThread
+              ? MCP_NO_SESSION_MESSAGE
+              : MCP_DRAFT_NO_SESSION_MESSAGE
+            : reason === "unsupported"
               ? "This thread's provider does not report MCP server status."
               : error?.detail && error.detail.length > 0
                 ? error.detail
                 : "Could not read MCP status.";
-        setMcpStatusDialog({ kind: "error", message });
+        setMcpStatusDialog({ kind: "error", message, reason, target });
         return;
       }
       setMcpStatusDialog({
@@ -4387,10 +4583,98 @@ function ChatViewContent(props: ChatViewProps) {
         servers: result.value.servers,
         busy: null,
         notice: null,
+        signInUrl: null,
       });
     },
-    [getThreadMcpStatus],
+    [getThreadMcpStatus, isServerThread],
   );
+  // Set while the "Start session" button's dispatched command is in flight
+  // and while waiting for the session to actually go live (see the effect
+  // below) — not just for the command to be acknowledged.
+  const [startingMcpSession, setStartingMcpSession] = useState(false);
+  const handleStartMcpSession = useCallback(async () => {
+    if (mcpStatusDialog?.kind !== "error" || mcpStatusDialog.reason !== "no-session") {
+      return;
+    }
+    const target = mcpStatusDialog.target;
+    setStartingMcpSession(true);
+    // Clear a previous attempt's failure before this one runs. Without it the
+    // dialog reads "The session did not start." underneath a button that says
+    // "Starting…" — the retry contradicting itself.
+    setMcpStatusDialog((current) =>
+      current?.kind === "error" &&
+      current.reason === "no-session" &&
+      current.target.threadId === target.threadId
+        ? { ...current, message: MCP_NO_SESSION_MESSAGE }
+        : current,
+    );
+    const result = await startThreadSession({
+      environmentId: target.environmentId,
+      input: { threadId: target.threadId },
+    });
+    if (result._tag === "Failure") {
+      setStartingMcpSession(false);
+      // `reportFailure: false` means nothing else says this failed. Without
+      // this the button snaps back to "Start session" and the dialog still
+      // reads "No active session", which is a control that reports nothing
+      // at all for a command the server refused.
+      setMcpStatusDialog((current) =>
+        current?.kind === "error" &&
+        current.reason === "no-session" &&
+        current.target.threadId === target.threadId
+          ? { ...current, message: MCP_SESSION_START_FAILED_MESSAGE }
+          : current,
+      );
+    }
+    // On success, the effect below watches the thread's projected session
+    // status and refreshes the dialog once it's actually live — this app has
+    // no imperative "wait for session" primitive, liveness is reactive.
+  }, [mcpStatusDialog, startThreadSession]);
+  useEffect(() => {
+    if (!startingMcpSession || mcpStatusDialog?.kind !== "error") {
+      return;
+    }
+    if (activeThread?.id !== mcpStatusDialog.target.threadId) {
+      return;
+    }
+    const status = activeThread.session?.status;
+    if (status === undefined || status === "starting" || status === "stopped") {
+      return;
+    }
+    setStartingMcpSession(false);
+    void openMcpStatusDialog(mcpStatusDialog.target);
+  }, [startingMcpSession, mcpStatusDialog, activeThread, openMcpStatusDialog]);
+  // A start that never lands must not leave the button saying "Starting…"
+  // forever. `ensureSessionForThread` can fail on the server — a provider
+  // binary that is gone, a project folder that moved — and that failure
+  // reaches the client as the *absence* of a `thread.session-set`, which the
+  // effect above cannot tell apart from a slow boot. So the wait is bounded,
+  // and the way out is the same button: the reason stays `no-session`, so it
+  // comes back enabled and reads "Start session" for a second try.
+  //
+  // Pinned to the thread the wait was armed for: the dialog can be reopened on
+  // another thread without closing, and a timer from the first must not stamp
+  // its failure onto the second.
+  const startingMcpSessionFor =
+    startingMcpSession && mcpStatusDialog?.kind === "error"
+      ? mcpStatusDialog.target.threadId
+      : null;
+  useEffect(() => {
+    if (startingMcpSessionFor === null) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      setStartingMcpSession(false);
+      setMcpStatusDialog((current) =>
+        current?.kind === "error" &&
+        current.reason === "no-session" &&
+        current.target.threadId === startingMcpSessionFor
+          ? { ...current, message: MCP_SESSION_START_FAILED_MESSAGE }
+          : current,
+      );
+    }, MCP_SESSION_START_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [startingMcpSessionFor]);
   // One server's tool list expanded at a time (the "View tools" toggle).
   const [mcpToolsExpandedFor, setMcpToolsExpandedFor] = useState<string | null>(null);
   const runMcpDialogAction = useCallback(
@@ -4399,7 +4683,12 @@ function ChatViewContent(props: ChatViewProps) {
       if (dialog?.kind !== "loaded" || dialog.busy !== null) {
         return;
       }
-      setMcpStatusDialog({ ...dialog, busy: `${serverName}:${action}`, notice: null });
+      setMcpStatusDialog({
+        ...dialog,
+        busy: `${serverName}:${action}`,
+        notice: null,
+        signInUrl: null,
+      });
       const result = await runThreadMcpServerAction({
         environmentId: dialog.target.environmentId,
         input: { threadId: dialog.target.threadId, serverName, action },
@@ -4409,6 +4698,7 @@ function ChatViewContent(props: ChatViewProps) {
         setMcpStatusDialog({
           ...dialog,
           busy: null,
+          signInUrl: null,
           notice:
             error?.detail && error.detail.length > 0
               ? error.detail
@@ -4416,9 +4706,13 @@ function ChatViewContent(props: ChatViewProps) {
         });
         return;
       }
-      const authUrl = result.value.authUrl;
+      const authUrl = result.value.authUrl ?? null;
       if (authUrl) {
-        // OAuth continues in the browser; the CLI completes it out of band.
+        // Best effort: hand the URL to the OS to open. This is NOT the reliable
+        // path — macOS truncates a URL past ~1 KB here, which silently mangled
+        // Google Calendar's twelve-scope consent link into an invalid_scope
+        // error. The copy control rendered below is the reliable path; the URL
+        // is shown regardless of whether this open succeeds.
         const localApi = readLocalApi();
         if (localApi) {
           void localApi.shell.openExternal(authUrl);
@@ -4430,8 +4724,9 @@ function ChatViewContent(props: ChatViewProps) {
         ...dialog,
         servers: result.value.servers,
         busy: null,
+        signInUrl: authUrl,
         notice: authUrl
-          ? `Sign-in opened in the browser for "${serverName}". Reconnect after finishing there.`
+          ? `Sign-in opened for "${serverName}". If no browser tab appeared, copy the link below and open it yourself, then Re-check.`
           : action === "reconnect"
             ? `Reconnected "${serverName}".`
             : action === "authenticate"
@@ -4446,7 +4741,13 @@ function ChatViewContent(props: ChatViewProps) {
 
   // Set right after onSend is defined below; the rewind flow resubmits
   // through it and is declared earlier in this component.
-  const onSendRef = useRef<((event?: { preventDefault: () => void }) => void) | null>(null);
+  const onSendRef = useRef<
+    | ((
+        event?: { preventDefault: () => void },
+        options?: { readonly modelOverride?: string },
+      ) => void)
+    | null
+  >(null);
   // /rewind — rewind to an earlier input: drop that message and everything
   // after it, reposition the provider conversation at the point just before
   // it (prior history intact), and load the input into the composer for
@@ -4461,12 +4762,25 @@ function ChatViewContent(props: ChatViewProps) {
           readonly id: string;
           readonly preview: string;
           readonly text: string;
+          /**
+           * The images the message was sent with. Editing it resends it, so
+           * they are put back in the dialog as removable attachments.
+           */
+          readonly attachments: ReadonlyArray<ChatImageAttachment>;
           /** Count of later user messages — positional anchor for the server. */
           readonly userMessagesAfter: number;
           readonly transcriptId: string | null;
         }>;
         readonly selectedId: string | null;
         readonly draftText: string;
+        /**
+         * Images to send with the edited prompt.
+         *
+         * Held here rather than written straight to the composer draft,
+         * because a dialog somebody dismisses must leave no attachments
+         * behind. They move to the draft when the rewind commits.
+         */
+        readonly images: ReadonlyArray<ComposerImageAttachment>;
         readonly busy: boolean;
         readonly notice: string | null;
         /** The composer already held unsent text that confirming will replace. */
@@ -4478,6 +4792,19 @@ function ChatViewContent(props: ChatViewProps) {
   // dialog appears, and never again, so it cannot fight the user's own
   // scrolling afterwards.
   const rewindSelectionScrolledRef = useRef(false);
+  /**
+   * Attachment slots already spoken for: images attached, plus any still being
+   * compressed.
+   *
+   * A ref rather than a read of `rewindDialog`, because the cap has to be
+   * counted at the moment the files arrive and the state that holds them is a
+   * render behind — two pastes in the same frame would each see the other's
+   * slots free. Reading it back out of `setRewindDialog` was the earlier
+   * answer and is not one: React only runs that updater eagerly when nothing
+   * else is queued on the hook, so an image arriving beside another update was
+   * dropped without a word roughly one time in three.
+   */
+  const rewindReservedImagesRef = useRef(0);
   const openRewindDialog = useCallback(
     async (
       target: { environmentId: EnvironmentId; threadId: ThreadId },
@@ -4515,6 +4842,11 @@ function ChatViewContent(props: ChatViewProps) {
             id: message.id as string,
             preview,
             text,
+            // What was sent, not just what was typed. Editing resends the
+            // message, so its images come back with it.
+            attachments: (message.attachments ?? []).filter(
+              (entry): entry is ChatImageAttachment => entry.type === "image",
+            ),
             userMessagesAfter: userMessages.length - 1 - index,
           };
         })
@@ -4541,12 +4873,14 @@ function ChatViewContent(props: ChatViewProps) {
       // the difference between a shortcut and losing a half-written prompt.
       const composerDraft = (promptRef.current ?? "").trim();
       rewindSelectionScrolledRef.current = false;
+      rewindReservedImagesRef.current = 0;
       setRewindDialog({
         kind: "loaded",
         target,
         targets,
         selectedId: selected?.id ?? null,
         draftText: selected?.text ?? "",
+        images: [],
         busy: false,
         notice: null,
         replacesComposerDraft: composerDraft.length > 0 && composerDraft !== selected?.text.trim(),
@@ -4554,6 +4888,77 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [listThreadRewindTargets, timelineEntries],
   );
+  /**
+   * Object URLs are only reclaimed by revoking them, and every exit from this
+   * dialog has to do it: removing one image, dismissing the dialog, and the
+   * send path once the draft has taken ownership.
+   */
+  const revokeRewindImages = useCallback((images: ReadonlyArray<ComposerImageAttachment>) => {
+    for (const image of images) {
+      if (image.previewUrl) URL.revokeObjectURL(image.previewUrl);
+    }
+  }, []);
+  const addRewindImages = useCallback(
+    async (files: ReadonlyArray<File>) => {
+      if (files.length === 0) return;
+      const reserved = rewindReservedImagesRef.current;
+      const { accepted, error: refused } = acceptComposerImageFiles({
+        files,
+        alreadyReserved: reserved,
+      });
+      if (refused !== null) {
+        setRewindDialog((dialog) =>
+          dialog?.kind === "loaded" ? { ...dialog, notice: refused } : dialog,
+        );
+      }
+      if (accepted.length === 0) return;
+      rewindReservedImagesRef.current = reserved + accepted.length;
+      const { images, error } = await compressComposerImageFiles(accepted);
+      // Compression can turn a file away; give back the slots it did not use.
+      rewindReservedImagesRef.current -= accepted.length - images.length;
+      setRewindDialog((dialog) => {
+        if (dialog?.kind !== "loaded") {
+          // Dismissed while compressing. Nothing will ever own these.
+          revokeRewindImages(images);
+          return dialog;
+        }
+        return {
+          ...dialog,
+          images: [...dialog.images, ...images],
+          ...(error === null ? {} : { notice: error }),
+        };
+      });
+    },
+    [revokeRewindImages],
+  );
+  /**
+   * Takes the image, its object URL and its reserved slot, in that order.
+   *
+   * The removal happens here rather than inside the `setRewindDialog` updater,
+   * and the caller passes the image rather than its id, because an updater must
+   * be pure: React double-invokes it under StrictMode, which ran the revoke and
+   * the decrement twice and left the slot count below zero — so the next paste
+   * was measured against a cap that had grown.
+   */
+  const removeRewindImage = useCallback(
+    (image: ComposerImageAttachment) => {
+      revokeRewindImages([image]);
+      rewindReservedImagesRef.current -= 1;
+      setRewindDialog((dialog) =>
+        dialog?.kind !== "loaded"
+          ? dialog
+          : { ...dialog, images: dialog.images.filter((entry) => entry.id !== image.id) },
+      );
+    },
+    [revokeRewindImages],
+  );
+  const closeRewindDialog = useCallback(() => {
+    rewindReservedImagesRef.current = 0;
+    setRewindDialog((dialog) => {
+      if (dialog?.kind === "loaded") revokeRewindImages(dialog.images);
+      return null;
+    });
+  }, [revokeRewindImages]);
   const runRewindToInput = useCallback(async () => {
     const dialog = rewindDialog;
     if (dialog?.kind !== "loaded" || dialog.busy || dialog.selectedId === null) {
@@ -4568,6 +4973,14 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
     setRewindDialog({ ...dialog, busy: true, notice: null });
+    // Handed to the draft now, not at the end: the composer copies the draft
+    // into the ref `onSend` reads inside an effect, so the write needs a React
+    // commit to reach it, and the rewind round-trip below is what gives it
+    // one. Ownership of the object URLs moves with them — the draft revokes
+    // them on send — so the failure path below hands them back.
+    if (dialog.images.length > 0) {
+      addComposerDraftImages(composerDraftTarget, [...dialog.images]);
+    }
     // Files FIRST, while the session is still alive. Repositioning the
     // provider conversation stops that session, and the file restore needs
     // it — run the other way round it fails every time with
@@ -4606,8 +5019,25 @@ function ChatViewContent(props: ChatViewProps) {
     });
     if (rewound._tag === "Failure") {
       const error = squashAtomCommandFailure(rewound) as Partial<{ detail: string }> | null;
+      // The thread did not move, so the images must not stay in the composer
+      // of a conversation the user has not rewound. They go back to the dialog
+      // they came from, still attached, ready for a second attempt.
+      // Removed one by one rather than with a blanket clear: the composer may
+      // hold the user's own unsent prompt and their own attachments, and none
+      // of that is this rewind's to throw away.
+      for (const image of dialog.images) {
+        removeComposerDraftImage(composerDraftTarget, image.id);
+      }
+      // The draft revokes a preview URL as it drops the image, so the
+      // thumbnails handed back here would be dead links. The file survived, so
+      // each one gets a fresh URL and the dialog is usable for a second try.
+      const restoredImages = dialog.images.map((image) => ({
+        ...image,
+        previewUrl: URL.createObjectURL(image.file),
+      }));
       setRewindDialog({
         ...dialog,
+        images: restoredImages,
         busy: false,
         notice:
           error?.detail && error.detail.length > 0 ? error.detail : "Could not rewind the thread.",
@@ -4650,6 +5080,9 @@ function ChatViewContent(props: ChatViewProps) {
     runThreadRewindFiles,
     runThreadRewindToInput,
     setComposerDraftPrompt,
+    addComposerDraftImages,
+    removeComposerDraftImage,
+    composerDraftTarget,
   ]);
 
   // /resume <session-id> — shared import flow (also reachable from the
@@ -5082,6 +5515,13 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
 
+      if (command === "chat.findInThread") {
+        event.preventDefault();
+        event.stopPropagation();
+        openFindInThread();
+        return;
+      }
+
       if (command === "modelPicker.toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -5115,6 +5555,7 @@ function ChatViewContent(props: ChatViewProps) {
     splitPanelTerminal,
     keybindings,
     onToggleDiff,
+    openFindInThread,
     toggleRightPanel,
     toggleTerminalVisibility,
     composerRef,
@@ -5179,7 +5620,21 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
-  const onSend = async (e?: { preventDefault: () => void }) => {
+  const onSend = async (
+    e?: { preventDefault: () => void },
+    options?: {
+      /**
+       * Send on this model instead of the one the composer is showing.
+       *
+       * The confirmed answer to the required-model question below. It travels
+       * as an argument rather than through the draft store because a write
+       * there only reaches this function on the next render, and this send is
+       * happening now — the composer is updated too, so the screen and the run
+       * agree, but the run does not wait for it.
+       */
+      readonly modelOverride?: string;
+    },
+  ) => {
     e?.preventDefault();
     if (
       !activeThread ||
@@ -5203,11 +5658,20 @@ function ChatViewContent(props: ChatViewProps) {
       previewAnnotations: composerPreviewAnnotations,
       reviewComments: composerReviewComments,
       selectedProvider: ctxSelectedProvider,
-      selectedModel: ctxSelectedModel,
+      selectedModel: ctxSelectedModelAsShown,
       selectedProviderModels: ctxSelectedProviderModels,
       selectedPromptEffort: ctxSelectedPromptEffort,
-      selectedModelSelection: ctxSelectedModelSelection,
+      selectedModelSelection: ctxSelectedModelSelectionAsShown,
     } = sendCtx;
+    const ctxSelectedModel = options?.modelOverride ?? ctxSelectedModelAsShown;
+    const ctxSelectedModelSelection =
+      options?.modelOverride === undefined
+        ? ctxSelectedModelSelectionAsShown
+        : createModelSelection(
+            ctxSelectedModelSelectionAsShown.instanceId,
+            options.modelOverride,
+            ctxSelectedModelSelectionAsShown.options,
+          );
     const promptForSend = promptRef.current;
     const {
       trimmedPrompt: trimmed,
@@ -5257,6 +5721,35 @@ function ChatViewContent(props: ChatViewProps) {
     // paid model turn on a message that just describes the command. The
     // runtime's own advertised list wins where it has one — /clear is the
     // proof, and intercepting it broke a real workflow.
+    // A turn that is still running is standing on the very context /clear
+    // throws away. Sent mid-turn it reached Claude as steering input and came
+    // back as `conversation_reset` with the assistant still streaming, so the
+    // turn finished against a conversation that no longer existed. Ordinary
+    // messages still go mid-turn — steering is the point — but not this one.
+    const blockedContextReset = resolveBlockedContextReset({
+      trimmedPrompt: trimmed,
+      isTurnInFlight: phase === "running" || phase === "connecting",
+      hasAttachments:
+        composerImages.length > 0 ||
+        sendableComposerTerminalContexts.length > 0 ||
+        composerElementContexts.length > 0 ||
+        composerPreviewAnnotations.length > 0 ||
+        composerReviewComments.length > 0,
+    });
+    if (blockedContextReset !== null) {
+      // The draft is deliberately left alone: the way out is to wait for the
+      // turn or stop it, and both end with the user pressing Enter on the
+      // message already in front of them.
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: `/${blockedContextReset} while the agent is working`,
+          description:
+            "It would clear the context this turn is using. Let the turn finish, or stop it first.",
+        }),
+      );
+      return;
+    }
     const interactiveBuiltin = resolveInterceptedComposerBuiltin({
       trimmedPrompt: trimmed,
       hasAttachments:
@@ -5429,20 +5922,19 @@ function ChatViewContent(props: ChatViewProps) {
       sizeBytes: image.sizeBytes,
       previewUrl: image.previewUrl,
     }));
-    // Sending always returns to the live edge. The new row becomes the
-    // anchored end-space target so it lands near the top while the response
-    // streams into the reserved space below it.
+    // Sending returns to the live edge and stays there.
+    //
+    // This used to park the sent message at the top of the viewport and reserve
+    // space below it for the reply. Read from the bottom of a conversation —
+    // where you are when you send — that is a jump backwards of about a
+    // screenful every single time, and a long reply with tool rows then grows
+    // past the fold, so the reader scrolls down to catch up with work they were
+    // already watching.
     isAtEndRef.current = true;
-    timelineScrollModeRef.current = "anchoring-new-turn";
+    setTimelineScrollMode("following-end");
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    pendingTimelineAnchorRef.current = messageIdForSend;
-    activeTimelineAnchorIndexRef.current = null;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
-    setTimelineAnchor({
-      threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
-      messageId: messageIdForSend,
-    });
     setOptimisticUserMessages((existing) => [
       ...existing,
       {
@@ -5591,6 +6083,23 @@ function ChatViewContent(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        // The model this turn actually ran on, written as the thread's own
+        // selection.
+        //
+        // Without it the conversation forgets what it is running: the draft
+        // record the launcher (or the picker) wrote is keyed to the draft, and
+        // once that draft is promoted the composer reads the thread's record
+        // instead — which nothing had written, so it fell back to the tier
+        // default. The chip then said Sonnet 5 over a turn running on Opus, and
+        // the *next* message really did go to Sonnet. `KanbanNewThreadDialog`
+        // hit exactly this and wrote the selection in for its own thread; this
+        // is the same repair in the one send path, so every conversation gets
+        // it rather than the one screen that noticed.
+        setComposerDraftModelSelection(
+          scopeThreadRef(environmentId, threadIdForSend),
+          ctxSelectedModelSelection,
+          { replaceOptions: true },
+        );
       }
     }
 
@@ -5876,18 +6385,12 @@ function ChatViewContent(props: ChatViewProps) {
       beginLocalDispatch({ preparingWorktree: false });
       setThreadError(threadIdForSend, null);
 
-      // Position this sent row once LegendList has measured the anchored tail.
+      // Same rule as the other send path: stay at the live edge.
       isAtEndRef.current = true;
-      timelineScrollModeRef.current = "anchoring-new-turn";
+      setTimelineScrollMode("following-end");
       liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-      pendingTimelineAnchorRef.current = messageIdForSend;
-      activeTimelineAnchorIndexRef.current = null;
       showScrollDebouncer.current.cancel();
       setShowScrollToBottom(false);
-      setTimelineAnchor({
-        threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
-        messageId: messageIdForSend,
-      });
 
       setOptimisticUserMessages((existing) => [
         ...existing,
@@ -6036,7 +6539,14 @@ function ChatViewContent(props: ChatViewProps) {
       text: implementationPrompt,
     });
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
-    const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
+    // Implementing a plan opens a *new* conversation, so the same rule applies
+    // as anywhere else a thread is created: the model does not come along. The
+    // plan was written on whatever it was written on; implementing is a
+    // separate conversation, and it opens on the tier default until somebody
+    // reaches past it from its own picker.
+    const nextThreadModelSelection: ModelSelection = withoutInheritedOutputStyle(
+      withNewThreadDefaultModel(ctxSelectedModelSelection),
+    );
 
     sendInFlightRef.current = true;
     beginLocalDispatch({ preparingWorktree: false });
@@ -6073,7 +6583,7 @@ function ChatViewContent(props: ChatViewProps) {
             text: outgoingImplementationPrompt,
             attachments: [],
           },
-          modelSelection: ctxSelectedModelSelection,
+          modelSelection: nextThreadModelSelection,
           titleSeed: nextThreadTitle,
           runtimeMode,
           interactionMode: "default",
@@ -6315,6 +6825,63 @@ function ChatViewContent(props: ChatViewProps) {
     void openRewindDialogRef.current(target, { preselectMessageId: messageId });
   }, []);
 
+  // The message already exists on the thread (it was persisted before the
+  // turn failed to start) — this re-dispatches the turn for it, unlike edit
+  // it never rewinds or touches text.
+  // Only the message still waiting at the end of the thread can be retried —
+  // the same rule the decider enforces, so the button is never offered on a
+  // turn the server would refuse. Anything after it means the attempt is
+  // spent: an assistant reply means the turn ran, a newer user message means
+  // the person retyped.
+  const retriableMessageId = useMemo(() => {
+    const last = activeThread?.messages.at(-1);
+    return last !== undefined && last.role === "user" ? last.id : null;
+  }, [activeThread?.messages]);
+
+  const onRetryTurnStart = useCallback(
+    (messageId: MessageId) => {
+      const target = rewindTargetRef.current;
+      if (!target) return;
+      void retryThreadTurn({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, messageId },
+      });
+    },
+    [retryThreadTurn],
+  );
+
+  // Escape hatch beside Retry: opens a separate thread (reusing the same
+  // "New thread" path as everywhere else, so an untouched pending draft is
+  // reused rather than spawning a pile of empty ones) pre-filled to report
+  // the failure, rather than retrying the same thread again. `handleNewThread`
+  // does not hand back which draft it landed on, so the draft id is read from
+  // the router right after navigation settles.
+  const onReportTurnStartFailure = useCallback(
+    (report: { detail: string; createdAt: string; messageId: MessageId | null }) => {
+      if (!activeProjectRef) return;
+      const reportedThreadId = rewindTargetRef.current?.threadId ?? null;
+      void (async () => {
+        await handleNewThread(activeProjectRef);
+        const draftId = /^\/draft\/([^/]+)$/.exec(router.state.location.pathname)?.[1];
+        if (!draftId) return;
+        const target = DraftId.make(draftId);
+        const existingPrompt =
+          useComposerDraftStore.getState().getComposerDraft(target)?.prompt ?? "";
+        const reportPrompt = buildTurnStartFailureReportPrompt({
+          threadId: reportedThreadId,
+          messageId: report.messageId,
+          detail: report.detail,
+          createdAt: report.createdAt,
+        });
+        setComposerDraftPrompt(
+          target,
+          existingPrompt ? `${existingPrompt}\n\n${reportPrompt}` : reportPrompt,
+        );
+      })();
+    },
+    [activeProjectRef, handleNewThread, router, setComposerDraftPrompt],
+  );
+
   // Empty state: no active thread
   if (!activeThread) {
     return <NoActiveThreadState />;
@@ -6471,6 +7038,7 @@ function ChatViewContent(props: ChatViewProps) {
 
         <ThreadErrorBanner
           error={threadError}
+          errorClass={threadErrorClass}
           onDismiss={() => setThreadError(activeThread.id, null)}
         />
         {/* Main content area with optional plan sidebar */}
@@ -6500,12 +7068,9 @@ function ChatViewContent(props: ChatViewProps) {
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
                 threadActivities={activeThread.activities ?? EMPTY_THREAD_ACTIVITIES}
+                agentModelContext={agentModelContext}
                 latestTurn={activeLatestTurn}
-                runningTurnId={
-                  activeThread.session?.status === "running"
-                    ? activeThread.session.activeTurnId
-                    : null
-                }
+                runningTurnId={activeRunningTurnId}
                 turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
                 activeThreadEnvironmentId={activeThread.environmentId}
                 routeThreadKey={routeThreadKey}
@@ -6513,6 +7078,9 @@ function ChatViewContent(props: ChatViewProps) {
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
                 onEditUserMessage={onEditUserMessage}
+                onRetryTurnStart={onRetryTurnStart}
+                retriableMessageId={retriableMessageId}
+                onReportTurnStartFailure={onReportTurnStartFailure}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}
@@ -6520,15 +7088,41 @@ function ChatViewContent(props: ChatViewProps) {
                 timestampFormat={timestampFormat}
                 workspaceRoot={activeWorkspaceRoot}
                 skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
-                anchorMessageId={timelineAnchorMessageId}
-                onAnchorReady={onTimelineAnchorReady}
-                onAnchorSizeChanged={onTimelineAnchorSizeChanged}
                 contentInsetEndAdjustment={composerOverlayHeight}
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
+                followEnd={followTimelineEnd}
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
+                onStartReached={
+                  activeThread.hasMoreActivities === true ? onTimelineStartReached : undefined
+                }
+                isProgrammaticScrollExpected={isProgrammaticTimelineScrollExpected}
+                find={timelineFind}
               />
+
+              {findState !== null && findQuery !== null && (
+                <FindInThreadBar
+                  query={findState.query}
+                  matchCount={findMatches.length}
+                  activePosition={findMatches.length === 0 ? 0 : findActiveIndex + 1}
+                  focusToken={findState.focusToken}
+                  onQueryChange={(query) =>
+                    setFindState((existing) =>
+                      existing === null ? existing : { ...existing, query, activeIndex: 0 },
+                    )
+                  }
+                  onStep={stepFindMatch}
+                  onClose={() => {
+                    setFindState(null);
+                    // Closing the bar otherwise leaves focus on `body`, where
+                    // typing and the arrow keys go nowhere. The composer is
+                    // where the reader was before the search and where the
+                    // next keystroke belongs.
+                    focusComposer();
+                  }}
+                />
+              )}
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
               {showScrollToBottom && (
@@ -6540,7 +7134,7 @@ function ChatViewContent(props: ChatViewProps) {
                     type="button"
                     aria-label="Scroll to end"
                     title="Scroll to end"
-                    onClick={() => scrollToEnd(true)}
+                    onClick={scrollToEnd}
                     className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-border/60 bg-card px-3 py-1 text-muted-foreground text-xs shadow-sm transition-colors hover:border-border hover:text-foreground hover:cursor-pointer"
                   >
                     <ChevronDownIcon className="size-3.5" />
@@ -6668,6 +7262,7 @@ function ChatViewContent(props: ChatViewProps) {
                               activeProject?.defaultModelSelection
                             }
                             activeThreadModelSelection={activeThread?.modelSelection}
+                            activeThreadHasStarted={threadHasStarted(activeThread)}
                             activeThreadActivities={activeThread?.activities}
                             resolvedTheme={resolvedTheme}
                             settings={settings}
@@ -6798,7 +7393,12 @@ function ChatViewContent(props: ChatViewProps) {
             <AlertDialog
               open={mcpStatusDialog !== null}
               onOpenChange={(open) => {
-                if (!open) setMcpStatusDialog(null);
+                if (!open) {
+                  setMcpStatusDialog(null);
+                  // Closing mid-start must not leave a stale "Starting..."
+                  // stuck on a later, unrelated no-session error.
+                  setStartingMcpSession(false);
+                }
               }}
             >
               <AlertDialogPopup data-testid="mcp-status-dialog">
@@ -6835,7 +7435,10 @@ function ChatViewContent(props: ChatViewProps) {
                         >
                           <div className="flex items-baseline justify-between gap-3">
                             <span className="min-w-0">
-                              <span className="font-medium">{server.name}</span>
+                              <span className="inline-flex items-center gap-1.5 font-medium">
+                                <McpMark name={server.name} className="size-3.5 shrink-0" />
+                                {server.name}
+                              </span>
                               {server.serverVersion ? (
                                 <span className="ml-2 text-xs text-muted-foreground">
                                   {server.serverVersion}
@@ -6958,6 +7561,9 @@ function ChatViewContent(props: ChatViewProps) {
                 {mcpStatusDialog?.kind === "loaded" && mcpStatusDialog.notice ? (
                   <p className="text-xs text-muted-foreground">{mcpStatusDialog.notice}</p>
                 ) : null}
+                {mcpStatusDialog?.kind === "loaded" && mcpStatusDialog.signInUrl ? (
+                  <McpSignInLink url={mcpStatusDialog.signInUrl} />
+                ) : null}
                 <AlertDialogFooter>
                   {mcpStatusDialog?.kind === "loaded" ? (
                     <Button
@@ -6968,6 +7574,17 @@ function ChatViewContent(props: ChatViewProps) {
                       Refresh
                     </Button>
                   ) : null}
+                  {mcpStatusDialog?.kind === "error" &&
+                  mcpStatusDialog.reason === "no-session" &&
+                  isServerThread ? (
+                    <Button
+                      variant="ghost"
+                      disabled={startingMcpSession}
+                      onClick={() => void handleStartMcpSession()}
+                    >
+                      {startingMcpSession ? "Starting..." : "Start session"}
+                    </Button>
+                  ) : null}
                   <AlertDialogClose render={<Button variant="outline" />}>Close</AlertDialogClose>
                 </AlertDialogFooter>
               </AlertDialogPopup>
@@ -6975,7 +7592,7 @@ function ChatViewContent(props: ChatViewProps) {
             <AlertDialog
               open={rewindDialog !== null}
               onOpenChange={(open) => {
-                if (!open) setRewindDialog(null);
+                if (!open) closeRewindDialog();
               }}
             >
               <AlertDialogPopup data-testid="rewind-dialog">
@@ -6993,6 +7610,20 @@ function ChatViewContent(props: ChatViewProps) {
                 </AlertDialogHeader>
                 {rewindDialog?.kind === "loaded" && rewindDialog.targets.length > 0 ? (
                   <div className="space-y-2">
+                    {/* Renders nothing: this is the selected message's own
+                        images being fetched back so the edit resends what was
+                        sent. Keyed on the selection as well, so picking another
+                        message starts again with that message's images. */}
+                    {rewindDialog.targets
+                      .find((candidate) => candidate.id === rewindDialog.selectedId)
+                      ?.attachments.map((attachment) => (
+                        <RewindMessageAttachment
+                          key={`${rewindDialog.selectedId ?? ""}:${attachment.id}`}
+                          environmentId={rewindDialog.target.environmentId}
+                          attachment={attachment}
+                          onRestore={addRewindImages}
+                        />
+                      ))}
                     <ul className="max-h-44 space-y-1 overflow-y-auto text-sm">
                       {rewindDialog.targets.map((target) => (
                         <li key={target.id}>
@@ -7017,14 +7648,20 @@ function ChatViewContent(props: ChatViewProps) {
                               }}
                               checked={rewindDialog.selectedId === target.id}
                               disabled={rewindDialog.busy}
-                              onChange={() =>
+                              onChange={() => {
+                                // The images belong to the message, so picking
+                                // another one drops the first message's and
+                                // lets its own be put back.
+                                revokeRewindImages(rewindDialog.images);
+                                rewindReservedImagesRef.current = 0;
                                 setRewindDialog({
                                   ...rewindDialog,
                                   selectedId: target.id,
                                   draftText: target.text,
+                                  images: [],
                                   notice: null,
-                                })
-                              }
+                                });
+                              }}
                             />
                             <span className="min-w-0 flex-1 truncate">{target.preview}</span>
                           </label>
@@ -7038,8 +7675,60 @@ function ChatViewContent(props: ChatViewProps) {
                       onChange={(event) =>
                         setRewindDialog({ ...rewindDialog, draftText: event.target.value })
                       }
+                      // Paste, exactly as the composer takes it. A screenshot
+                      // on the clipboard is the commonest way an image reaches
+                      // a prompt, and this dialog sends the turn itself — the
+                      // composer never gets a chance to accept one afterwards.
+                      onPaste={(event) => {
+                        const files = Array.from(event.clipboardData.files).filter((file) =>
+                          file.type.startsWith("image/"),
+                        );
+                        if (files.length === 0) return;
+                        event.preventDefault();
+                        void addRewindImages(files);
+                      }}
                       placeholder="Edit the input you are rewinding to..."
                     />
+                    {rewindDialog.images.length > 0 ? (
+                      <ul className="flex flex-wrap gap-2">
+                        {rewindDialog.images.map((image) => (
+                          <li key={image.id} className="relative">
+                            <img
+                              src={image.previewUrl}
+                              alt={image.name}
+                              className="size-14 rounded-md border border-border object-cover"
+                            />
+                            <button
+                              type="button"
+                              aria-label={`Remove ${image.name}`}
+                              disabled={rewindDialog.busy}
+                              onClick={() => removeRewindImage(image)}
+                              className="absolute -right-1.5 -top-1.5 inline-flex size-5 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-xs text-muted-foreground hover:text-foreground"
+                            >
+                              <XIcon className="size-3" />
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <label className="inline-flex w-fit cursor-pointer items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+                      <ImageIcon className="size-3.5" />
+                      Attach images
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="sr-only"
+                        disabled={rewindDialog.busy || rewindDialog.selectedId === null}
+                        onChange={(event) => {
+                          const files = Array.from(event.target.files ?? []);
+                          // Cleared so picking the same file twice in a row
+                          // still fires a change event.
+                          event.target.value = "";
+                          void addRewindImages(files);
+                        }}
+                      />
+                    </label>
                     {rewindDialog.notice ? (
                       <p className="text-xs text-destructive-foreground">{rewindDialog.notice}</p>
                     ) : null}

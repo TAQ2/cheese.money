@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -10,12 +11,35 @@ import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
+import { HttpClient } from "effect/unstable/http";
 
 import * as Electron from "electron";
 import { vi } from "vite-plus/test";
 
+/**
+ * Every window CH3 constructs ITSELF, with the options it asked for. The
+ * Claude sign-in is the only one — it is denied to Electron precisely so its
+ * session can be chosen here rather than inherited from the opener.
+ */
+const constructedWindows = vi.hoisted(
+  () => [] as Array<{ readonly options: Electron.BrowserWindowConstructorOptions }>,
+);
+
 vi.mock("electron", async (importOriginal) => ({
   ...(await importOriginal<typeof import("electron")>()),
+  BrowserWindow: class FakeBrowserWindow {
+    readonly webContents = {
+      getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 ch3/1.2.3"),
+      setUserAgent: vi.fn(),
+      on: vi.fn(),
+    };
+    readonly loadURL = vi.fn(() => Promise.resolve());
+    readonly isDestroyed = vi.fn(() => false);
+    readonly close = vi.fn();
+    constructor(options: Electron.BrowserWindowConstructorOptions) {
+      constructedWindows.push({ options });
+    }
+  },
   session: {
     fromPartition: vi.fn(() => ({
       getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 ch3/1.2.3"),
@@ -43,6 +67,8 @@ import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
+import { isClaudeOAuthSignInUrl } from "./claudeOAuthUrl.ts";
+import { clearClaudeSignInEmailHint, rememberClaudeSignInEmail } from "./claudeSignInEmailHint.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 
@@ -182,6 +208,19 @@ const desktopWindowBoundsEquivalence = Schema.toEquivalence(
   DesktopAppSettings.DesktopWindowBoundsSchema,
 );
 
+/**
+ * No mailbox is authorized in these tests, which is the shipped default — so
+ * the automated sign-in can never start and what is under test stays the
+ * manual window behaviour. The HTTP client dies if touched, which is the
+ * assertion that nothing here reaches Gmail.
+ */
+const unauthorizedMailboxLayer = Layer.mergeAll(
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make(() => Effect.die("unexpected Gmail request")),
+  ),
+);
+
 function makeTestLayer(input: {
   readonly window: Electron.BrowserWindow;
   readonly createCount: Ref.Ref<number>;
@@ -273,6 +312,7 @@ function makeTestLayer(input: {
           isBrowserPartition: (partition) => partition.startsWith("persist:ch3-preview-"),
           getBrowserPartition: () => Effect.succeed("persist:ch3-preview-test"),
         }),
+        unauthorizedMailboxLayer,
       ),
     ),
   );
@@ -367,6 +407,7 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
             isBrowserPartition: (partition) => partition.startsWith("persist:ch3-preview-"),
             getBrowserPartition: () => Effect.succeed("persist:ch3-preview-test"),
           }),
+          unauthorizedMailboxLayer,
         ),
       ),
     );
@@ -414,25 +455,26 @@ describe("DesktopWindow", () => {
   });
 
   it("recognizes only the Claude account sign-in page as an in-app OAuth window", () => {
-    assert.isTrue(DesktopWindow.isClaudeOAuthSignInUrl(CLAUDE_OAUTH_SIGN_IN_URL));
+    assert.isTrue(isClaudeOAuthSignInUrl(CLAUDE_OAUTH_SIGN_IN_URL));
+    assert.isTrue(isClaudeOAuthSignInUrl("https://claude.ai/oauth"));
     // The personal-subscription flow's authorize host — the one the account
-    // switcher actually hits. Missing this is why sign-in bounced to the
-    // system browser instead of opening in-app: the check only ever matched
-    // `claude.ai`, a host the live SDK does not use for this flow.
-    assert.isTrue(DesktopWindow.isClaudeOAuthSignInUrl("https://claude.com/cai/oauth/authorize"));
+    // switcher actually hits. Pinning the old `claude.ai` form is what sent
+    // the sign-in to the system browser instead of opening it in-app.
+    assert.isTrue(isClaudeOAuthSignInUrl("https://claude.com/cai/oauth/authorize"));
     // The console/API-key flow's authorize host.
-    assert.isTrue(DesktopWindow.isClaudeOAuthSignInUrl("https://platform.claude.com/oauth/authorize"));
-    assert.isTrue(DesktopWindow.isClaudeOAuthSignInUrl("https://claude.ai/oauth"));
-    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("http://claude.ai/oauth/authorize"));
-    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("http://claude.com/cai/oauth/authorize"));
-    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("https://evil.example/oauth/authorize"));
-    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("https://claude.ai/settings/profile"));
-    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("https://claude.com/settings/profile"));
-    assert.isFalse(DesktopWindow.isClaudeOAuthSignInUrl("not a url"));
+    assert.isTrue(isClaudeOAuthSignInUrl("https://platform.claude.com/oauth/authorize"));
+    assert.isFalse(isClaudeOAuthSignInUrl("http://claude.ai/oauth/authorize"));
+    assert.isFalse(isClaudeOAuthSignInUrl("http://claude.com/cai/oauth/authorize"));
+    assert.isFalse(isClaudeOAuthSignInUrl("https://claude.com/pricing"));
+    assert.isFalse(isClaudeOAuthSignInUrl("https://evil.example/oauth/authorize"));
+    assert.isFalse(isClaudeOAuthSignInUrl("https://claude.ai/settings/profile"));
+    assert.isFalse(isClaudeOAuthSignInUrl("https://claude.com/settings/profile"));
+    assert.isFalse(isClaudeOAuthSignInUrl("not a url"));
   });
 
   it.effect("keeps the Claude sign-in in-app and shells out every other window.open", () =>
     Effect.gen(function* () {
+      constructedWindows.length = 0;
       const fakeWindow = makeFakeBrowserWindow();
       const createCount = yield* Ref.make(0);
       const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
@@ -457,8 +499,26 @@ describe("DesktopWindow", () => {
 
         const signIn = handler({ url: CLAUDE_OAUTH_SIGN_IN_URL });
         yield* Effect.promise(() => Promise.resolve());
-        assert.strictEqual(signIn.action, "allow");
+        // DENIED, and that is the fix rather than a regression: a window
+        // Electron opens for `window.open` shares the opener's cookie jar, so
+        // the second sign-in of an app run arrived already authenticated as the
+        // first account. CH3 builds the window itself to own the session.
+        assert.strictEqual(signIn.action, "deny");
+        // Denied to Electron, NOT handed to the system browser.
         assert.deepEqual(openedExternalUrls, []);
+        assert.strictEqual(constructedWindows.length, 1);
+
+        const partition = constructedWindows[0]?.options.webPreferences?.partition;
+        assert.isString(partition);
+        // Without `persist:` the jar is in-memory, so nothing survives the run.
+        assert.isFalse((partition ?? "persist:").startsWith("persist:"));
+
+        // The second sign-in is the one that used to come back as the first
+        // account. It must not be able to see the first window's cookies.
+        handler({ url: CLAUDE_OAUTH_SIGN_IN_URL });
+        yield* Effect.promise(() => Promise.resolve());
+        assert.strictEqual(constructedWindows.length, 2);
+        assert.notStrictEqual(constructedWindows[1]?.options.webPreferences?.partition, partition);
 
         const external = handler({ url: "https://example.com/pricing" });
         yield* Effect.promise(() => Promise.resolve());
@@ -492,9 +552,11 @@ describe("DesktopWindow", () => {
         assert.equal(createdWindowOptions[0]?.height, 780);
         assert.isUndefined(createdWindowOptions[0]?.x);
         assert.isUndefined(createdWindowOptions[0]?.y);
-        assert.isTrue(createdWindowOptions[0]?.disableAutoHideCursor);
-        assert.isFalse(createdWindowOptions[0]?.webPreferences?.backgroundThrottling);
-        assert.deepEqual(fakeWindow.setAutoHideCursor.mock.calls, [[false]]);
+        // Chromium's defaults, on purpose: a hidden or occluded main window
+        // stops painting and timing, and the pointer hides while typing.
+        assert.isUndefined(createdWindowOptions[0]?.disableAutoHideCursor);
+        assert.isUndefined(createdWindowOptions[0]?.webPreferences?.backgroundThrottling);
+        assert.deepEqual(fakeWindow.setAutoHideCursor.mock.calls, []);
         assert.deepEqual(fakeWindow.loadURL.mock.calls[0], ["ch3-dev://app/"]);
         assert.equal(fakeWindow.openDevTools.mock.calls.length, 1);
       }).pipe(Effect.provide(layer));

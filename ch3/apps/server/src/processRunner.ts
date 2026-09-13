@@ -61,6 +61,23 @@ const formatProcessInvocation = (input: {
     : `'${input.command}' in '${executionCwd}'`;
 };
 
+/**
+ * The child closed its stdin, or exited, before the payload was written.
+ *
+ * A command may ignore what it is handed — a statusLine script that prints a
+ * constant never reads its JSON — and the runner's answer is then the exit
+ * code and output it produced, not a write error for bytes nobody was going to
+ * read. Linux reports the missing reader the instant it is gone; macOS usually
+ * lets a small payload into the pipe buffer first, which is why this only
+ * surfaced once the suite ran on a Linux runner.
+ */
+const isStdinReaderGone = (error: unknown): boolean => {
+  if (!(error instanceof PlatformError.PlatformError)) return false;
+  const cause: unknown = "cause" in error.reason ? error.reason.cause : undefined;
+  if (typeof cause !== "object" || cause === null || !("code" in cause)) return false;
+  return cause.code === "EPIPE" || cause.code === "ERR_STREAM_DESTROYED";
+};
+
 export class ProcessSpawnError extends Schema.TaggedErrorClass<ProcessSpawnError>()(
   "ProcessSpawnError",
   {
@@ -331,16 +348,19 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
     stdin === undefined
       ? Effect.void
       : Stream.run(Stream.encodeText(Stream.make(stdin)), child.stdin).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProcessStdinError({
-                command: input.command,
-                argumentCount: input.args.length,
-                cwd: input.cwd,
-                spawnCwd: input.spawnCwd,
-                stdinBytes: Buffer.byteLength(stdin),
-                cause,
-              }),
+          Effect.catch((cause) =>
+            isStdinReaderGone(cause)
+              ? Effect.void
+              : Effect.fail(
+                  new ProcessStdinError({
+                    command: input.command,
+                    argumentCount: input.args.length,
+                    cwd: input.cwd,
+                    spawnCwd: input.spawnCwd,
+                    stdinBytes: Buffer.byteLength(stdin),
+                    cause,
+                  }),
+                ),
           ),
         );
 

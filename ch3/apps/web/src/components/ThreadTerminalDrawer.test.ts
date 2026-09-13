@@ -99,7 +99,6 @@ describe("terminalScrollRestoreLine", () => {
   });
 });
 
-
 describe("terminalBufferAppendSuffix", () => {
   it("appends the tail of a pure append", () => {
     expect(terminalBufferAppendSuffix("abc", "abcdef")).toBe("def");

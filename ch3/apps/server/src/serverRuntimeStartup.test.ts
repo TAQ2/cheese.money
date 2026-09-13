@@ -15,6 +15,16 @@ import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngi
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as ServerSettings from "./serverSettings.ts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  type ServerSettings as ServerSettingsValue,
+} from "@ch3tools/contracts/settings";
+
+const provideServerSettings = (overrides: Partial<ServerSettingsValue> = {}) =>
+  Effect.provideService(ServerSettings.ServerSettingsService, {
+    getSettings: Effect.succeed({ ...DEFAULT_SERVER_SETTINGS, ...overrides }),
+  } as never);
 
 it("uses the canonical Codex default for auto-bootstrapped model selection", () => {
   assert.deepStrictEqual(ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection(), {
@@ -79,6 +89,7 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
         Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
           getCommandReadModel: () => Effect.die("unused"),
           getSnapshot: () => Effect.die("unused"),
+          listProjects: () => Effect.die("this test should not list projects"),
           getShellSnapshot: () => Effect.die("unused"),
           getArchivedShellSnapshot: () => Effect.die("unused"),
           getSnapshotSequence: () => Effect.die("unused"),
@@ -97,6 +108,7 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+          getThreadActivitiesPage: () => Effect.succeed(Option.none()),
           searchThreads: () => Effect.succeed({ matches: [] }),
         }),
         Effect.provideService(AnalyticsService.AnalyticsService, {
@@ -137,6 +149,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
       Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
         getCommandReadModel: () => Effect.die("unused"),
         getSnapshot: () => Effect.die("unused"),
+        listProjects: () => Effect.die("this test should not list projects"),
         getShellSnapshot: () => Effect.die("unused"),
         getArchivedShellSnapshot: () => Effect.die("unused"),
         getSnapshotSequence: () => Effect.die("unused"),
@@ -161,10 +174,12 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         getThreadShellById: () => Effect.die("unused"),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
+        getThreadActivitiesPage: () => Effect.die("unused"),
         searchThreads: () => Effect.succeed({ matches: [] }),
       }),
       Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
         readEvents: () => Stream.empty,
+        readThreadEvents: () => Stream.empty,
         dispatch: (command) =>
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
@@ -172,6 +187,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         streamDomainEvents: Stream.empty,
         latestSequence: Effect.succeed(0),
       } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
+      provideServerSettings(),
       Effect.provide(NodeServices.layer),
     );
 
@@ -186,6 +202,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
 it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when missing", () =>
   Effect.gen(function* () {
     const dispatchCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const threadCreateCommands = yield* Ref.make<ReadonlyArray<Record<string, unknown>>>([]);
     const targets = yield* ServerRuntimeStartup.resolveAutoBootstrapWelcomeTargets.pipe(
       Effect.provideService(ServerConfig.ServerConfig, {
         cwd: "/tmp/startup-project",
@@ -194,6 +211,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
       Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
         getCommandReadModel: () => Effect.die("unused"),
         getSnapshot: () => Effect.die("unused"),
+        listProjects: () => Effect.die("this test should not list projects"),
         getShellSnapshot: () => Effect.die("unused"),
         getArchivedShellSnapshot: () => Effect.die("unused"),
         getSnapshotSequence: () => Effect.die("unused"),
@@ -206,23 +224,39 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
         getThreadShellById: () => Effect.die("unused"),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
+        getThreadActivitiesPage: () => Effect.die("unused"),
         searchThreads: () => Effect.succeed({ matches: [] }),
       }),
       Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
         readEvents: () => Stream.empty,
+        readThreadEvents: () => Stream.empty,
         dispatch: (command) =>
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
+            Effect.andThen(
+              command.type === "thread.create"
+                ? Ref.update(threadCreateCommands, (commands) => [
+                    ...commands,
+                    command as unknown as Record<string, unknown>,
+                  ])
+                : Effect.void,
+            ),
             Effect.as({ sequence: 1 }),
           ),
         streamDomainEvents: Stream.empty,
         latestSequence: Effect.succeed(0),
       } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
+      // The bootstrap thread is a new thread, so it starts on whatever the
+      // settings say new threads start on — not on the shipped defaults.
+      provideServerSettings({ defaultRuntimeMode: "full-access", defaultInteractionMode: "plan" }),
       Effect.provide(NodeServices.layer),
     );
 
     assert.equal(typeof targets.bootstrapProjectId, "string");
     assert.equal(typeof targets.bootstrapThreadId, "string");
     assert.deepStrictEqual(yield* Ref.get(dispatchCalls), ["project.create", "thread.create"]);
+    const [threadCreate] = yield* Ref.get(threadCreateCommands);
+    assert.strictEqual(threadCreate?.runtimeMode, "full-access");
+    assert.strictEqual(threadCreate?.interactionMode, "plan");
   }),
 );
 
@@ -245,6 +279,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
       Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
         getCommandReadModel: () => Effect.die("unused"),
         getSnapshot: () => Effect.die("unused"),
+        listProjects: () => Effect.die("this test should not list projects"),
         getShellSnapshot: () => Effect.die("unused"),
         getArchivedShellSnapshot: () => Effect.die("unused"),
         getSnapshotSequence: () => Effect.die("unused"),
@@ -257,10 +292,12 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
         getThreadShellById: () => Effect.die("unused"),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
+        getThreadActivitiesPage: () => Effect.die("unused"),
         searchThreads: () => Effect.succeed({ matches: [] }),
       }),
       Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
         readEvents: () => Stream.empty,
+        readThreadEvents: () => Stream.empty,
         dispatch: (command) =>
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
@@ -272,6 +309,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
         ...crypto,
         randomUUIDv4: Effect.fail(uuidError),
       }),
+      provideServerSettings(),
       Effect.flip,
     );
 

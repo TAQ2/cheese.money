@@ -252,10 +252,6 @@ const make = Effect.gen(function* () {
       checkpointRef: targetCheckpointRef,
     });
 
-    // Refresh the workspace entry index so the @-mention file picker
-    // reflects files created or deleted during this turn.
-    yield* workspaceEntries.refresh(input.cwd);
-
     const files = yield* checkpointStore
       .diffCheckpoints({
         cwd: input.cwd,
@@ -290,6 +286,17 @@ const make = Effect.gen(function* () {
           }).pipe(Effect.as([])),
         ),
       );
+
+    // The @-mention file picker's index is refreshed by rescanning the
+    // workspace, which used to happen on every captured turn — including the
+    // many turns where an agent read, answered or ran nothing that touched a
+    // file. The checkpoint diff above already names every path this turn
+    // created, changed or deleted, so an empty diff means there is nothing for
+    // the picker to learn. Asked after the diff rather than before it for that
+    // reason.
+    if (files.length > 0) {
+      yield* workspaceEntries.refresh(input.cwd);
+    }
 
     const assistantMessageId =
       input.assistantMessageId ??

@@ -17,6 +17,11 @@ orchestration layer does not know which one is behind a thread.
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
 
+`RETIRED_PROVIDER_DRIVER_KINDS` is the supported way to withdraw one. A kind listed there keeps
+decoding — `ProviderDriverKind` is an open slug, so settings that still name it parse and the
+instance surfaces as an `"unavailable"` shadow snapshot instead of failing the server — while
+every user-facing surface filters it out. The array is empty today.
+
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
 `apps/server/src/provider/Layers/` (`CodexAdapter.ts`, `ClaudeAdapter.ts`, and so on) and conform to
@@ -139,3 +144,26 @@ when a request opens (approval) or user input is requested, via
 [ingest]: ../../apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 [cmd]: ../../apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 [checkpoint]: ../../apps/server/src/orchestration/Layers/CheckpointReactor.ts
+
+## A turn that says "Working" and never returns
+
+Two mechanisms keep a running turn honest, both in `apps/server`:
+
+- **Startup reconcile** (`orchestration/Layers/StartupSessionReconcile.ts`). No provider process
+  survives the server: a quit, a crash or a kill mid-turn leaves the projection's session
+  `running` with nothing behind it, and the graceful-shutdown finalizer that marks bindings
+  stopped never ran. The reaper skipped exactly these threads _because_ they had an active turn.
+  Before the reactors start, every projected session in `starting` or `running` is set to
+  `interrupted` with a banner that says the reply was lost and to send the message again, and
+  every non-stopped runtime binding is stopped. Resume cursors are merged, never overwritten, so
+  the next message continues the conversation.
+- **Stall watchdog** (`provider/Layers/TurnStallWatchdog.ts`). A model stream can hang with no
+  error and no close — twelve minutes on 2026-09-02, seventy on 2026-08-30 — and the CLI reports
+  nothing. `ProviderService` stamps the time of every runtime event per thread
+  (`provider/providerActivityClock.ts`); once a minute the watchdog looks at every running turn
+  and, if nothing has arrived for five minutes (ten when the last event was a tool or task
+  starting, since a shell command may run that long in silence), dispatches a user turn that
+  says so and asks the agent to continue — the one intervention proven to work, because typing
+  "hello?" resumed every hung reply within seconds. Turns waiting on an approval or a question
+  are never silent and are skipped; a thread that answers no nudge twice is left alone with a
+  warning in the log.

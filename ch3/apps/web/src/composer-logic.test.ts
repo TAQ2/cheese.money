@@ -9,6 +9,7 @@ import {
   shouldInterceptComposerBuiltin,
   isCollapsedCursorAdjacentToInlineToken,
   parseComposerInteractiveBuiltin,
+  resolveBlockedContextReset,
   resolveInterceptedComposerBuiltin,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
@@ -457,6 +458,62 @@ describe("parseComposerInteractiveBuiltin", () => {
     expect(describeInteractiveBuiltin("mcp")).toBeNull();
     expect(describeInteractiveBuiltin("rewind")).toBeNull();
     expect(describeInteractiveBuiltin("resume")?.description).toContain("sidebar");
+  });
+});
+
+describe("resolveBlockedContextReset", () => {
+  it("stops /clear from landing in a turn that is still running", () => {
+    // The reported failure: /clear went out mid-turn, Claude answered with
+    // `conversation_reset` while the assistant was still streaming, and the
+    // turn finished against a conversation that no longer existed.
+    expect(
+      resolveBlockedContextReset({
+        trimmedPrompt: "/clear",
+        hasAttachments: false,
+        isTurnInFlight: true,
+      }),
+    ).toBe("clear");
+  });
+
+  it("lets /clear through once nothing is running", () => {
+    expect(
+      resolveBlockedContextReset({
+        trimmedPrompt: "/clear",
+        hasAttachments: false,
+        isTurnInFlight: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("leaves ordinary mid-turn steering alone", () => {
+    // Sending a message while the agent works is the feature, not the bug.
+    expect(
+      resolveBlockedContextReset({
+        trimmedPrompt: "actually, check the other file first",
+        hasAttachments: false,
+        isTurnInFlight: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("leaves a non-resetting builtin alone", () => {
+    expect(
+      resolveBlockedContextReset({
+        trimmedPrompt: "/mcp",
+        hasAttachments: false,
+        isTurnInFlight: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("treats /clear with something attached as an ordinary message", () => {
+    expect(
+      resolveBlockedContextReset({
+        trimmedPrompt: "/clear this up for me",
+        hasAttachments: true,
+        isTurnInFlight: true,
+      }),
+    ).toBeNull();
   });
 });
 

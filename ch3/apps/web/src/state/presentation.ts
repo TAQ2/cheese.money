@@ -5,12 +5,16 @@ import type { EnvironmentId } from "@ch3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
-import { serverEnvironment } from "./server";
+import { accessScopedServerConfigValueAtom } from "./server";
 
 export const environmentPresentations = createEnvironmentPresentationAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   stateAtom: environmentCatalog.stateAtom,
-  serverConfigValueAtom: serverEnvironment.configValueAtom,
+  // The presentation carries the environment's `serverConfig`, and `ChatView`
+  // reads its provider list straight off it — so this has to be the
+  // tier-narrowed atom, not the raw one, or the composer's model picker is the
+  // one surface the policy misses.
+  serverConfigValueAtom: accessScopedServerConfigValueAtom,
 });
 
 const EMPTY_ENVIRONMENT_PRESENTATION_ATOM = Atom.make<EnvironmentPresentation | null>(null).pipe(

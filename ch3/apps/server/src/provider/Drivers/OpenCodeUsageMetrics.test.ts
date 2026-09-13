@@ -39,12 +39,12 @@ describe("OpenCodeUsageMetrics", () => {
         const metrics = yield* OpenCodeUsageMetrics.OpenCodeUsageMetrics;
         const result = yield* metrics.render(
           { cwd: "/tmp/project" },
-          { usageMetricsCommand: "maple-usage.sh --oneline" },
+          { usageMetricsCommand: "opencode-usage.sh --oneline" },
         );
-        assert.equal(result.text, "Maple $233 / $200 (117%)");
+        assert.equal(result.text, "OpenCode $233 / $200 (117%)");
         assert.equal(result.failed, false);
       }),
-      { run: () => okOutput("Maple $233 / $200 (117%)\n") },
+      { run: () => okOutput("OpenCode $233 / $200 (117%)\n") },
     ),
   );
 

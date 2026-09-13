@@ -15,7 +15,7 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
-  PROVIDER_DISPLAY_NAMES,
+  isRetiredProviderDriverKind,
   type ModelSelection,
   type ProviderDriverKind,
   ProviderInstanceId,
@@ -25,7 +25,7 @@ import {
   type ServerProviderState,
 } from "@ch3tools/contracts";
 
-import { formatProviderDriverKindLabel } from "./providerModels";
+import { getProviderDriverKindLabel } from "./providerModels";
 
 /**
  * Local-only placeholder used while a draft has no provider it can safely
@@ -105,10 +105,6 @@ function humanizeInstanceId(instanceId: ProviderInstanceId): string {
   return words.join(" ");
 }
 
-function driverKindLabel(driverKind: ProviderDriverKind): string {
-  return PROVIDER_DISPLAY_NAMES[driverKind] ?? formatProviderDriverKindLabel(driverKind);
-}
-
 export function normalizeProviderAccentColor(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
@@ -127,7 +123,7 @@ export function normalizeProviderAccentColor(value: string | undefined): string 
  *      distinguishable in tooltips and list labels today.
  *   3. The snapshot's `displayName` (if any) — default instance, trust
  *      whatever label the driver stamped.
- *   4. `driverKindLabel(driverKind)` — nothing else on hand, so use the
+ *   4. `getProviderDriverKindLabel(driverKind)` — nothing else on hand, so use the
  *      canonical brand label from contracts (falling back to a generic
  *      title-case of the kind slug).
  */
@@ -138,7 +134,7 @@ function resolveInstanceDisplayName(
   isDefault: boolean,
 ): string {
   const trimmedSnapshotName = snapshot.displayName?.trim();
-  const kindLabel = driverKindLabel(driverKind);
+  const kindLabel = getProviderDriverKindLabel(driverKind);
   if (trimmedSnapshotName && trimmedSnapshotName !== kindLabel) {
     return trimmedSnapshotName;
   }
@@ -155,31 +151,40 @@ function resolveInstanceDisplayName(
  * from `deriveProviderInstanceConfigMap` — explicit `providerInstances.*`
  * first, synthesized defaults after) so callers that want "default first"
  * should sort with `sortProviderInstanceEntries` below.
+ *
+ * Retired drivers are dropped here rather than at each call site. A settings
+ * file naming `cursor` or `grok` still decodes, so the server still emits an
+ * "unavailable" shadow snapshot for it; every client surface reads its
+ * instances through this function, so filtering once is what keeps a driver
+ * this build cannot run out of the picker, the composer and the sidebar
+ * together.
  */
 export function deriveProviderInstanceEntries(
   providers: ReadonlyArray<ServerProvider>,
 ): ReadonlyArray<ProviderInstanceEntry> {
-  return providers.map((snapshot) => {
-    const instanceId = snapshot.instanceId;
-    const driverKind = snapshot.driver;
-    const defaultId = defaultInstanceIdForDriver(driverKind);
-    const isDefault = instanceId === defaultId;
-    const displayName = resolveInstanceDisplayName(snapshot, instanceId, driverKind, isDefault);
-    return {
-      instanceId,
-      driverKind,
-      displayName,
-      accentColor: normalizeProviderAccentColor(snapshot.accentColor),
-      continuationGroupKey: snapshot.continuation?.groupKey,
-      enabled: snapshot.enabled,
-      installed: snapshot.installed,
-      status: snapshot.status,
-      isDefault,
-      isAvailable: snapshot.availability !== "unavailable",
-      snapshot,
-      models: snapshot.models,
-    } satisfies ProviderInstanceEntry;
-  });
+  return providers
+    .filter((snapshot) => !isRetiredProviderDriverKind(snapshot.driver))
+    .map((snapshot) => {
+      const instanceId = snapshot.instanceId;
+      const driverKind = snapshot.driver;
+      const defaultId = defaultInstanceIdForDriver(driverKind);
+      const isDefault = instanceId === defaultId;
+      const displayName = resolveInstanceDisplayName(snapshot, instanceId, driverKind, isDefault);
+      return {
+        instanceId,
+        driverKind,
+        displayName,
+        accentColor: normalizeProviderAccentColor(snapshot.accentColor),
+        continuationGroupKey: snapshot.continuation?.groupKey,
+        enabled: snapshot.enabled,
+        installed: snapshot.installed,
+        status: snapshot.status,
+        isDefault,
+        isAvailable: snapshot.availability !== "unavailable",
+        snapshot,
+        models: snapshot.models,
+      } satisfies ProviderInstanceEntry;
+    });
 }
 
 /**

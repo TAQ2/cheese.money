@@ -31,6 +31,8 @@ import {
   DispatchResult,
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
+  OrchestrationThreadActivitiesPage,
+  OrchestrationThreadActivitiesPageInput,
   OrchestrationThreadDetailSnapshot,
 } from "./orchestration.ts";
 import {
@@ -479,6 +481,21 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
       success: OrchestrationThreadDetailSnapshot,
       error: EnvironmentOrchestrationThreadSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    // POST rather than GET so the cursor rides the typed payload like every
+    // other orchestration input — this API encodes no query strings.
+    HttpApiEndpoint.post(
+      "threadActivitiesPage",
+      "/api/orchestration/threads/:threadId/activities-page",
+      {
+        headers: OptionalBearerHeaders,
+        params: EnvironmentOrchestrationThreadSnapshotParams,
+        payload: OrchestrationThreadActivitiesPageInput,
+        success: OrchestrationThreadActivitiesPage,
+        error: EnvironmentOrchestrationThreadSnapshotErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
     HttpApiEndpoint.post("dispatch", "/api/orchestration/dispatch", {

@@ -35,7 +35,9 @@ const TelemetryEnvConfig = Config.all({
   posthogHost: Config.string("CH3CODE_POSTHOG_HOST").pipe(
     Config.withDefault("https://us.i.posthog.com"),
   ),
-  enabled: Config.boolean("CH3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
+  // Opt-IN for CH3: the default key above is the upstream vendor's
+  // project, and an internal tool must not report there unasked.
+  enabled: Config.boolean("CH3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(false)),
   flushBatchSize: Config.number("CH3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
   maxBufferedEvents: Config.number("CH3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
     Config.withDefault(1_000),

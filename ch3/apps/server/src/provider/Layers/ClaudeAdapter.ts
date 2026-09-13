@@ -20,6 +20,8 @@ import {
   type SettingSource,
   type SDKUserMessage,
   type ModelUsage,
+  type SpawnOptions as ClaudeSpawnOptions,
+  type SpawnedProcess as ClaudeSpawnedProcess,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@ch3tools/shared/cliArgs";
 import {
@@ -37,9 +39,11 @@ import {
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
+  type ProviderSessionStartInput,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
+  type RuntimeErrorClass,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -63,6 +67,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -72,9 +77,31 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  awaitClaudeKeeper,
+  CLAUDE_KEEPERS_DIRNAME,
+  claudeKeeperPaths,
+  claudeKeeperSocketDir,
+  type ClaudeKeeperMeta,
+  type ClaudeKeeperPaths,
+  type ClaudeKeeperSession,
+  installClaudeKeeperScript,
+  isClaudeKeeperAlive,
+  KeeperProcess,
+  launchClaudeKeeper,
+  listClaudeKeeperThreadIds,
+  readClaudeKeeperMeta,
+  readClaudeKeeperSession,
+  removeClaudeKeeperDir,
+  retireClaudeKeeper,
+  retireStaleClaudeKeeper,
+  writeClaudeKeeperSession,
+} from "../keeper/ClaudeKeeper.ts";
 import { recordClaudeAuthFailure } from "../Drivers/claudeAuthFailureSignal.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { claudeAccountKey, readClaudeAccountIdentity } from "../Drivers/ClaudeAccounts.ts";
+import { recordClaudeRateLimitEvent } from "../Drivers/ClaudeAccountUsage.ts";
+import { defaultClaudeConfigDirPath, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
@@ -97,6 +124,116 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJ
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+
+/**
+ * The last thing the Claude CLI said on stderr before it went away.
+ *
+ * The SDK offers this channel and CH3 was not listening on it, so when a
+ * session died the CLI's own explanation — the only place an "unknown error"
+ * is ever explained — went nowhere. Two engineers lost an afternoon to threads
+ * that answered `Claude runtime stream failed.` and nothing else.
+ *
+ * Bounded on both axes because it is a debugging aid attached to a live
+ * session, not a log file: the last few lines, each cut short. It is written to
+ * the server log on failure and never to an event — see `emitRuntimeError`, and
+ * the test that keeps a cause's own words out of what the thread displays.
+ */
+const STDERR_TAIL_LINES = 12;
+const STDERR_LINE_MAX_LENGTH = 300;
+
+/**
+ * The SDK hands over whatever `stderr` emitted, which is chunks rather than
+ * lines: a stack trace split across two reads used to arrive as two entries and
+ * could fill the whole window with halves of itself. The remainder is carried
+ * until a newline actually shows up.
+ */
+interface ClaudeStderrTail {
+  readonly lines: Array<string>;
+  partial: string;
+}
+
+const appendClaudeStderr = (tail: ClaudeStderrTail, data: string): void => {
+  const pieces = `${tail.partial}${data}`.split("\n");
+  tail.partial = pieces.pop() ?? "";
+  // A partial line that never terminates must not grow without bound either.
+  if (tail.partial.length > STDERR_LINE_MAX_LENGTH) {
+    pieces.push(tail.partial);
+    tail.partial = "";
+  }
+  for (const raw of pieces) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    tail.lines.push(
+      line.length > STDERR_LINE_MAX_LENGTH ? `${line.slice(0, STDERR_LINE_MAX_LENGTH)}…` : line,
+    );
+  }
+  if (tail.lines.length > STDERR_TAIL_LINES) {
+    tail.lines.splice(0, tail.lines.length - STDERR_TAIL_LINES);
+  }
+};
+
+/**
+ * Name the operating system's reason for a stream failure, without repeating a
+ * word of it.
+ *
+ * A thread whose stream failed said "Claude runtime stream failed." and nothing
+ * more, for every cause there is — a renamed project folder among them, which
+ * the person reading it could have fixed in seconds had anything said so. But
+ * the cause chain is not printable: it holds whatever the SDK and Node put
+ * there, up to and including credential material, and one test in this file
+ * exists to keep it out of the events.
+ *
+ * So only the `code` is read, only from a list this module knows, and the
+ * sentence the reader sees is written here rather than anywhere near the error.
+ * Anything unrecognised adds nothing at all.
+ */
+const KNOWN_FAILURE_CODES = {
+  ENOENT: "Something it needed was missing — usually the working directory or the CLI itself.",
+  EACCES: "The operating system refused to start it.",
+  EPERM: "The operating system refused to start it.",
+  ENOTDIR: "Part of its working directory path is not a directory.",
+} as const;
+
+type KnownFailureCode = keyof typeof KNOWN_FAILURE_CODES;
+
+const isKnownFailureCode = (value: unknown): value is KnownFailureCode =>
+  // `Object.hasOwn`, not `in`: `"toString" in KNOWN_FAILURE_CODES` is true, and
+  // an error carrying `code: "toString"` would have put
+  // `function toString() { [native code] }` into a runtime event — through the
+  // one path this module promises only ever carries its own words.
+  typeof value === "string" && Object.hasOwn(KNOWN_FAILURE_CODES, value);
+
+/**
+ * One walk of the cause chain, answering both questions asked of it: the first
+ * errno this module recognises, and every message in the chain for the log.
+ *
+ * They were two walks with the same bound and the same traversal, which is the
+ * shape that drifts — one of them gaining a case the other never learns about.
+ */
+const readFailureChain = (
+  failure: { readonly cause?: unknown } | undefined,
+): { readonly code: KnownFailureCode | null; readonly chain: string } => {
+  const messages: Array<string> = [];
+  let code: KnownFailureCode | null = null;
+  let current: unknown = failure?.cause;
+  for (let depth = 0; current !== null && current !== undefined && depth < 8; depth += 1) {
+    if (typeof current === "string") {
+      messages.push(current);
+      break;
+    }
+    if (typeof current !== "object") {
+      messages.push(String(current));
+      break;
+    }
+    const candidate = (current as { readonly code?: unknown }).code;
+    if (code === null && isKnownFailureCode(candidate)) code = candidate;
+    const message = (current as { readonly message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) messages.push(message);
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return { code, chain: messages.join(" <- ") };
+};
+
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -172,6 +309,8 @@ interface ToolInFlight {
   readonly input: Record<string, unknown>;
   readonly partialInputJson: string;
   readonly lastEmittedInputFingerprint?: string;
+  /** How the call ended, once it has; a late input must echo it, never revive or bless the call. */
+  readonly settledStatus?: "completed" | "failed";
 }
 
 interface ClaudeTaskState {
@@ -191,10 +330,32 @@ interface ClaudeRewindTarget {
 interface ClaudeSessionContext {
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
+  /** The CLI's last words on stderr. Written to the log on failure, never to an event. */
+  readonly stderrTail: ClaudeStderrTail;
   readonly query: ClaudeQueryRuntime;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
+  /**
+   * Mode the session runs in outside a plan turn, and the one a plan turn is
+   * restored to. Not always the mode we asked for at spawn: `approval-required`
+   * sends none and the CLI resolves `default` itself, so this holds what the
+   * session is actually in rather than what the request said.
+   */
   readonly basePermissionMode: PermissionMode | undefined;
+  /**
+   * Permission mode currently in force on the live session, seeded with the one
+   * the CLI actually starts in — see `basePermissionMode`.
+   *
+   * Tracked for the same reason as `currentApiModelId` and
+   * `currentOutputStyle`, and it is the one that was missing: a turn used to
+   * push the mode unconditionally, so the first turn of every cold start spent
+   * a control request telling a brand-new CLI the mode it had just been
+   * spawned with. That request is the first thing in a turn that waits on the
+   * CLI, so a process that dies during spawn rejects it — and the turn died as
+   * `turn/setPermissionMode failed` with the user's message dropped, every
+   * time, on cold starts only.
+   */
+  currentPermissionMode: PermissionMode | undefined;
   currentApiModelId: string | undefined;
   /**
    * Response style currently in force on the live session. Tracked so a turn
@@ -210,6 +371,24 @@ interface ClaudeSessionContext {
     items: Array<unknown>;
   }>;
   readonly inFlightTools: Map<number, ToolInFlight>;
+  /**
+   * Tool calls this turn has already reported completed, by tool-use id. The
+   * CLI can deliver a tool's full input in the complete `assistant` message
+   * long after the tool ran — the streamed `input_json_delta`s for a
+   * background Agent launch were cut off mid-prompt and the result arrived
+   * thirty seconds before the message — so a late input still has somewhere
+   * to land. Cleared when the turn ends.
+   */
+  readonly settledTools: Map<string, ToolInFlight>;
+  /**
+   * Background tasks this CLI process has started and not yet reported
+   * settled, by task id, with the description they were started under. A
+   * background agent lives inside the CLI process; when that process goes —
+   * a stop, a restart between turns, a crash — nothing can ever report the
+   * task again, and its roster row would sit "running" for the hour the
+   * abandonment heuristic waits. So the session closes them on its way out.
+   */
+  readonly openBackgroundTasks: Map<string, string>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
   /**
    * Prompt echoes seen by this session process, oldest first — the rewind
@@ -223,7 +402,43 @@ interface ClaudeSessionContext {
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
+  /**
+   * Which ACCOUNT's usage cache this session's `rate_limit_event`s belong in
+   * (`email|organization`), or undefined when the config directory names
+   * nobody and the events must be dropped.
+   *
+   * Resolved once, at session start, from the very `CLAUDE_CONFIG_DIR` this
+   * process was spawned with — not from settings read later. Switching
+   * accounts repoints the provider instance and spawns a new process, so the
+   * live session keeps drawing on the account it started under, and reading
+   * the current setting at event time would file a running session's numbers
+   * under whichever account the panel had just selected.
+   */
+  readonly usageAccountKey: string | undefined;
+  /** So an unresolvable config directory is reported once, not once a minute. */
+  warnedUsageAccountUnresolved: boolean;
   stopped: boolean;
+  /**
+   * The keeper holding this session's CLI, when the session runs behind one.
+   * Acknowledged per processed message; detached rather than killed when the
+   * server shuts down. Undefined when the query was created through the test
+   * seam, which has no process at all.
+   */
+  keeper: KeeperProcess | undefined;
+  readonly keeperPaths: ClaudeKeeperPaths | undefined;
+  /**
+   * The MCP credential this session was reattached with, if it was.
+   *
+   * `McpProviderSession` is a process-local map, empty at boot, and the
+   * adapter rewrites the session file before `ProviderService` has put the
+   * credential back into it. Without somewhere to remember what was read off
+   * disk, that rewrite replaces a live credential with null, and the restart
+   * after this one reattaches with nothing to adopt — every CH3 MCP tool
+   * call from that thread then answers 401.
+   */
+  reattachedMcpSession?: ClaudeKeeperSession["mcpSession"];
+  /** What `startSession` was called with, for the session file a reattach reads. */
+  readonly startInput: ProviderSessionStartInput;
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
@@ -270,6 +485,12 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
 export interface ClaudeAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  /**
+   * Run every CLI behind a keeper so it outlives the server. On by default
+   * for a real query; off when `createQuery` is supplied, because a fake
+   * query has no process to keep.
+   */
+  readonly keepers?: boolean;
   readonly createQuery?: (input: {
     readonly prompt: AsyncIterable<SDKUserMessage>;
     readonly options: ClaudeQueryOptions;
@@ -689,14 +910,18 @@ function claudeUserMessagePreview(content: unknown): string | null {
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
   const normalized = toolName.toLowerCase();
-  if (normalized.includes("agent")) {
-    return "collab_agent_tool_call";
-  }
+  // Named, not matched on the substring "agent". That substring also catches
+  // `ListAgents` — a read-only listing call — and every MCP tool whose name
+  // happens to contain the word, and this classification now drives the
+  // sidebar's headline status: a thread that merely listed the subagents
+  // available to it reported that subagents were holding its turn.
   if (
     normalized === "task" ||
     normalized === "agent" ||
     normalized.includes("subagent") ||
-    normalized.includes("sub-agent")
+    normalized.includes("sub-agent") ||
+    normalized.includes("agent_tool") ||
+    normalized.endsWith("__agent")
   ) {
     return "collab_agent_tool_call";
   }
@@ -1441,6 +1666,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     claudeSettings.binaryPath,
     claudeEnvironment,
   );
+  const keepersEnabled = options?.keepers ?? options?.createQuery === undefined;
+  const keepersDir = path.join(serverConfig.stateDir, CLAUDE_KEEPERS_DIRNAME);
+  const keeperScriptPath = keepersEnabled
+    ? yield* installClaudeKeeperScript(serverConfig.claudeShimDir)
+    : undefined;
+  const adapterRuntimeContext = yield* Effect.context<never>();
+  const runForkOnAdapter = Effect.runForkWith(adapterRuntimeContext);
+  /** The config directory every session on this adapter runs under. */
+  const claudeConfigDir =
+    claudeEnvironment["CLAUDE_CONFIG_DIR"] ?? (yield* defaultClaudeConfigDirPath());
+  const defaultClaudeConfigDir = yield* defaultClaudeConfigDirPath();
+
+  /**
+   * Who this adapter's config directory is signed in as, as a usage cache key.
+   *
+   * The CLI keeps its identity beside the default home and inside a custom
+   * `CLAUDE_CONFIG_DIR` — the same distinction `probeClaudeProfile` draws, and
+   * getting it backwards reads the wrong account's file. Undefined when the
+   * file names nobody: the caller must then DROP the reading rather than
+   * inventing a key, because filing a busy account's numbers under another
+   * account produces a panel that lies about which account has capacity left.
+   */
+  const resolveUsageAccountKey = Effect.fn("resolveUsageAccountKey")(function* () {
+    const identityPath =
+      claudeConfigDir === defaultClaudeConfigDir
+        ? path.join(path.dirname(defaultClaudeConfigDir), ".claude.json")
+        : path.join(claudeConfigDir, ".claude.json");
+    const raw = yield* fileSystem.readFileString(identityPath).pipe(Effect.orElseSucceed(() => ""));
+    const identity = readClaudeAccountIdentity(raw);
+    return (identity.email ?? "").trim().length > 0 ? claudeAccountKey(identity) : undefined;
+  });
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -1463,6 +1719,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }) as ClaudeQueryRuntime);
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
+
+  /**
+   * Which of the two reasons this adapter's scope is closing.
+   *
+   * `ProviderService`'s own finalizer calls `detachAll()` on every adapter
+   * before the registry's scopes close, so a shutdown always arrives here
+   * having asked for it — and nothing else ever calls it. An instance rebuild
+   * closes exactly one scope and asks for nothing, which is how the finalizer
+   * below tells "the server is going away, keep the CLIs" from "these
+   * settings are gone, so are the processes running under them".
+   *
+   * The distinction is not cosmetic. A rebuild happens *because* the config
+   * changed — a Claude account switch moves `homePath` — and a CLI kept alive
+   * across it would answer forever from the account the user just moved off.
+   */
+  let detachRequested = false;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -1781,6 +2053,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     message: string,
     cause?: unknown,
+    errorClass: RuntimeErrorClass = "provider_error",
   ) {
     if (cause !== undefined) {
       void cause;
@@ -1796,7 +2069,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(turnState ? { turnId: asCanonicalTurnId(turnState.turnId) } : {}),
       payload: {
         message,
-        class: "provider_error",
+        class: errorClass,
         ...(cause !== undefined ? { detail: cause } : {}),
       },
       providerRefs: nativeProviderRefs(context),
@@ -2110,6 +2383,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     // Clear any remaining stale entries (e.g. from interrupted content blocks)
     context.inFlightTools.clear();
+    context.settledTools.clear();
 
     for (const block of turnState.assistantTextBlockOrder) {
       yield* completeAssistantTextBlock(context, block, {
@@ -2159,6 +2433,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       updatedAt,
       ...(status === "failed" && errorMessage ? { lastError: errorMessage } : {}),
     };
+    yield* persistKeeperSession(context);
     yield* updateResumeCursor(context);
   });
 
@@ -2566,8 +2841,74 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
       }
 
+      // Kept for the late assistant message that may still carry this call's
+      // full input, with the status it really ended in. The streamed JSON is
+      // dropped: it was only ever a means to the input, and a turn that
+      // writes two hundred files would otherwise hold every one of them here.
+      context.settledTools.set(tool.itemId, {
+        ...tool,
+        partialInputJson: "",
+        settledStatus: itemStatus,
+      });
       context.inFlightTools.delete(index);
     }
+  });
+
+  /**
+   * The complete `assistant` message carries every tool call's full input,
+   * and it is the only place that input is guaranteed to appear: the streamed
+   * `input_json_delta`s can stop short (a background Agent launch lost the
+   * tail of its prompt, and with it the `model` it named), and by the time
+   * the message arrives the tool may already be reported completed. Emit one
+   * `item.updated` whenever the message says more than the stream did, with
+   * the status the tool actually has, so a late input never revives a
+   * finished call. A tool this session never started — a subagent's own tool
+   * calls arrive as assistant messages too — is not ours to update.
+   */
+  const reconcileToolInputFromAssistantMessage = Effect.fn(
+    "reconcileToolInputFromAssistantMessage",
+  )(function* (
+    context: ClaudeSessionContext,
+    toolUse: { readonly id?: unknown; readonly name?: unknown; readonly input?: unknown },
+    message: SDKMessage,
+  ) {
+    if (typeof toolUse.id !== "string" || typeof toolUse.input !== "object") return;
+    const input = toolUse.input as Record<string, unknown> | null;
+    if (input === null || Array.isArray(input) || Object.keys(input).length === 0) return;
+    const inFlight = Array.from(context.inFlightTools.entries()).find(
+      ([, tool]) => tool.itemId === toolUse.id,
+    );
+    const settled = inFlight === undefined ? context.settledTools.get(toolUse.id) : undefined;
+    const tool = inFlight?.[1] ?? settled;
+    if (tool === undefined) return;
+    const fingerprint = toolInputFingerprint(input);
+    if (fingerprint === undefined || fingerprint === tool.lastEmittedInputFingerprint) return;
+    const detail = summarizeToolRequest(tool.toolName, input);
+    const next: ToolInFlight = { ...tool, input, detail, lastEmittedInputFingerprint: fingerprint };
+    if (inFlight !== undefined) {
+      context.inFlightTools.set(inFlight[0], next);
+    } else {
+      context.settledTools.set(toolUse.id, next);
+    }
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEvent({
+      type: "item.updated",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+      itemId: asRuntimeItemId(next.itemId),
+      payload: {
+        itemType: next.itemType,
+        status: inFlight !== undefined ? "inProgress" : (next.settledStatus ?? "completed"),
+        title: next.title,
+        detail,
+        data: { toolName: next.toolName, input },
+      },
+      providerRefs: nativeProviderRefs(context, { providerItemId: next.itemId }),
+      raw: { source: "claude.sdk.message", method: "claude/assistant", payload: message },
+    });
   });
 
   const handleAssistantMessage = Effect.fn("handleAssistantMessage")(function* (
@@ -2632,20 +2973,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           name?: unknown;
           input?: unknown;
         };
-        if (toolUse.type !== "tool_use" || toolUse.name !== "ExitPlanMode") {
+        if (toolUse.type !== "tool_use") {
           continue;
         }
-        const planMarkdown = extractExitPlanModePlan(toolUse.input);
-        if (!planMarkdown) {
+        if (toolUse.name === "ExitPlanMode") {
+          const planMarkdown = extractExitPlanModePlan(toolUse.input);
+          if (planMarkdown) {
+            yield* emitProposedPlanCompleted(context, {
+              planMarkdown,
+              toolUseId: typeof toolUse.id === "string" ? toolUse.id : undefined,
+              rawSource: "claude.sdk.message",
+              rawMethod: "claude/assistant",
+              rawPayload: message,
+            });
+          }
           continue;
         }
-        yield* emitProposedPlanCompleted(context, {
-          planMarkdown,
-          toolUseId: typeof toolUse.id === "string" ? toolUse.id : undefined,
-          rawSource: "claude.sdk.message",
-          rawMethod: "claude/assistant",
-          rawPayload: message,
-        });
+        yield* reconcileToolInputFromAssistantMessage(context, toolUse, message);
       }
     }
 
@@ -2670,15 +3014,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const errorMessage = message.subtype === "success" ? undefined : message.errors[0];
 
     if (status === "failed") {
+      let isAuthFailure = false;
       if (errorMessage) {
         // The one reliable sighting of a dead sign-in: the CLI's own turn
         // failure. Recorded for the automatic account hand-over, which has no
         // other way to see it — the credential stores all look plausible from
         // outside even when the refresh token behind them is revoked.
         const nowMs = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
-        recordClaudeAuthFailure(errorMessage, nowMs);
+        // Its return value IS the predicate — it records only when the message
+        // is an auth failure. Asking the same regex a second question it has
+        // just answered is how the two answers start disagreeing.
+        isAuthFailure = recordClaudeAuthFailure(errorMessage, nowMs);
       }
-      yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
+      yield* emitRuntimeError(
+        context,
+        errorMessage ?? "Claude turn failed.",
+        undefined,
+        isAuthFailure ? "auth_error" : "provider_error",
+      );
     }
 
     yield* completeTurn(context, status, errorMessage, message);
@@ -2800,6 +3153,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       case "task_started":
+        context.openBackgroundTasks.set(message.task_id, message.description);
         yield* offerRuntimeEvent({
           ...base,
           type: "task.started",
@@ -2831,43 +3185,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         return;
-      // Task state patch (status/backgrounded/end_time).
+      // Task state patch (status/backgrounded/end_time). Consumed without
+      // emitting, and NOT because the patch is uninteresting — because
+      // `task_notification` already reports the same outcome, with the summary
+      // and usage totals the patch lacks. The SDK says so itself: `stopTask`
+      // is documented as "a task_notification with status 'stopped' will be
+      // emitted", and `backgroundTasks` as "the task keeps running and emits a
+      // task_notification when it settles". Mapping a terminal patch here as
+      // well produced TWO `task.completed` events for one task — ingestion
+      // keys activities on eventId, not taskId, so both survived into the work
+      // log as duplicate rows, the second stripped of its usage.
       //
-      // A terminal status here IS the task ending, and it must be reported as
-      // such: `task_notification` was the only completion signal, and it never
-      // arrives for a task that is backgrounded, killed, or abandoned when the
-      // session ends. Dropping this patch left those tasks "started" forever —
-      // the tasks panel accumulated entries whose timers ran for days, one of
-      // them for over two weeks, because nothing else ever closed them.
-      //
-      // Non-terminal patches (pending/running/paused, a description edit, a
-      // backgrounding flag) are still ignored: they change how a task is
-      // running, not whether it is.
-      case "task_updated": {
-        const patchedStatus = message.patch?.status;
-        const terminalStatus =
-          patchedStatus === "completed"
-            ? ("completed" as const)
-            : patchedStatus === "failed"
-              ? ("failed" as const)
-              : // "killed" is the CLI's word for a task that was stopped from
-                // outside; the runtime contract calls that "stopped".
-                patchedStatus === "killed"
-                ? ("stopped" as const)
-                : null;
-        if (terminalStatus === null) return;
-        yield* offerRuntimeEvent({
-          ...base,
-          type: "task.completed",
-          payload: {
-            taskId: RuntimeTaskId.make(message.task_id),
-            status: terminalStatus,
-            ...(message.patch?.error ? { summary: message.patch.error } : {}),
-          },
-        });
+      // Tasks stranded by the SERVER dying mid-flight are the real orphan
+      // source, and no in-process signal can close those: the process that
+      // would have reported them is gone. `TaskReconciler` closes them on the
+      // next boot instead.
+      case "task_updated":
         return;
-      }
       case "task_notification":
+        context.openBackgroundTasks.delete(message.task_id);
         yield* emitThreadTokenUsage(
           context,
           normalizeClaudeTaskProgressTokenUsage(message.usage, context),
@@ -3058,6 +3394,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (message.type === "rate_limit_event") {
+      // The second transport for the plan-usage numbers, and the only one that
+      // works on a busy account: the 429 bucket is per account, so the account
+      // running the agents is exactly the one whose HTTP poll is refused. The
+      // figures here are Anthropic's own, computed server-side and sent down
+      // the stream a turn is already using, so folding them into the cache
+      // costs no request and cannot earn a penalty.
+      if (context.usageAccountKey === undefined) {
+        // Once per session, not once per event. A config directory that names
+        // nobody is the ordinary state of an API-key or Bedrock setup, not an
+        // incident, and these arrive about once a minute for as long as the
+        // session lives — logged per event it is noise that buries the reads
+        // that did go wrong.
+        if (!context.warnedUsageAccountUnresolved) {
+          context.warnedUsageAccountUnresolved = true;
+          yield* Effect.logWarning("claude.rate-limit-event.account-unresolved", {
+            threadId: context.session.threadId,
+            configDir: claudeConfigDir,
+          });
+        }
+      } else {
+        yield* recordClaudeRateLimitEvent({
+          accountKey: context.usageAccountKey,
+          message,
+        }).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
+      }
       yield* offerRuntimeEvent({
         ...base,
         type: "account.rate-limits.updated",
@@ -3132,6 +3493,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       Stream.takeWhile(() => !context.stopped),
       Stream.runForEach((message) =>
         handleSdkMessage(context, message).pipe(
+          // Processed, so the keeper may forget it: a reattach replays only
+          // what comes after the last acknowledged message.
+          Effect.tap(() =>
+            Effect.sync(() => {
+              context.keeper?.ackMessage(
+                "uuid" in message && typeof message.uuid === "string" ? message.uuid : undefined,
+              );
+            }),
+          ),
           Effect.mapError(
             (cause) =>
               new ProviderAdapterProcessError({
@@ -3162,10 +3532,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const failures = exit.cause.reasons.flatMap((reason) =>
           Cause.isFailReason(reason) ? [reason.error] : [],
         );
-        const message = failures[0]?.detail ?? "Claude runtime stream failed.";
+        const detail = failures[0]?.detail ?? "Claude runtime stream failed.";
+        // The reason, when the operating system gave one this module knows how
+        // to say out loud. Never the cause's own words — see
+        // `failureCauseCode`.
+        const { code, chain } = readFailureChain(failures[0]);
+        const message = code === null ? detail : `${detail} ${KNOWN_FAILURE_CODES[code]}`;
+        // The event carries a sentence this module wrote; the log carries what
+        // actually happened. Both exist because a thread that only ever said
+        // "Claude runtime stream failed." left nobody — not the person, not an
+        // engineer reading the logs afterwards — able to say why.
+        yield* Effect.logWarning("Claude runtime stream failed").pipe(
+          Effect.annotateLogs({
+            threadId: context.session.threadId,
+            resumeSessionId: context.resumeSessionId ?? "",
+            cwd: context.session.cwd ?? "",
+            causeCode: code ?? "",
+            causeChain: chain,
+            stderrTail: context.stderrTail.lines,
+          }),
+        );
         yield* emitRuntimeError(context, message, {
           failureCount: failures.length,
           failureTags: failures.map((failure) => failure._tag),
+          ...(code === null ? {} : { causeCode: code }),
         });
         yield* completeTurn(context, "failed", message);
       }
@@ -3178,6 +3568,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
+  /**
+   * Let go of a session's stream fiber without waiting for it.
+   *
+   * Awaiting the interrupt is what deadlocked a provider-instance rebuild.
+   * `Stream.fromAsyncIterable` closes its scope by calling the SDK
+   * generator's `return()`, finalizers run uninterruptibly, and a generator
+   * parked inside an `await` on a transport that has gone quiet can never be
+   * returned — so the interrupt, the finalizer, the scope close and the
+   * registry's whole reconcile all stopped there, holding the rebuild latch
+   * shut until a restart. The transport settling is what actually ends the
+   * fiber (see `KeeperProcess.detach`); signalling rather than awaiting is
+   * what makes teardown finish whatever the transport does.
+   */
+  const releaseStreamFiber = (context: ClaudeSessionContext): Effect.Effect<void> =>
+    Effect.sync(() => {
+      const streamFiber = context.streamFiber;
+      context.streamFiber = undefined;
+      if (streamFiber && streamFiber.pollUnsafe() === undefined) {
+        streamFiber.interruptUnsafe();
+      }
+    });
+
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
     context: ClaudeSessionContext,
     options?: { readonly emitExitEvent?: boolean },
@@ -3185,6 +3597,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (context.stopped) return;
 
     context.stopped = true;
+
+    // Same vocabulary as the boot-time `TaskReconciler`: the process holding
+    // the task went away, which is a stop from outside — not a completion
+    // nobody witnessed, not a failure nobody reported.
+    for (const [taskId] of context.openBackgroundTasks) {
+      const stamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent({
+        type: "task.completed",
+        eventId: stamp.eventId,
+        provider: PROVIDER,
+        createdAt: stamp.createdAt,
+        threadId: context.session.threadId,
+        ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+        payload: {
+          taskId: RuntimeTaskId.make(taskId),
+          status: "stopped",
+          summary: "Stopped when the Claude session ended.",
+        },
+        providerRefs: nativeProviderRefs(context),
+      });
+    }
+    context.openBackgroundTasks.clear();
 
     for (const [requestId, pending] of context.pendingApprovals) {
       yield* Deferred.succeed(pending.decision, "cancel");
@@ -3212,11 +3646,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     yield* Queue.shutdown(context.promptQueue);
 
-    const streamFiber = context.streamFiber;
-    context.streamFiber = undefined;
-    if (streamFiber && streamFiber.pollUnsafe() === undefined) {
-      yield* Fiber.interrupt(streamFiber);
-    }
+    yield* releaseStreamFiber(context);
 
     yield* Effect.try({
       try: () => context.query.close(),
@@ -3237,6 +3667,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }),
       ),
     );
+
+    // An explicit stop: the keeper is told to kill and, once the CLI is gone,
+    // its directory goes too. A detached keeper is not touched here at all.
+    const keeper = context.keeper;
+    const keeperPaths = context.keeperPaths;
+    if (keeper !== undefined && keeperPaths !== undefined && !keeper.isDetached) {
+      const tidy = () => {
+        runForkOnAdapter(
+          removeClaudeKeeperDir(keeperPaths.dir).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+          ),
+        );
+      };
+      if (keeper.killed) tidy();
+      else {
+        keeper.once("exit", tidy);
+        // The SDK's own close eventually signals the process, but only after
+        // its grace window and only through a timer it does not own here. An
+        // instance rebuild cannot wait on that: the settings these CLIs run
+        // under are already gone. `kill` is a no-op on a detached keeper, so
+        // the shutdown path is unaffected.
+        keeper.kill("SIGTERM");
+      }
+    }
 
     const updatedAt = yield* nowIso;
     context.session = {
@@ -3288,8 +3742,102 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return Effect.succeed(context);
   };
 
-  const startSession: ClaudeAdapterShape["startSession"] = Effect.fn("startSession")(
-    function* (input) {
+  /**
+   * The session file beside the keeper: the start input with the cursor the
+   * session actually runs on, the turn in flight, and the MCP credential the
+   * CLI was given. Rewritten whenever the turn changes, so a reattach knows
+   * which turn it is continuing.
+   */
+  const persistKeeperSession = Effect.fn("persistKeeperSession")(function* (
+    context: ClaudeSessionContext,
+  ) {
+    if (context.keeperPaths === undefined) return;
+    const savedAt = yield* nowIso;
+    const mcp =
+      McpProviderSession.readMcpProviderSession(context.session.threadId) ??
+      context.reattachedMcpSession ??
+      undefined;
+    yield* writeClaudeKeeperSession(context.keeperPaths.sessionPath, {
+      threadId: context.session.threadId,
+      startInput: {
+        ...context.startInput,
+        ...(context.session.resumeCursor !== undefined
+          ? { resumeCursor: context.session.resumeCursor }
+          : {}),
+      },
+      activeTurnId:
+        context.turnState && context.turnState.synthetic !== true ? context.turnState.turnId : null,
+      mcpSession: mcp ?? null,
+      savedAt,
+    }).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
+  });
+
+  /** The three events a fresh session announces itself with. Not a reattached one. */
+  const emitSessionStartedEvents = Effect.fn("emitSessionStartedEvents")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly apiModelId: string | undefined;
+    readonly effectiveEffort: string | undefined;
+    readonly permissionMode: PermissionMode | undefined;
+    readonly fastMode: boolean;
+    readonly resumeCursor: unknown;
+    readonly cwd: string | undefined;
+  }) {
+    const { threadId, apiModelId, effectiveEffort, permissionMode, fastMode } = input;
+    const sessionStartedStamp = yield* makeEventStamp();
+    yield* offerRuntimeEvent({
+      type: "session.started",
+      eventId: sessionStartedStamp.eventId,
+      provider: PROVIDER,
+      createdAt: sessionStartedStamp.createdAt,
+      threadId,
+      payload: input.resumeCursor !== undefined ? { resume: input.resumeCursor } : {},
+      providerRefs: {},
+    });
+
+    const configuredStamp = yield* makeEventStamp();
+    yield* offerRuntimeEvent({
+      type: "session.configured",
+      eventId: configuredStamp.eventId,
+      provider: PROVIDER,
+      createdAt: configuredStamp.createdAt,
+      threadId,
+      payload: {
+        config: {
+          ...(apiModelId ? { model: apiModelId } : {}),
+          ...(input.cwd ? { cwd: input.cwd } : {}),
+          ...(effectiveEffort ? { effort: effectiveEffort } : {}),
+          ...(permissionMode ? { permissionMode } : {}),
+          ...(fastMode ? { fastMode: true } : {}),
+        },
+      },
+      providerRefs: {},
+    });
+
+    const readyStamp = yield* makeEventStamp();
+    yield* offerRuntimeEvent({
+      type: "session.state.changed",
+      eventId: readyStamp.eventId,
+      provider: PROVIDER,
+      createdAt: readyStamp.createdAt,
+      threadId,
+      payload: {
+        state: "ready",
+      },
+      providerRefs: {},
+    });
+  });
+
+  /**
+   * Start a session, or — with `reattach` — rebuild one around a CLI a keeper
+   * kept through the restart. A reattach connects instead of spawning, seeds
+   * the turn that was running, and emits no session events: the projection
+   * already says what the session is, and it is still true.
+   */
+  const startSessionInternal = Effect.fn("startSession")(function* (
+    input: ProviderSessionStartInput,
+    reattach?: { readonly meta: ClaudeKeeperMeta; readonly kept: ClaudeKeeperSession },
+  ) {
+    {
       if (input.provider !== undefined && input.provider !== PROVIDER) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,
@@ -3331,6 +3879,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const runPromise = Effect.runPromiseWith(runtimeContext);
 
       const promptQueue = yield* Queue.unbounded<PromptQueueItem>();
+      // Collected from the moment the process starts, because the failures
+      // worth explaining happen before the first message arrives.
+      const stderrTail: ClaudeStderrTail = { lines: [], partial: "" };
       const prompt = Stream.fromQueue(promptQueue).pipe(
         Stream.filter((item) => item.type === "message"),
         Stream.map((item) => item.message),
@@ -3343,6 +3894,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
       const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
       const inFlightTools = new Map<number, ToolInFlight>();
+      const settledTools = new Map<string, ToolInFlight>();
+      const openBackgroundTasks = new Map<string, string>();
       const claudeTasks = new Map<string, ClaudeTaskState>();
 
       const contextRef = yield* Ref.make<ClaudeSessionContext | undefined>(undefined);
@@ -3667,24 +4220,112 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "full-access": "bypassPermissions",
       };
       const permissionMode = runtimeModeToPermission[input.runtimeMode];
+      /**
+       * The mode the session is actually in, which is not always the one we
+       * asked for. `approval-required` has no entry above, so no
+       * `permissionMode` is sent at spawn and the CLI resolves its own —
+       * `default`. Tracking that as `undefined` made the first turn announce
+       * `default` to a session already in it, which is the redundant cold-start
+       * request the guard in `sendTurn` exists to remove.
+       */
+      const effectivePermissionMode = permissionMode ?? ("default" as PermissionMode);
       // Absent means "let the CLI resolve its own style from the user's
       // settings files"; only an explicit pick is forced onto the session.
+      //
+      // The shipped default (Caveman) is applied by the client, which knows
+      // which styles the CLI actually advertises — see `resolveOutputStyleChipState`.
+      // Defaulting it here instead would mean naming a style that may not exist
+      // on this machine, and an unknown style name is a broken session rather
+      // than a missing preference.
       const outputStyle = getOutputStyleSelection(modelSelection?.options);
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
-        ...(ultracode ? { ultracode: true } : {}),
         ...(outputStyle ? { outputStyle } : {}),
+        // Measured as changing nothing here today, and sent anyway. The CLI
+        // decides the Artifact tool by entrypoint, and an SDK session does not
+        // load it — a turn with this and a turn without it cost the same token
+        // for token. It is sent because the switch in Settings says the tool is
+        // off, and a switch that governs the terminal but quietly exempts the
+        // agent is the kind of half-truth this repo pays for later. `--settings`
+        // is also the layer the CLI lets say no: off in managed, `--settings`
+        // or user settings wins, so this cannot be undone by a stale file
+        // somebody forgot in their home directory.
+        ...(claudeSettings.artifactToolEnabled === true ? {} : { enableArtifact: false }),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      const keeperPaths =
+        keepersEnabled && keeperScriptPath !== undefined
+          ? claudeKeeperPaths(keepersDir, threadId)
+          : undefined;
+      if (keeperPaths !== undefined && !reattach) {
+        // A keeper may still be alive for this thread: one an earlier server
+        // could not reattach to. The fresh keeper replaces it, and the old one
+        // must not stay up running a CLI for nobody.
+        const retired = yield* retireStaleClaudeKeeper(keeperPaths).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        );
+        if (Option.isSome(retired) && retired.value.outcome !== "gone") {
+          yield* Effect.logInfo("claude.keeper.replaced", { threadId, ...retired.value });
+        }
+      }
+      let keeperHandle: KeeperProcess | undefined;
+      // The SDK's spawn hook is synchronous: it wants a process object now.
+      // A keeper is launched (or, on reattach, connected to) and its socket
+      // is awaited in the background; the SDK's first writes wait in order.
+      const spawnThroughKeeper =
+        keeperPaths !== undefined && keeperScriptPath !== undefined
+          ? (spawnOptions: ClaudeSpawnOptions): ClaudeSpawnedProcess => {
+              const keeper = reattach
+                ? (() => {
+                    const connected = new KeeperProcess(
+                      reattach.meta.socketPath,
+                      reattach.meta.lastAck,
+                    );
+                    connected.connect();
+                    return connected;
+                  })()
+                : launchClaudeKeeper({
+                    keepersDir,
+                    tmpDir: claudeKeeperSocketDir(),
+                    scriptPath: keeperScriptPath,
+                    nodePath: process.execPath,
+                    threadId,
+                    command: spawnOptions.command,
+                    args: spawnOptions.args,
+                    cwd: spawnOptions.cwd,
+                    env: spawnOptions.env,
+                  });
+              keeperHandle = keeper;
+              if (!reattach) {
+                runFork(
+                  awaitClaudeKeeper(keeper).pipe(
+                    Effect.catch((error) =>
+                      Effect.logWarning("claude.keeper.start-failed", {
+                        threadId,
+                        detail: error.detail,
+                      }),
+                    ),
+                  ),
+                );
+              }
+              // The SDK's forwarded abort fires after its graceful close and
+              // grace window: a real stop. A detached keeper ignores it.
+              spawnOptions.signal.addEventListener("abort", () => keeper.kill("SIGTERM"), {
+                once: true,
+              });
+              return keeper;
+            }
+          : undefined;
       const queryOptions: ClaudeQueryOptions = {
+        // The SDK's own channel for whatever the CLI writes to stderr. Kept in
+        // memory, bounded, and read only when something fails.
+        stderr: (data) => appendClaudeStderr(stderrTail, data),
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
         systemPrompt: { type: "preset", preset: "claude_code" },
         settingSources: [...CLAUDE_SETTING_SOURCES],
-        // `ultracode` is a Claude Code setting, not an API effort level. It is
-        // normalized to `xhigh` above and paired with `settings.ultracode`.
         ...(effectiveEffort
           ? {
               effort: effectiveEffort as unknown as NonNullable<ClaudeQueryOptions["effort"]>,
@@ -3703,6 +4344,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         enableFileCheckpointing: true,
         canUseTool,
         env: claudeEnvironment,
+        ...(spawnThroughKeeper ? { spawnClaudeCodeProcess: spawnThroughKeeper } : {}),
         ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
@@ -3714,6 +4356,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   headers: {
                     Authorization: mcpSession.authorizationHeader,
                   },
+                  // Without this the CLI gives every CH3 tool call 60 s and
+                  // then throws the answer away; `spawn_model_agent` waits on
+                  // a child model for minutes by design. See
+                  // `CH3CODE_MCP_TOOL_TIMEOUT_MS`.
+                  timeout: McpProviderSession.CH3CODE_MCP_TOOL_TIMEOUT_MS,
                 },
               },
             }
@@ -3760,10 +4407,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }),
       });
 
+      // Resolved before the session literal so the session can carry it: this
+      // is who the process that has just been spawned is signed in as, and a
+      // caller comparing it against the selected account is how a thread
+      // answering from an account the user switched away from becomes visible
+      // rather than silent.
+      const usageAccountKey = yield* resolveUsageAccountKey();
+
       const session: ProviderSession = {
         threadId,
         provider: PROVIDER,
         providerInstanceId: boundInstanceId,
+        ...(usageAccountKey ? { accountKey: usageAccountKey } : {}),
         status: "ready",
         runtimeMode: input.runtimeMode,
         ...(input.cwd ? { cwd: input.cwd } : {}),
@@ -3782,10 +4437,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const context: ClaudeSessionContext = {
         session,
         promptQueue,
+        stderrTail,
         query: queryRuntime,
         streamFiber: undefined,
         startedAt,
-        basePermissionMode: permissionMode,
+        basePermissionMode: effectivePermissionMode,
+        currentPermissionMode: effectivePermissionMode,
         currentApiModelId: apiModelId,
         currentOutputStyle: outputStyle,
         resumeSessionId: sessionId,
@@ -3793,6 +4450,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         pendingUserInputs,
         turns: [],
         inFlightTools,
+        settledTools,
+        openBackgroundTasks,
         claudeTasks,
         rewindTargets: [],
         turnState: undefined,
@@ -3800,54 +4459,53 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
-        lastThreadStartedId: undefined,
+        // A reattached session already announced its CLI conversation once;
+        // announcing it again would restart a thread that never stopped.
+        lastThreadStartedId: reattach ? sessionId : undefined,
+        usageAccountKey,
+        warnedUsageAccountUnresolved: false,
         stopped: false,
+        keeper: keeperHandle,
+        keeperPaths,
+        startInput: input,
+        ...(reattach?.kept.mcpSession != null
+          ? { reattachedMcpSession: reattach.kept.mcpSession }
+          : {}),
       };
+      if (reattach?.kept.activeTurnId) {
+        // The turn the previous server was in the middle of. Same id, so the
+        // items still to come land on the row the projection already shows.
+        const turnId = TurnId.make(reattach.kept.activeTurnId);
+        context.turnState = {
+          turnId,
+          startedAt,
+          items: [],
+          assistantTextBlocks: new Map(),
+          assistantTextBlockOrder: [],
+          capturedProposedPlanKeys: new Set(),
+          nextSyntheticAssistantBlockIndex: -1,
+        };
+        context.session = {
+          ...context.session,
+          status: "running",
+          activeTurnId: turnId,
+        };
+      }
       yield* Ref.set(contextRef, context);
       sessions.set(threadId, context);
+      yield* persistKeeperSession(context);
 
-      const sessionStartedStamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "session.started",
-        eventId: sessionStartedStamp.eventId,
-        provider: PROVIDER,
-        createdAt: sessionStartedStamp.createdAt,
-        threadId,
-        payload: input.resumeCursor !== undefined ? { resume: input.resumeCursor } : {},
-        providerRefs: {},
-      });
-
-      const configuredStamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "session.configured",
-        eventId: configuredStamp.eventId,
-        provider: PROVIDER,
-        createdAt: configuredStamp.createdAt,
-        threadId,
-        payload: {
-          config: {
-            ...(apiModelId ? { model: apiModelId } : {}),
-            ...(input.cwd ? { cwd: input.cwd } : {}),
-            ...(effectiveEffort ? { effort: effectiveEffort } : {}),
-            ...(permissionMode ? { permissionMode } : {}),
-            ...(fastMode ? { fastMode: true } : {}),
-          },
-        },
-        providerRefs: {},
-      });
-
-      const readyStamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "session.state.changed",
-        eventId: readyStamp.eventId,
-        provider: PROVIDER,
-        createdAt: readyStamp.createdAt,
-        threadId,
-        payload: {
-          state: "ready",
-        },
-        providerRefs: {},
-      });
+      if (!reattach) {
+        yield* emitSessionStartedEvents({
+          threadId,
+          apiModelId,
+          effectiveEffort: effectiveEffort ?? undefined,
+          permissionMode,
+          fastMode,
+          resumeCursor: input.resumeCursor,
+          cwd: input.cwd,
+        });
+      }
 
       let streamFiber: Fiber.Fiber<void, never>;
       streamFiber = runFork(
@@ -3875,10 +4533,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
 
       return {
-        ...session,
+        ...context.session,
       };
-    },
-  );
+    }
+  });
+
+  const startSession: ClaudeAdapterShape["startSession"] = (input) => startSessionInternal(input);
 
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const context = yield* requireSession(input.threadId);
@@ -3939,16 +4599,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // "plan" maps directly to the SDK's "plan" permission mode;
     // "default" restores the session's original permission mode.
     // When interactionMode is absent we leave the current mode unchanged.
-    if (input.interactionMode === "plan") {
+    //
+    // Only when it actually changes, exactly like the model and the response
+    // style above. Without that guard the first turn of every cold start
+    // announced the mode the CLI had just been spawned under, which is a
+    // round trip that can only lose: it is the first thing in a turn that
+    // waits on the CLI, so a spawn that dies rejects it and the turn is
+    // reported as `turn/setPermissionMode failed` — a message dropped over a
+    // request that had nothing to say.
+    const nextPermissionMode =
+      input.interactionMode === "plan"
+        ? ("plan" as PermissionMode)
+        : input.interactionMode === "default"
+          ? (context.basePermissionMode ?? ("default" as PermissionMode))
+          : undefined;
+    if (nextPermissionMode !== undefined && nextPermissionMode !== context.currentPermissionMode) {
       yield* Effect.tryPromise({
-        try: () => context.query.setPermissionMode("plan"),
+        try: () => context.query.setPermissionMode(nextPermissionMode),
         catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
       });
-    } else if (input.interactionMode === "default") {
-      yield* Effect.tryPromise({
-        try: () => context.query.setPermissionMode(context.basePermissionMode ?? "default"),
-        catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
-      });
+      context.currentPermissionMode = nextPermissionMode;
     }
 
     const turnId = steeringTurnState?.turnId ?? TurnId.make(yield* randomUUIDv4);
@@ -3984,6 +4654,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         providerRefs: {},
       });
     }
+
+    yield* persistKeeperSession(context);
 
     const message = yield* buildUserMessageEffect(input, {
       fileSystem,
@@ -4266,6 +4938,144 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return context !== undefined && !context.stopped;
     });
 
+  /**
+   * The server is going away and the CLIs are not. Every keeper-backed session
+   * is let go of without a signal, no event is emitted for its turn or its
+   * tasks — nothing about them has changed — and the session file says which
+   * turn the next server continues. Sessions with no keeper (none in
+   * production) are stopped as before.
+   *
+   * Being called at all is also the signal this scope is closing because the
+   * server is going away: see {@link detachRequested}.
+   */
+  const detachAll: NonNullable<ClaudeAdapterShape["detachAll"]> = () =>
+    Effect.gen(function* () {
+      detachRequested = true;
+      const detached: Array<ThreadId> = [];
+      for (const [threadId, context] of sessions) {
+        if (context.stopped) continue;
+        const keeper = context.keeper;
+        if (keeper === undefined) continue;
+        yield* persistKeeperSession(context);
+        context.stopped = true;
+        keeper.detach();
+        yield* Queue.shutdown(context.promptQueue);
+        yield* releaseStreamFiber(context);
+        // The SDK's close ends stdin and signals the process; both are
+        // no-ops on a detached keeper.
+        yield* Effect.try({
+          try: () => context.query.close(),
+          catch: () => undefined,
+        }).pipe(Effect.ignore);
+        detached.push(threadId);
+      }
+      if (detached.length > 0) {
+        yield* Effect.logInfo("claude.keeper.detached", { threadIds: detached });
+      }
+      return detached;
+    });
+
+  /**
+   * Rebuild every session whose keeper survived the previous server. A keeper
+   * that is gone — or whose CLI already exited — has nothing to offer; its
+   * directory is removed and the thread takes the startup reconciler's
+   * "reply was lost" path as before.
+   */
+  /** The instance a keeper's session file says it belongs to. */
+  const instanceOf = (kept: ClaudeKeeperSession): string =>
+    kept.startInput.providerInstanceId ?? "";
+
+  const reattachAll: NonNullable<ClaudeAdapterShape["reattachAll"]> = (knownInstanceIds) =>
+    Effect.gen(function* () {
+      if (!keepersEnabled) return [];
+      const results: Array<{
+        readonly session: ProviderSession;
+        readonly activeTurnId: string | null;
+        readonly mcpSession: ClaudeKeeperSession["mcpSession"];
+      }> = [];
+      const threadIds = yield* listClaudeKeeperThreadIds(keepersDir);
+      for (const rawThreadId of threadIds) {
+        const paths = claudeKeeperPaths(keepersDir, rawThreadId);
+        const meta = yield* readClaudeKeeperMeta(paths.metaPath);
+        const kept = yield* readClaudeKeeperSession(paths.sessionPath);
+        // A keeper the server gives up on is ended, not left behind: alive but
+        // unreachable, it would run a CLI for nobody and outlive the fresh
+        // keeper the thread's next turn starts. The retirement is signalled
+        // only to a process whose command line is that keeper's, so a reused
+        // pid is left alone; the outcome travels in the log line.
+        const abandon = (reason: string, detail: Record<string, unknown> = {}) =>
+          Effect.gen(function* () {
+            const keeper = Option.isSome(meta)
+              ? yield* retireClaudeKeeper(meta.value, paths.metaPath)
+              : "gone";
+            yield* Effect.logInfo(reason, { threadId: rawThreadId, keeper, ...detail });
+            yield* removeClaudeKeeperDir(paths.dir);
+          });
+        if (Option.isNone(meta) || Option.isNone(kept)) {
+          yield* abandon("claude.keeper.incomplete");
+          continue;
+        }
+        if (kept.value.startInput.providerInstanceId !== boundInstanceId) {
+          // Another instance's keeper, or nobody's. Skipping is right for the
+          // first — its own adapter takes it in this same pass — and wrong for
+          // the second: an instance the user has renamed or deleted leaves a
+          // keeper that no adapter will ever claim, holding a CLI open with
+          // its stdin, invisible to the app and outliving every restart. Only
+          // this pass ever looks at these directories, so a keeper nobody
+          // could want is retired here rather than left to nobody.
+          if (knownInstanceIds !== undefined && !knownInstanceIds.has(instanceOf(kept.value))) {
+            yield* abandon("claude.keeper.instance-gone", {
+              providerInstanceId: kept.value.startInput.providerInstanceId ?? null,
+            });
+          }
+          continue;
+        }
+        if (!isClaudeKeeperAlive(meta.value)) {
+          yield* abandon("claude.keeper.gone", { exit: meta.value.exit });
+          continue;
+        }
+        // The pid being alive is necessary but not sufficient: macOS reuses a
+        // pid, so a dead keeper's slot can pass `isClaudeKeeperAlive` while its
+        // socket is gone. The socket file is the honest signal — a listening
+        // keeper holds it, a gone one does not. Reattaching to a missing socket
+        // is exactly the ENOENT that crash-looped the server on boot, so a
+        // thread whose socket has vanished is settled like any other lost turn.
+        const socketExists = yield* fileSystem
+          .exists(meta.value.socketPath)
+          .pipe(Effect.orElseSucceed(() => false));
+        if (!socketExists) {
+          yield* abandon("claude.keeper.socket-gone", { socketPath: meta.value.socketPath });
+          continue;
+        }
+        const session = yield* startSessionInternal(kept.value.startInput, {
+          meta: meta.value,
+          kept: kept.value,
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("claude.keeper.reattach-failed", {
+              threadId: rawThreadId,
+              cause,
+            }).pipe(Effect.as(undefined)),
+          ),
+        );
+        if (session === undefined) {
+          yield* abandon("claude.keeper.reattach-abandoned");
+          continue;
+        }
+        yield* Effect.logInfo("claude.keeper.reattached", {
+          threadId: rawThreadId,
+          activeTurnId: kept.value.activeTurnId,
+          since: meta.value.lastAck,
+        });
+        results.push({
+          session,
+          activeTurnId: kept.value.activeTurnId,
+          mcpSession: kept.value.mcpSession,
+        });
+      }
+      return results;
+    }).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
+
   const stopAll: ClaudeAdapterShape["stopAll"] = () =>
     Effect.forEach(
       sessions,
@@ -4277,16 +5087,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
 
   yield* Effect.addFinalizer(() =>
-    Effect.forEach(
-      sessions,
-      ([, context]) =>
-        stopSessionInternal(context, {
-          emitExitEvent: false,
-        }),
-      { discard: true },
+    (detachRequested
+      ? detachAll().pipe(
+          Effect.andThen(
+            Effect.forEach(
+              sessions,
+              ([, context]) =>
+                stopSessionInternal(context, {
+                  emitExitEvent: false,
+                }),
+              { discard: true },
+            ),
+          ),
+        )
+      : // A rebuild, not a shutdown: this instance's settings have been
+        // replaced and every process spawned under the old ones has to go.
+        // That is the same visible stop `stopAll` already performs — turn
+        // ended "interrupted", open tasks reconciled, keeper signalled so the
+        // CLI exits — so the thread reads as stopped rather than quietly
+        // working on for an account the user has moved off.
+        stopAll()
     ).pipe(
       Effect.catch((cause) =>
-        Effect.logError("Failed to emit Claude session shutdown event.", { cause }),
+        Effect.logError("Failed to end the Claude sessions this adapter held.", { cause }),
       ),
       Effect.tap(() => Queue.shutdown(runtimeEventQueue)),
       Effect.tap(() => managedNativeEventLogger?.close() ?? Effect.void),
@@ -4313,6 +5136,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     listSessions,
     hasSession,
     stopAll,
+    detachAll,
+    reattachAll,
     get streamEvents() {
       return Stream.fromQueue(runtimeEventQueue);
     },

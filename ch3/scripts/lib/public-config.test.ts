@@ -85,7 +85,7 @@ describe("loadRepoEnv", () => {
         VITE_CLERK_JWT_TEMPLATE: "template_legacy",
         CH3CODE_CLERK_CLI_OAUTH_CLIENT_ID: "oauth_canonical",
         VITE_CH3CODE_RELAY_URL: "https://legacy.example.test",
-        EXPO_PUBLIC_OTLP_TRACES_URL: "https://api.axiom.co/v1/traces",
+        EXPO_PUBLIC_OTLP_TRACES_URL: "https://otlp.example.invalid/v1/traces",
         EXPO_PUBLIC_OTLP_TRACES_DATASET: "mobile-traces",
         EXPO_PUBLIC_OTLP_TRACES_TOKEN: "mobile-token",
       }),
@@ -94,7 +94,7 @@ describe("loadRepoEnv", () => {
       clerkJwtTemplate: "template_legacy",
       clerkCliOAuthClientId: "oauth_canonical",
       relayUrl: "https://legacy.example.test",
-      mobileOtlpTracesUrl: "https://api.axiom.co/v1/traces",
+      mobileOtlpTracesUrl: "https://otlp.example.invalid/v1/traces",
       mobileOtlpTracesDataset: "mobile-traces",
       mobileOtlpTracesToken: "mobile-token",
       relayClientOtlpTracesUrl: undefined,
@@ -107,17 +107,17 @@ describe("loadRepoEnv", () => {
     expect(
       loadRepoEnv({
         baseEnv: {
-          CH3CODE_RELAY_CLIENT_OTLP_TRACES_URL: "https://api.axiom.co/v1/traces",
+          CH3CODE_RELAY_CLIENT_OTLP_TRACES_URL: "https://otlp.example.invalid/v1/traces",
           CH3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET: "relay-client-traces",
           CH3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN: "relay-client-token",
         },
         repoRoot: makeTemporaryDirectory(),
       }),
     ).toEqual({
-      CH3CODE_RELAY_CLIENT_OTLP_TRACES_URL: "https://api.axiom.co/v1/traces",
+      CH3CODE_RELAY_CLIENT_OTLP_TRACES_URL: "https://otlp.example.invalid/v1/traces",
       CH3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET: "relay-client-traces",
       CH3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN: "relay-client-token",
-      VITE_RELAY_OTLP_TRACES_URL: "https://api.axiom.co/v1/traces",
+      VITE_RELAY_OTLP_TRACES_URL: "https://otlp.example.invalid/v1/traces",
       VITE_RELAY_OTLP_TRACES_DATASET: "relay-client-traces",
       VITE_RELAY_OTLP_TRACES_TOKEN: "relay-client-token",
     });
@@ -128,7 +128,7 @@ describe("loadRepoEnv", () => {
       loadRepoEnv({
         baseEnv: {
           CH3CODE_RELAY_URL: "https://relay.example.test",
-          CH3CODE_MOBILE_OTLP_TRACES_URL: "https://api.axiom.co/v1/traces",
+          CH3CODE_MOBILE_OTLP_TRACES_URL: "https://otlp.example.invalid/v1/traces",
           CH3CODE_MOBILE_OTLP_TRACES_DATASET: "mobile-traces",
           CH3CODE_MOBILE_OTLP_TRACES_TOKEN: "mobile-token",
         },
@@ -137,10 +137,10 @@ describe("loadRepoEnv", () => {
     ).toEqual({
       CH3CODE_RELAY_URL: "https://relay.example.test",
       VITE_CH3CODE_RELAY_URL: "https://relay.example.test",
-      CH3CODE_MOBILE_OTLP_TRACES_URL: "https://api.axiom.co/v1/traces",
+      CH3CODE_MOBILE_OTLP_TRACES_URL: "https://otlp.example.invalid/v1/traces",
       CH3CODE_MOBILE_OTLP_TRACES_DATASET: "mobile-traces",
       CH3CODE_MOBILE_OTLP_TRACES_TOKEN: "mobile-token",
-      EXPO_PUBLIC_OTLP_TRACES_URL: "https://api.axiom.co/v1/traces",
+      EXPO_PUBLIC_OTLP_TRACES_URL: "https://otlp.example.invalid/v1/traces",
       EXPO_PUBLIC_OTLP_TRACES_DATASET: "mobile-traces",
       EXPO_PUBLIC_OTLP_TRACES_TOKEN: "mobile-token",
     });

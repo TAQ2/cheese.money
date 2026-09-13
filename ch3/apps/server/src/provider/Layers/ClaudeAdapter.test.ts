@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -14,6 +15,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -26,17 +28,30 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as References from "effect/References";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import {
+  CLAUDE_KEEPERS_DIRNAME,
+  claudeKeeperPaths,
+  type KeeperProcess,
+  readClaudeKeeperMeta,
+  readClaudeKeeperSession,
+  writeClaudeKeeperSession,
+} from "../keeper/ClaudeKeeper.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
@@ -163,6 +178,8 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  /** Turn the keeper on despite the fake query, for the session-file paths. */
+  readonly keepers?: boolean;
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -174,6 +191,7 @@ function makeHarness(config?: {
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
+    ...(config?.keepers !== undefined ? { keepers: config.keepers } : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -437,7 +455,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.effort, "max");
+      assert.equal(createInput?.options.effort, "high");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -531,7 +549,10 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.settings, undefined);
+      // Not `undefined` any more: a turn always states the Artifact switch, so
+      // the layer the CLI lets say no — `--settings` — always exists. What
+      // these cases pin is that nothing ELSE is forced onto the session.
+      assert.deepEqual(createInput?.options.settings, { enableArtifact: false });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -556,6 +577,7 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.deepEqual(createInput?.options.settings, {
         fastMode: true,
+        enableArtifact: false,
       });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -579,7 +601,10 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.settings, undefined);
+      // Not `undefined` any more: a turn always states the Artifact switch, so
+      // the layer the CLI lets say no — `--settings` — always exists. What
+      // these cases pin is that nothing ELSE is forced onto the session.
+      assert.deepEqual(createInput?.options.settings, { enableArtifact: false });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -604,6 +629,7 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.deepEqual(createInput?.options.settings, {
         outputStyle: "Caveman",
+        enableArtifact: false,
       });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -627,10 +653,84 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.settings, undefined);
+      // Not `undefined` any more: a turn always states the Artifact switch, so
+      // the layer the CLI lets say no — `--settings` — always exists. What
+      // these cases pin is that nothing ELSE is forced onto the session.
+      assert.deepEqual(createInput?.options.settings, { enableArtifact: false });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("says which account the session it just started is signed in as", () => {
+    // A session outlives the setting that chose its account: switching Claude
+    // accounts repoints the instance, and until the thread's next turn starts,
+    // the process answering it is still signed in as whoever it started as.
+    // The session therefore has to carry the account it was spawned with, or
+    // the usage band can show one account's numbers beside another account's
+    // reply — which is exactly what happened, with nothing on screen
+    // connecting the two.
+    const homePath = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-account-"));
+    NodeFS.writeFileSync(
+      NodePath.join(homePath, ".claude.json"),
+      JSON.stringify({
+        oauthAccount: {
+          emailAddress: "someone@example.com",
+          organizationName: "CH3",
+        },
+      }),
+    );
+    const harness = makeHarness({ claudeConfig: { homePath } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-sonnet-4-6",
+          [],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      // Account plus organization, the pairing that shares one rate-limit
+      // bucket, read from the very config directory this process was spawned
+      // with rather than from settings read later.
+      assert.strictEqual(session.accountKey, "someone@example.com|CH3");
+      const listed = yield* adapter.listSessions();
+      assert.strictEqual(listed[0]?.accountKey, "someone@example.com|CH3");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(homePath, { recursive: true, force: true }))),
+    );
+  });
+
+  it.effect("leaves the account unnamed when the config directory names nobody", () => {
+    // Inventing a key here would file a busy account's work under another
+    // account, so an unsigned-in directory reports nothing at all.
+    const homePath = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-no-account-"));
+    const harness = makeHarness({ claudeConfig: { homePath } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-sonnet-4-6",
+          [],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      assert.strictEqual(session.accountKey, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(homePath, { recursive: true, force: true }))),
     );
   });
 
@@ -697,7 +797,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("treats ultrathink as a prompt keyword instead of a session effort", () => {
+  it.effect("no longer injects the Ultrathink prefix for a withdrawn selection", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -725,8 +825,10 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.effort, "high");
+      // Ultrathink was a prompt-injected level; with it gone from the
+      // descriptor the prompt goes out exactly as the user wrote it.
       const promptText = yield* Effect.promise(() => readFirstPromptText(createInput));
-      assert.equal(promptText, "Ultrathink:\nInvestigate the edge cases");
+      assert.equal(promptText, "Investigate the edge cases");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -1388,6 +1490,255 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "fills a tool call's input from the assistant message when the stream cut it short",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 10).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "delegate this in the background",
+          attachments: [],
+        });
+
+        // What the CLI actually sent for a background Agent launch: an empty
+        // start, a delta that never finished, the result, and only then the
+        // complete message carrying the model the call named.
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-late-input",
+          uuid: "stream-late-1",
+          parent_tool_use_id: null,
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "tool_use", id: "tool-agent-late", name: "Agent", input: {} },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-late-input",
+          uuid: "stream-late-2",
+          parent_tool_use_id: null,
+          event: {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: '{"description": "Update dash' },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "user",
+          session_id: "sdk-session-late-input",
+          uuid: "user-late-result",
+          parent_tool_use_id: null,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tool-agent-late",
+                content: "Async agent launched",
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "assistant",
+          session_id: "sdk-session-late-input",
+          uuid: "assistant-late-1",
+          parent_tool_use_id: null,
+          message: {
+            id: "assistant-message-late-1",
+            content: [
+              {
+                type: "tool_use",
+                id: "tool-agent-late",
+                name: "Agent",
+                input: {
+                  description: "Update dashboards",
+                  subagent_type: "claude",
+                  model: "sonnet",
+                  run_in_background: true,
+                  prompt: "Rename the tabs",
+                },
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: "sdk-session-late-input",
+          uuid: "result-late-1",
+        } as unknown as SDKMessage);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+        const lifecycle = runtimeEvents.filter(
+          (event) =>
+            (event.type === "item.started" ||
+              event.type === "item.updated" ||
+              event.type === "item.completed") &&
+            String(event.itemId) === "tool-agent-late",
+        );
+        assert.deepEqual(
+          lifecycle.map((event) => event.type),
+          ["item.started", "item.updated", "item.completed", "item.updated"],
+        );
+        const late = lifecycle[lifecycle.length - 1];
+        assert.equal(late?.type, "item.updated");
+        if (late?.type === "item.updated") {
+          assert.equal(late.payload.status, "completed");
+          assert.equal(late.payload.detail, "claude: Update dashboards");
+          assert.deepEqual(
+            (late.payload.data as { input?: { model?: string } }).input?.model,
+            "sonnet",
+          );
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("keeps a failed call failed when its input arrives late", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 10).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "delegate this in the background",
+        attachments: [],
+      });
+
+      // What the CLI actually sent for a background Agent launch: an empty
+      // start, a delta that never finished, the result, and only then the
+      // complete message carrying the model the call named.
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-late-failed",
+        uuid: "stream-late-1",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "tool_use", id: "tool-agent-late", name: "Agent", input: {} },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-late-failed",
+        uuid: "stream-late-2",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "input_json_delta", partial_json: '{"description": "Update dash' },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session-late-failed",
+        uuid: "user-late-result",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-agent-late",
+              is_error: true,
+              content: "Agent launch refused",
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-late-failed",
+        uuid: "assistant-late-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-late-1",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-agent-late",
+              name: "Agent",
+              input: {
+                description: "Update dashboards",
+                subagent_type: "claude",
+                model: "sonnet",
+                run_in_background: true,
+                prompt: "Rename the tabs",
+              },
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-late-failed",
+        uuid: "result-late-1",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const lifecycle = runtimeEvents.filter(
+        (event) =>
+          (event.type === "item.started" ||
+            event.type === "item.updated" ||
+            event.type === "item.completed") &&
+          String(event.itemId) === "tool-agent-late",
+      );
+      assert.deepEqual(
+        lifecycle.map((event) => event.type),
+        ["item.started", "item.updated", "item.completed", "item.updated"],
+      );
+      const late = lifecycle[lifecycle.length - 1];
+      assert.equal(late?.type, "item.updated");
+      if (late?.type === "item.updated") {
+        assert.equal(late.payload.status, "failed");
+        assert.equal(late.payload.detail, "claude: Update dashboards");
+        assert.deepEqual(
+          (late.payload.data as { input?: { model?: string } }).input?.model,
+          "sonnet",
+        );
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
   it.effect("treats user-aborted Claude results as interrupted without a runtime error", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -1440,6 +1791,106 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(turnCompleted.payload.state, "interrupted");
         assert.equal(turnCompleted.payload.errorMessage, "Error: Request was aborted.");
         assert.equal(turnCompleted.payload.stopReason, "tool_use");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("classifies a Claude auth failure result as an auth_error runtime error", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Failed to authenticate: OAuth session expired and could not be refreshed"],
+        stop_reason: "tool_use",
+        session_id: "sdk-session-auth-failure",
+        uuid: "result-auth-failure",
+      } as unknown as SDKMessage);
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(runtimeError.payload.class, "auth_error");
+        assert.equal(
+          runtimeError.payload.message,
+          "Failed to authenticate: OAuth session expired and could not be refreshed",
+        );
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps a non-auth Claude turn failure classified as provider_error", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Rate limit exceeded, try again later."],
+        stop_reason: "tool_use",
+        session_id: "sdk-session-rate-limit",
+        uuid: "result-rate-limit",
+      } as unknown as SDKMessage);
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(runtimeError.payload.class, "provider_error");
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -1554,6 +2005,224 @@ describe("ClaudeAdapterLive", () => {
       if (completed?.type === "turn.completed") {
         assert.equal(completed.payload.state, "failed");
         assert.equal(completed.payload.errorMessage, "Claude runtime stream failed.");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("names the operating system's reason for a stream failure, in its own words", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+
+      // What a project folder that was renamed under a running app produces:
+      // an errno this module recognises, wrapped in text it must not repeat.
+      const spawnFailure = Object.assign(
+        new Error("spawn /bin/claude ENOENT with credential material attached"),
+        { code: "ENOENT" },
+      );
+      harness.query.fail(spawnFailure);
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(
+          runtimeError.payload.message,
+          "Claude runtime stream failed. Something it needed was missing — usually the working directory or the CLI itself.",
+        );
+        assert.equal(runtimeError.payload.message.includes("credential material"), false);
+        assert.deepEqual(runtimeError.payload.detail, {
+          failureCount: 1,
+          failureTags: ["ProviderAdapterProcessError"],
+          causeCode: "ENOENT",
+        });
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("puts the CLI's own last words in the log, and keeps them out of the thread", () => {
+    const harness = makeHarness();
+    const logs: Array<{
+      readonly message: unknown;
+      readonly annotations: Record<string, unknown>;
+    }> = [];
+    const logger = Logger.make(({ fiber, message }) => {
+      logs.push({ message, annotations: { ...fiber.getRef(References.CurrentLogAnnotations) } });
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      // The channel the SDK offers and CH3 was not listening on. This is the
+      // only place a CLI that dies before its first message explains itself.
+      // Two chunks of one line: the SDK hands over whatever `stderr` emitted,
+      // not whole lines.
+      harness.getLastCreateQueryInput()?.options.stderr?.("Error: something ");
+      harness.getLastCreateQueryInput()?.options.stderr?.("the CLI knows\n");
+      harness.query.fail(new Error("credential material that must stay in the cause chain"));
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const failureLog = logs.find((entry) =>
+        String(entry.message).includes("Claude runtime stream failed"),
+      );
+      assert.ok(failureLog, "the failure is logged");
+      assert.deepEqual(failureLog.annotations["stderrTail"], ["Error: something the CLI knows"]);
+      assert.equal(
+        String(failureLog.annotations["causeChain"]).includes("credential material"),
+        true,
+      );
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        // The event still says only what this module wrote.
+        assert.equal(runtimeError.payload.message, "Claude runtime stream failed.");
+        // The detail is this module's own vocabulary and nothing else: no
+        // sentence from the cause, no line from the CLI.
+        assert.deepEqual(runtimeError.payload.detail, {
+          failureCount: 1,
+          failureTags: ["ProviderAdapterProcessError"],
+        });
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(
+        Layer.mergeAll(harness.layer, Logger.layer([logger], { mergeWithExisting: false })),
+      ),
+    );
+  });
+
+  const errnoCases = [
+    { code: "ENOENT", says: "Something it needed was missing" },
+    { code: "EACCES", says: "The operating system refused to start it" },
+    { code: "EPERM", says: "The operating system refused to start it" },
+    { code: "ENOTDIR", says: "Part of its working directory path is not a directory" },
+  ] as const;
+
+  for (const errno of errnoCases) {
+    it.effect(`explains ${errno.code}, however deep in the chain it sits`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+        const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ).pipe(Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+        // Wrapped, because that is the real shape: the SDK wraps a spawn
+        // failure before the adapter attaches it as a cause, so an errno read
+        // only at the top level would find nothing.
+        const inner = Object.assign(new Error("spawn failed"), { code: errno.code });
+        harness.query.fail(new Error("Claude Code process failed", { cause: inner }));
+
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        runtimeEventsFiber.interruptUnsafe();
+
+        const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+        assert.equal(runtimeError?.type, "runtime.error");
+        if (runtimeError?.type === "runtime.error") {
+          assert.include(runtimeError.payload.message, errno.says);
+          assert.deepEqual(runtimeError.payload.detail, {
+            failureCount: 1,
+            failureTags: ["ProviderAdapterProcessError"],
+            causeCode: errno.code,
+          });
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
+
+  it.effect("says nothing extra for an error whose code is an ordinary object key", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      // `"toString" in KNOWN_FAILURE_CODES` is true. Looking the code up that
+      // way would have put a native function's source into the event.
+      harness.query.fail(Object.assign(new Error("odd"), { code: "toString" }));
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(runtimeError.payload.message, "Claude runtime stream failed.");
+        assert.deepEqual(runtimeError.payload.detail, {
+          failureCount: 1,
+          failureTags: ["ProviderAdapterProcessError"],
+        });
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -1755,17 +2424,14 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("closes a task whose only ending is a terminal task_updated patch", () => {
+  it.effect("closes the background tasks a stopped session can no longer report", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
-
-      // One event fewer than the task_progress case: a terminal patch carries
-      // no usage snapshot, so there is no token-usage event alongside it.
-      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 5).pipe(
-        Stream.runCollect,
-        Effect.forkChild,
-      );
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
 
       yield* adapter.startSession({
         threadId: THREAD_ID,
@@ -1773,28 +2439,112 @@ describe("ClaudeAdapterLive", () => {
         runtimeMode: "full-access",
       });
 
-      // The regression this guards: `task_notification` was treated as the
-      // only completion signal, and it never arrives for a backgrounded or
-      // killed task. Those tasks stayed "started" forever — the panel
-      // accumulated entries counting up for days.
+      // Two background agents: one settles while the process lives, one is
+      // still running when the process goes.
+      for (const [taskId, description] of [
+        ["task-settled", "Check the deploy"],
+        ["task-orphan", "Update Metabase 14785 tabs/headers"],
+      ] as const) {
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: taskId,
+          description,
+          task_type: "local_agent",
+          session_id: "sdk-session-orphan",
+          uuid: `task-started-${taskId}`,
+        } as unknown as SDKMessage);
+      }
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-settled",
+        status: "completed",
+        summary: "Deploy is green.",
+        session_id: "sdk-session-orphan",
+        uuid: "task-notification-settled",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      yield* adapter.stopSession(THREAD_ID);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const completed = runtimeEvents.flatMap((event) =>
+        event.type === "task.completed" ? [event.payload] : [],
+      );
+      assert.deepEqual(
+        completed.map((payload) => [String(payload.taskId), payload.status]),
+        [
+          ["task-settled", "completed"],
+          ["task-orphan", "stopped"],
+        ],
+      );
+      assert.equal(completed[1]?.summary, "Stopped when the Claude session ended.");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reports one task.completed per task, not one per terminal signal", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      // The CLI reports a settled task BOTH ways: a state patch and then the
+      // notification. The SDK documents the notification as the one that
+      // always arrives ("stopTask … a task_notification with status 'stopped'
+      // will be emitted"), and it is the only one carrying the summary and
+      // usage. Mapping the patch as well produced two task.completed events
+      // for one task, which reached the work log as duplicate rows because
+      // activities are keyed on eventId rather than taskId.
       harness.query.emit({
         type: "system",
         subtype: "task_updated",
-        task_id: "task-killed-1",
+        task_id: "task-settled-1",
         patch: { status: "killed", end_time: 1_760_000_000_000, error: "stopped by the user" },
-        session_id: "sdk-session-task-updated",
-        uuid: "task-updated-killed",
+        session_id: "sdk-session-task-settled",
+        uuid: "task-updated-settled-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-settled-1",
+        status: "stopped",
+        summary: "Stopped by the user.",
+        session_id: "sdk-session-task-settled",
+        uuid: "task-notification-settled-1",
       } as unknown as SDKMessage);
 
-      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
-      const completed = runtimeEvents.find((event) => event.type === "task.completed");
-      assert.equal(completed?.type, "task.completed");
-      if (completed?.type === "task.completed") {
-        // "killed" is the CLI's word; the runtime contract calls it stopped.
-        assert.equal(completed.payload.status, "stopped");
-        assert.equal(completed.payload.taskId, "task-killed-1");
-        assert.equal(completed.payload.summary, "stopped by the user");
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const completed = runtimeEvents.filter((event) => event.type === "task.completed");
+      assert.equal(completed.length, 1, "one settled task must produce exactly one task.completed");
+      if (completed[0]?.type === "task.completed") {
+        assert.equal(completed[0].payload.status, "stopped");
+        // The surviving event is the notification, so the human-readable
+        // summary is preserved rather than replaced by the patch's error text.
+        assert.equal(completed[0].payload.summary, "Stopped by the user.");
       }
+      // And the patch still must not surface as an unknown-subtype warning.
+      const warnings = runtimeEvents.filter((event) => event.type === "runtime.warning");
+      assert.equal(warnings.length, 0);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -3457,6 +4207,69 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
+  it.effect("does not re-announce the mode a cold session was spawned under", () => {
+    // Seven turns died this way in one day, every one of them on a cold start
+    // and none on a warm one: the first turn told a CLI that had just been
+    // spawned `bypassPermissions` that it was `bypassPermissions`, and that
+    // redundant round trip is the first thing in a turn that waits on the CLI.
+    // A process that dies during spawn rejects it, and the turn is reported as
+    // `turn/setPermissionMode failed` with the user's message dropped.
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        interactionMode: "default",
+        attachments: [],
+      });
+
+      assert.deepEqual(harness.query.setPermissionModeCalls, []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not re-announce `default` on a cold approval-required session", () => {
+    // `approval-required` is the only runtime mode with no `permissionMode` of
+    // its own: none is sent at spawn and the CLI resolves `default` itself. The
+    // guard above tracked that as "unknown", so the first turn announced
+    // `default` to a session already in it — the same redundant cold-start
+    // request, on the mode most threads actually run in.
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      // Still no `permissionMode` at spawn: what changed is what we believe the
+      // session is in, not what the CLI was asked for.
+      assert.equal(harness.getLastCreateQueryInput()?.options.permissionMode, undefined);
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        interactionMode: "default",
+        attachments: [],
+      });
+
+      assert.deepEqual(harness.query.setPermissionModeCalls, []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("does not call setPermissionMode when interactionMode is absent", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -4006,5 +4819,508 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
+  });
+});
+
+/**
+ * A CLI stand-in for the rebuild tests: it says hello, answers nothing, and
+ * exits 143 on the SIGTERM the keeper forwards. Enough to be a real process
+ * running under the settings the rebuild is replacing.
+ */
+const REBUILD_FAKE_CLI = String.raw`
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "11111111-1111-4111-8111-111111111111" }) + "\n");
+process.stdin.resume();
+process.on("SIGTERM", () => process.exit(143));
+`;
+
+describe("ClaudeAdapterLive and the in-app MCP server", () => {
+  it.effect("gives its own MCP server a clock long enough for a tool that waits on a child", () => {
+    const harness = makeHarness();
+    const threadId = ThreadId.make("thread-claude-mcp-timeout");
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      // The session the CLI is told to call back on. Without it the adapter
+      // registers no MCP server at all and there is nothing to time out.
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("11111111-1111-4111-8111-111111111111"),
+        threadId,
+        providerSessionId: "session-mcp-timeout",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint: "http://127.0.0.1:1/mcp",
+        authorizationHeader: "Bearer test",
+      });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId)),
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const servers = harness.getLastCreateQueryInput()?.options.mcpServers;
+      const ch3 = servers?.["ch3"] as { type?: string; timeout?: number } | undefined;
+      assert.equal(ch3?.type, "http");
+      // The CLI's own default is 60 s and it is a hard limit: a longer call
+      // returns nothing at all, so the clock has to cover a slow tool plus the
+      // handler's own work.
+      assert.equal(ch3?.timeout, McpProviderSession.CH3CODE_MCP_TOOL_TIMEOUT_MS);
+      // Pinned, not just consistent: half an hour is the window a delegated
+      // task needs, and a silent shrink here would lose answers again.
+      assert.equal(ch3?.timeout, 1_800_000);
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  });
+});
+
+describe("ClaudeAdapterLive when its instance is rebuilt", () => {
+  /**
+   * The registry closes exactly this scope when settings replace the
+   * instance, so the test owns it rather than letting a layer close it.
+   */
+  const makeRebuildSandbox = Effect.fnUntraced(function* (input: {
+    readonly detachFirst: boolean;
+  }) {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "bdx-adapter-rebuild-"));
+    const fakeCliPath = NodePath.join(baseDir, "fake-claude.mjs");
+    NodeFS.writeFileSync(fakeCliPath, REBUILD_FAKE_CLI);
+
+    const query = new FakeClaudeQuery();
+    let keeper: KeeperProcess | undefined;
+    const scope = yield* Scope.make();
+    const adapter = yield* makeClaudeAdapter(decodeClaudeSettings({}), {
+      keepers: true,
+      createQuery: (queryInput) => {
+        // The seam the SDK uses in production; taking it here gives the
+        // session a real keeper holding a real CLI, which is what a rebuild
+        // has to get rid of.
+        keeper = queryInput.options.spawnClaudeCodeProcess?.({
+          command: process.execPath,
+          args: [fakeCliPath],
+          cwd: baseDir,
+          env: { PATH: process.env["PATH"] ?? "" },
+          signal: new AbortController().signal,
+        }) as unknown as KeeperProcess | undefined;
+        return query;
+      },
+    }).pipe(Effect.provideService(Scope.Scope, scope));
+
+    const events: Array<ProviderRuntimeEvent> = [];
+    // Forked on the test's own fiber, so it outlives the adapter scope and
+    // still sees what the finalizer emits.
+    const collecting = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+      Effect.sync(() => {
+        events.push(event);
+      }),
+    ).pipe(Effect.forkChild);
+
+    yield* adapter.startSession({
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      runtimeMode: "full-access",
+    });
+    yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+    // A background task still open when the instance goes. The visible stop
+    // has to settle it; nothing else ever will, because the process that owned
+    // it is about to be signalled.
+    query.emit({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-open-at-rebuild",
+      description: "Long build",
+      task_type: "local_agent",
+      session_id: "sdk-session-rebuild",
+      uuid: "task-started-open-at-rebuild",
+    } as unknown as SDKMessage);
+    yield* Effect.yieldNow;
+    yield* Effect.yieldNow;
+    assert.ok(keeper !== undefined, "the session should be holding a keeper");
+    yield* Effect.promise(() => keeper!.ready);
+    const config = yield* ServerConfig;
+    const keeperPaths = claudeKeeperPaths(
+      NodePath.join(config.stateDir, CLAUDE_KEEPERS_DIRNAME),
+      THREAD_ID,
+    );
+    const meta = yield* readClaudeKeeperMeta(keeperPaths.metaPath);
+    const cliPid = meta._tag === "Some" ? meta.value.cliPid : null;
+    const keeperPid = meta._tag === "Some" ? meta.value.keeperPid : 0;
+    assert.ok(cliPid !== null);
+
+    // Registered now, not when the test first awaits it: the teardown below
+    // signals the CLI, and a `once` installed after the exit had already
+    // landed would never fire — leaving the test to be rescued by its own
+    // timeout rather than by the behaviour it is checking.
+    const ended = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+      keeper!.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+
+    // Everything the teardown says, and nothing said before it.
+    const before = events.length;
+    // Shutdown asks first; a rebuild never does.
+    if (input.detachFirst) yield* adapter.detachAll!();
+    yield* Scope.close(scope, Exit.void);
+    // The queue shuts down at the end of the finalizer: the collector ending
+    // is the receipt that every event the teardown emitted has been seen.
+    yield* Fiber.await(collecting);
+    const teardownEvents = events.slice(before);
+    return {
+      adapter,
+      baseDir,
+      cliPid,
+      ended,
+      keeperPid,
+      events: teardownEvents,
+      keeper: keeper!,
+      keeperPaths,
+      query,
+    } as const;
+  });
+
+  const layerFor = (baseDir: string) =>
+    ServerConfig.layerTest("/tmp/claude-adapter-test", baseDir).pipe(
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+  // `it.live`: the keeper's socket has to actually appear on disk, and the
+  // wait for it is a real `Effect.sleep` a paused TestClock would never let
+  // through. Nothing here waits on a duration of its own.
+  it.live(
+    "stops its sessions visibly and takes the CLI with it",
+    () => {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "bdx-adapter-rebuild-base-"),
+      );
+      return Effect.gen(function* () {
+        const run = yield* makeRebuildSandbox({ detachFirst: false });
+
+        // Visible: the turn ends interrupted, with something a user can read.
+        const turnEnded = run.events.find(
+          (event) => event.type === "turn.completed" && event.threadId === THREAD_ID,
+        );
+        assert.ok(turnEnded !== undefined, "the turn should have been completed");
+        const payload = turnEnded.payload as { state?: string; errorMessage?: string };
+        assert.equal(payload.state, "interrupted");
+        assert.equal(payload.errorMessage, "Session stopped.");
+        // The open background task is reconciled, in the same vocabulary the
+        // boot-time reconciler uses. Without this the rebuild could drop the
+        // loop and every other assertion here would stay green.
+        const tasks = run.events.flatMap((event) =>
+          event.type === "task.completed" ? [event.payload] : [],
+        );
+        assert.deepEqual(
+          tasks.map((payload) => [String(payload.taskId), payload.status]),
+          [["task-open-at-rebuild", "stopped"]],
+        );
+        assert.equal(tasks[0]?.summary, "Stopped when the Claude session ended.");
+
+        // The session is gone from the adapter, not merely quiet: a detach
+        // leaves it listed for the next owner, a rebuild does not.
+        assert.deepEqual(yield* run.adapter.listSessions(), []);
+
+        // And the process running under the replaced settings is gone: the
+        // keeper forwarded the signal and reported the CLI's exit.
+        const exit = yield* Effect.promise(() => run.ended);
+        assert.ok(exit.code === 143 || exit.signal === "SIGTERM");
+        assert.throws(() => process.kill(run.cliPid, 0));
+      }).pipe(Effect.provide(layerFor(baseDir)));
+    },
+    30_000,
+  );
+
+  it.live(
+    "leaves the CLI running when the server asked to detach first",
+    () => {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "bdx-adapter-detach-base-"),
+      );
+      return Effect.gen(function* () {
+        const run = yield* makeRebuildSandbox({ detachFirst: true });
+
+        // Nothing about the turn or its tasks changed, so nothing is said
+        // about them — a boot-time reattach must not inherit a thread already
+        // marked interrupted.
+        assert.deepEqual(
+          run.events.filter((event) => event.threadId === THREAD_ID).map((event) => event.type),
+          [],
+        );
+        assert.equal(run.keeper.isDetached, true);
+        assert.deepEqual(
+          (yield* run.adapter.listSessions()).map((session) => session.threadId),
+          [THREAD_ID],
+        );
+        // Alive: `process.kill(pid, 0)` only signals that the pid exists.
+        process.kill(run.cliPid, 0);
+        // A detach deliberately leaves both processes up; this test is the
+        // only owner they have left, so it takes them down by the pids it
+        // spawned them with.
+        process.kill(run.cliPid, "SIGKILL");
+        process.kill(run.keeperPid, "SIGKILL");
+      }).pipe(Effect.provide(layerFor(baseDir)));
+    },
+    30_000,
+  );
+});
+
+describe("ClaudeAdapterLive behind a keeper", () => {
+  // `socketPath` must point at a real file for the live keeper: reattach now
+  // checks the socket exists before trusting the pid, because a reused pid
+  // passed the liveness check while its socket was gone and the connect to
+  // that missing socket crash-looped the server on boot.
+  const keeperMeta = (keeperPid: number, socketPath: string) =>
+    JSON.stringify({
+      version: 1,
+      keeperPid,
+      cliPid: 1,
+      socketPath,
+      journalPath: "/tmp/never.ndjson",
+      startedAt: "2026-09-05T00:00:00.000Z",
+      lastSeq: 9,
+      lastAck: 7,
+      initResponse: null,
+      cliSessionId: null,
+      exit: null,
+    });
+
+  it.effect("writes the session file a reattach reads, and keeps it on the turn", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "bdx-adapter-keeper-"));
+    const harness = makeHarness({ baseDir, keepers: true });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const config = yield* ServerConfig;
+      const paths = claudeKeeperPaths(
+        NodePath.join(config.stateDir, CLAUDE_KEEPERS_DIRNAME),
+        THREAD_ID,
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      // The spawn goes through the keeper hook, not the SDK's own child.
+      assert.equal(
+        typeof harness.getLastCreateQueryInput()?.options.spawnClaudeCodeProcess,
+        "function",
+      );
+      const idle = yield* readClaudeKeeperSession(paths.sessionPath);
+      assert.equal(idle._tag, "Some");
+      assert.equal(idle._tag === "Some" ? idle.value.activeTurnId : "?", null);
+      // The cursor the session actually runs on, so a reattach resumes the
+      // same CLI conversation rather than minting a new id.
+      const cursor = idle._tag === "Some" ? idle.value.startInput.resumeCursor : undefined;
+      assert.ok(typeof (cursor as { resume?: string }).resume === "string");
+
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+      const running = yield* readClaudeKeeperSession(paths.sessionPath);
+      assert.equal(running._tag === "Some" ? running.value.activeTurnId : "?", turn.turnId);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  /**
+   * `ProviderService` puts the MCP credential back into the process-local
+   * registry *after* the adapter has rebuilt the session, and the adapter
+   * rewrites the session file as the last step of that rebuild. So at the
+   * moment of the rewrite the registry is still empty, and a rewrite that
+   * trusted only the registry replaced a live credential with null — leaving
+   * the restart after this one nothing to adopt and every CH3 MCP tool call
+   * from that thread answering 401.
+   */
+  it.effect("a reattach keeps the MCP credential the session file carried", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "bdx-adapter-mcp-keep-"));
+    const harness = makeHarness({ baseDir, keepers: true });
+    const threadId = ThreadId.make("thread-kept-mcp");
+    const mcpSession = {
+      environmentId: EnvironmentId.make("11111111-1111-4111-8111-111111111111"),
+      threadId,
+      providerSessionId: "session-kept-mcp",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      endpoint: "http://127.0.0.1:1/mcp",
+      authorizationHeader: "Bearer kept-credential",
+    };
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const config = yield* ServerConfig;
+      const keepersDir = NodePath.join(config.stateDir, CLAUDE_KEEPERS_DIRNAME);
+      const paths = claudeKeeperPaths(keepersDir, threadId);
+      const socketPath = NodePath.join(baseDir, "kept-mcp.sock");
+      NodeFS.mkdirSync(paths.dir, { recursive: true });
+      NodeFS.writeFileSync(socketPath, "");
+      NodeFS.writeFileSync(paths.metaPath, keeperMeta(process.pid, socketPath));
+      yield* writeClaudeKeeperSession(paths.sessionPath, {
+        threadId,
+        startInput: {
+          threadId,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          runtimeMode: "full-access",
+        },
+        activeTurnId: null,
+        mcpSession,
+        savedAt: "2026-09-05T00:00:00.000Z",
+      });
+
+      // The registry is empty here, exactly as it is at boot: nothing has
+      // adopted the credential yet.
+      McpProviderSession.clearMcpProviderSession(threadId);
+      yield* adapter.reattachAll!();
+
+      const rewritten = yield* readClaudeKeeperSession(paths.sessionPath);
+      assert.equal(rewritten._tag, "Some");
+      assert.equal(
+        rewritten._tag === "Some" ? rewritten.value.mcpSession?.authorizationHeader : "gone",
+        "Bearer kept-credential",
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  /**
+   * A keeper whose provider instance the user has renamed or deleted is
+   * nobody's: no adapter claims it on any boot, so before this it kept a CLI
+   * alive on its stdin forever, invisible to the app and surviving every
+   * restart. Skipping is only right when some *other* configured instance will
+   * take it in the same pass.
+   */
+  it.effect("retires a keeper whose provider instance no longer exists", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "bdx-adapter-orphan-"));
+    const harness = makeHarness({ baseDir, keepers: true });
+    const orphaned = ThreadId.make("thread-instance-gone");
+    const sibling = ThreadId.make("thread-other-instance");
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const config = yield* ServerConfig;
+      const keepersDir = NodePath.join(config.stateDir, CLAUDE_KEEPERS_DIRNAME);
+      const socketPath = NodePath.join(baseDir, "orphan.sock");
+      NodeFS.writeFileSync(socketPath, "");
+      for (const [threadId, instanceId] of [
+        [orphaned, "claudeAgent_deleted"],
+        [sibling, "claudeAgent_other"],
+      ] as const) {
+        const paths = claudeKeeperPaths(keepersDir, threadId);
+        NodeFS.mkdirSync(paths.dir, { recursive: true });
+        NodeFS.writeFileSync(paths.metaPath, keeperMeta(process.pid, socketPath));
+        yield* writeClaudeKeeperSession(paths.sessionPath, {
+          threadId,
+          startInput: {
+            threadId,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            providerInstanceId: ProviderInstanceId.make(instanceId),
+            runtimeMode: "full-access",
+          },
+          activeTurnId: null,
+          mcpSession: null,
+          savedAt: "2026-09-05T00:00:00.000Z",
+        });
+      }
+
+      // Only `claudeAgent_other` is still configured.
+      yield* adapter.reattachAll!(new Set(["claudeAgent", "claudeAgent_other"]));
+
+      assert.equal(NodeFS.existsSync(claudeKeeperPaths(keepersDir, orphaned).dir), false);
+      // The sibling belongs to an instance that exists; its own adapter takes
+      // it, and this one leaves it exactly where it found it.
+      assert.equal(NodeFS.existsSync(claudeKeeperPaths(keepersDir, sibling).dir), true);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("reattaches to a live keeper on the turn it was in, and forgets a dead one", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "bdx-adapter-keeper-"));
+    const harness = makeHarness({ baseDir, keepers: true });
+    const alive = ThreadId.make("thread-kept-alive");
+    const dead = ThreadId.make("thread-kept-dead");
+    const orphaned = ThreadId.make("thread-kept-orphaned");
+    const startInput = (threadId: ThreadId) => ({
+      threadId,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      runtimeMode: "full-access" as const,
+      resumeCursor: {
+        threadId,
+        resume: "4a2e4d7e-3f6a-4c1b-9d2e-6b1f0c9a8e11",
+        turnCount: 3,
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const config = yield* ServerConfig;
+      const keepersDir = NodePath.join(config.stateDir, CLAUDE_KEEPERS_DIRNAME);
+      // The live keeper's socket exists on disk; the dead one's never did.
+      const liveSocket = NodePath.join(baseDir, "live-keeper.sock");
+      NodeFS.writeFileSync(liveSocket, "");
+      // A live process whose socket is gone is abandoned — and, its command
+      // line not being a keeper's, left running rather than signalled on a
+      // pid that may have been reused since the file was written.
+      const bystander = NodeChildProcess.spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: "ignore" },
+      );
+      for (const [threadId, keeperPid, socketPath] of [
+        [alive, process.pid, liveSocket],
+        // A pid no process has and no socket: the keeper is gone, whatever
+        // its file says.
+        [dead, 2_147_483_647, NodePath.join(baseDir, "never-existed.sock")],
+        [orphaned, bystander.pid!, NodePath.join(baseDir, "orphaned.sock")],
+      ] as const) {
+        const paths = claudeKeeperPaths(keepersDir, threadId);
+        NodeFS.mkdirSync(paths.dir, { recursive: true });
+        NodeFS.writeFileSync(paths.metaPath, keeperMeta(keeperPid, socketPath));
+        yield* writeClaudeKeeperSession(paths.sessionPath, {
+          threadId,
+          startInput: startInput(threadId),
+          activeTurnId: `turn-kept-${threadId}`,
+          mcpSession: null,
+          savedAt: "2026-09-05T00:00:00.000Z",
+        });
+      }
+
+      const firstEvent = yield* Stream.take(adapter.streamEvents, 1).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const results = yield* adapter.reattachAll!();
+
+      assert.deepEqual(
+        results.map((result) => [
+          result.session.threadId,
+          result.session.status,
+          result.activeTurnId,
+        ]),
+        [[alive, "running", `turn-kept-${alive}`]],
+      );
+      // Resumed on the kept conversation, greeted through the keeper hook.
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.resume, "4a2e4d7e-3f6a-4c1b-9d2e-6b1f0c9a8e11");
+      assert.equal(typeof createInput?.options.spawnClaudeCodeProcess, "function");
+      assert.equal(yield* adapter.hasSession(alive), true);
+      assert.equal(yield* adapter.hasSession(dead), false);
+      assert.equal(NodeFS.existsSync(claudeKeeperPaths(keepersDir, dead).dir), false);
+      assert.equal(yield* adapter.hasSession(orphaned), false);
+      assert.equal(NodeFS.existsSync(claudeKeeperPaths(keepersDir, orphaned).dir), false);
+      assert.equal(bystander.exitCode, null);
+      assert.equal(bystander.signalCode, null);
+      bystander.kill("SIGKILL");
+
+      // No session.started for a session that never stopped: the first thing
+      // the projection hears is the kept turn ending, on the kept turn id.
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "4a2e4d7e-3f6a-4c1b-9d2e-6b1f0c9a8e11",
+        uuid: "result-kept",
+      } as unknown as SDKMessage);
+      const events = Array.from(yield* Fiber.join(firstEvent));
+      assert.equal(events[0]?.type, "turn.completed");
+      assert.equal(events[0]?.turnId, `turn-kept-${alive}`);
+    }).pipe(Effect.provide(harness.layer));
   });
 });

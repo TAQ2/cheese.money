@@ -8,6 +8,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { expandHomePath } from "../../pathExpansion.ts";
+import { withoutServerOnlyNodeOptions } from "../ProviderInstanceEnvironment.ts";
 
 export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function* (
   config: Pick<ClaudeSettings, "homePath">,
@@ -68,11 +69,52 @@ export const claudeConfigDirOverride = Effect.fn("claudeConfigDirOverride")(func
   return homePath.length === 0 ? null : yield* resolveClaudeHomePath({ homePath });
 });
 
+/**
+ * The environment fragment that stops a spawn reaching for claude.ai-hosted
+ * MCP servers, whatever the user's switch says.
+ *
+ * A DIFFERENT rule from the `claudeAiConnectorsEnabled` switch below, and the
+ * two must not be collapsed. The switch is a preference about the sessions a
+ * person works in. This is isolation for the spawns nobody works in — the
+ * capability probe, the provider health check, the keep-warm riddle, a thread
+ * title — which pair it with `--strict-mcp-config` and an empty `mcpServers`
+ * to load NO MCP at all. Somebody who switches connectors on wants them in
+ * their session, not in a two-token title generation.
+ *
+ * Named once because it was written out four times, and a literal repeated
+ * four times is a literal that will be changed in three places.
+ */
+export const CLAUDE_AI_MCP_SERVERS_OFF = { ENABLE_CLAUDEAI_MCP_SERVERS: "false" } as const;
+
+/**
+ * The environment a Claude CLI subprocess runs in.
+ *
+ * Always sanitized: the desktop shell forces `NODE_OPTIONS=--use-system-ca`
+ * onto the server for its own TLS, every descendant inherits it, and the CLI
+ * is a Bun binary that answers that flag by failing every HTTPS call with
+ * `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`. It cost a round of "every MCP server is
+ * down" on a machine where the same `claude mcp list` was green in a terminal.
+ * The strip used to live in `mergeProviderInstanceEnvironment`, which only the
+ * drivers call — so text generation, the sign-in, the status line and the MCP
+ * catalogue each shipped the bug independently. It belongs here, where every
+ * Claude spawn passes.
+ */
 export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function* (
-  config: Pick<ClaudeSettings, "homePath">,
+  config: Pick<ClaudeSettings, "homePath"> &
+    Partial<Pick<ClaudeSettings, "claudeAiConnectorsEnabled">>,
   baseEnv?: NodeJS.ProcessEnv,
 ): Effect.fn.Return<NodeJS.ProcessEnv, never, Path.Path> {
-  const resolvedBaseEnv = baseEnv ?? process.env;
+  const resolvedBaseEnv = {
+    ...withoutServerOnlyNodeOptions(baseEnv ?? process.env),
+    // The connectors this machine's claude.ai account carries — Gmail, Drive,
+    // Calendar — load into every session unless this is set. Unauthorized they
+    // are two stub tools each; authorized, one brings its whole surface into
+    // sessions that never asked for it. Set here rather than in the drivers so
+    // the sign-in, the status line and text generation get the same answer as
+    // a turn does, which is the lesson the NODE_OPTIONS strip above already
+    // paid for.
+    ...(config.claudeAiConnectorsEnabled === true ? {} : CLAUDE_AI_MCP_SERVERS_OFF),
+  };
   const resolvedHomePath = yield* claudeConfigDirOverride(config);
   if (resolvedHomePath === null) return resolvedBaseEnv;
   return {

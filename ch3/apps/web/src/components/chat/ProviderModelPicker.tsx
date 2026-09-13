@@ -46,7 +46,6 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
-
   // Resolve the active instance entry by exact routing key. The composer
   // resolves fallbacks before rendering this component; if the selected
   // instance disappears, do not infer a replacement from its driver kind.
@@ -134,84 +133,86 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   };
 
   return (
-    <Popover
-      open={isMenuOpen}
-      onOpenChange={(open) => {
-        if (props.disabled) {
-          setIsMenuOpen(false);
-          return;
-        }
-        setIsMenuOpen(open);
-      }}
-    >
-      <PopoverTrigger
-        render={
-          <ComposerControl
-            aria-label={props.triggerAriaLabel}
-            variant={props.triggerVariant ?? "ghost"}
-            data-chat-provider-model-picker="true"
-            className={cn(
-              "justify-between whitespace-nowrap",
-              // shrink-0, definitively: the composer's control cluster is an
-              // overflow-x-auto scroller, so nothing needs this button to
-              // shrink — every previous "min-w floor" guess still ellipsized
-              // the model name in crowded running-turn rows. Natural width up
-              // to max-w-56; the row scrolls when genuinely tight.
-              props.compact ? "max-w-42 shrink-0" : "max-w-56 shrink-0",
-              props.triggerClassName,
-            )}
-            disabled={props.disabled}
-          />
-        }
+    <>
+      <Popover
+        open={isMenuOpen}
+        onOpenChange={(open) => {
+          if (props.disabled) {
+            setIsMenuOpen(false);
+            return;
+          }
+          setIsMenuOpen(open);
+        }}
       >
-        <span className="flex min-w-0 flex-1 items-center gap-1.5">
-          {activeEntry ? (
-            <ProviderInstanceIcon
-              driverKind={activeEntry.driverKind}
-              displayName={activeEntry.displayName}
-              accentColor={activeEntry.accentColor}
-              showBadge={showInstanceBadge}
-              className="size-4"
-              iconClassName={cn("size-4", props.activeProviderIconClassName)}
-              indicatorBackground="var(--input)"
-              badgeClassName={cn(
-                "right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3",
-                "px-0.5 text-[7px]",
+        <PopoverTrigger
+          render={
+            <ComposerControl
+              aria-label={props.triggerAriaLabel}
+              variant={props.triggerVariant ?? "ghost"}
+              data-chat-provider-model-picker="true"
+              className={cn(
+                "justify-between whitespace-nowrap",
+                // shrink-0, definitively: the composer's control cluster is an
+                // overflow-x-auto scroller, so nothing needs this button to
+                // shrink — every previous "min-w floor" guess still ellipsized
+                // the model name in crowded running-turn rows. Natural width up
+                // to max-w-56; the row scrolls when genuinely tight.
+                props.compact ? "max-w-42 shrink-0" : "max-w-56 shrink-0",
+                props.triggerClassName,
               )}
+              disabled={props.disabled}
             />
-          ) : null}
-          <Tooltip>
-            <TooltipTrigger render={<span className="min-w-0 flex-1 overflow-hidden truncate" />}>
-              {triggerTitle}
-            </TooltipTrigger>
-            <TooltipPopup side="top">{triggerLabel}</TooltipPopup>
-          </Tooltip>
-        </span>
-        <span aria-hidden="true" className="flex items-center">
-          <ComposerControlChevron />
-        </span>
-      </PopoverTrigger>
-      <PopoverPopup
-        align="start"
-        className="border-0 bg-transparent p-0 shadow-none before:hidden [-webkit-backdrop-filter:none]! [--viewport-inline-padding:0] [backdrop-filter:none]!"
-        viewportClassName="rounded-lg !overflow-hidden p-0"
-      >
-        <ModelPickerContent
-          activeInstanceId={activeInstanceId}
-          model={props.model}
-          lockedProvider={props.lockedProvider}
-          lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
-          instanceEntries={props.instanceEntries}
-          {...(props.keybindings ? { keybindings: props.keybindings } : {})}
-          modelOptionsByInstance={props.modelOptionsByInstance}
-          terminalOpen={props.terminalOpen ?? false}
-          onRequestClose={() => setIsMenuOpen(false)}
-          {...(props.getModelDisabledReason
-            ? { getModelDisabledReason: props.getModelDisabledReason }
-            : {})}
-          onInstanceModelChange={handleInstanceModelChange}
-        />
-      </PopoverPopup>
-    </Popover>
+          }
+        >
+          <span className="flex min-w-0 flex-1 items-center gap-1.5">
+            {activeEntry ? (
+              <ProviderInstanceIcon
+                driverKind={activeEntry.driverKind}
+                displayName={activeEntry.displayName}
+                accentColor={activeEntry.accentColor}
+                showBadge={showInstanceBadge}
+                className="size-4"
+                iconClassName={cn("size-4", props.activeProviderIconClassName)}
+                indicatorBackground="var(--input)"
+                badgeClassName={cn(
+                  "right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3",
+                  "px-0.5 text-[7px]",
+                )}
+              />
+            ) : null}
+            <Tooltip>
+              <TooltipTrigger render={<span className="min-w-0 flex-1 overflow-hidden truncate" />}>
+                {triggerTitle}
+              </TooltipTrigger>
+              <TooltipPopup side="top">{triggerLabel}</TooltipPopup>
+            </Tooltip>
+          </span>
+          <span aria-hidden="true" className="flex items-center">
+            <ComposerControlChevron />
+          </span>
+        </PopoverTrigger>
+        <PopoverPopup
+          align="start"
+          className="border-0 bg-transparent p-0 shadow-none before:hidden [-webkit-backdrop-filter:none]! [--viewport-inline-padding:0] [backdrop-filter:none]!"
+          viewportClassName="rounded-lg !overflow-hidden p-0"
+        >
+          <ModelPickerContent
+            activeInstanceId={activeInstanceId}
+            model={props.model}
+            lockedProvider={props.lockedProvider}
+            lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
+            instanceEntries={props.instanceEntries}
+            {...(props.keybindings ? { keybindings: props.keybindings } : {})}
+            modelOptionsByInstance={props.modelOptionsByInstance}
+            terminalOpen={props.terminalOpen ?? false}
+            onRequestClose={() => setIsMenuOpen(false)}
+            {...(props.getModelDisabledReason
+              ? { getModelDisabledReason: props.getModelDisabledReason }
+              : {})}
+            onInstanceModelChange={handleInstanceModelChange}
+          />
+        </PopoverPopup>
+      </Popover>
+    </>
   );
 });

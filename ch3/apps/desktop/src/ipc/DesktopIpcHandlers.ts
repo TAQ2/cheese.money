@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 
 import * as DesktopIpc from "./DesktopIpc.ts";
 import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
+import { relaunchApp } from "./methods/lifecycle.ts";
 import {
   clearConnectionCatalog,
   getConnectionCatalog,
@@ -28,7 +29,6 @@ import {
   downloadUpdate,
   getUpdateState,
   installUpdate,
-  setUpdateChannel,
 } from "./methods/updates.ts";
 import {
   confirm,
@@ -41,6 +41,8 @@ import {
   setTheme,
   showContextMenu,
 } from "./methods/window.ts";
+import { setClaudeSignInEmailHint } from "./methods/claudeSignIn.ts";
+import { setAgentActivity } from "./methods/power.ts";
 import * as PreviewIpc from "./methods/preview.ts";
 import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
 
@@ -68,6 +70,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(issueSshWebSocketTicket);
   yield* ipc.handle(resolveSshPasswordPrompt);
 
+  yield* ipc.handle(relaunchApp);
+
   yield* ipc.handle(getServerExposureState);
   yield* ipc.handle(setServerExposureMode);
   yield* ipc.handle(setTailscaleServeEnabled);
@@ -81,10 +85,11 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(pickFolder);
   yield* ipc.handle(confirm);
   yield* ipc.handle(setTheme);
+  yield* ipc.handle(setAgentActivity);
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);
+  yield* ipc.handle(setClaudeSignInEmailHint);
   yield* ipc.handle(getUpdateState);
-  yield* ipc.handle(setUpdateChannel);
   yield* ipc.handle(downloadUpdate);
   yield* ipc.handle(installUpdate);
   yield* ipc.handle(checkForUpdate);

@@ -8,7 +8,7 @@ const decode = Schema.decodeUnknownSync(CH3ProjectFile);
 describe("CH3ProjectFile", () => {
   it("decodes a full project file", () => {
     const decoded = decode({
-      $schema: "https://ch3.codes/schema/ch3.json",
+      $schema: "https://raw.githubusercontent.com/CH3/ch3/main/docs/schema/ch3.json",
       iconPath: "assets/logo.svg",
       scripts: [
         {

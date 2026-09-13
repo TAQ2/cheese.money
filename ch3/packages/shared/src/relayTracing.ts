@@ -136,7 +136,9 @@ export function makeRelayClientTracingLayer(
     url: config.tracesUrl,
     headers: {
       Authorization: `Bearer ${config.tracesToken}`,
-      "X-Axiom-Dataset": config.tracesDataset,
+      // Vendor-neutral: the dataset rides the standard OTLP header, so this
+      // exports to any OTLP collector rather than naming one provider.
+      "X-OTLP-Dataset": config.tracesDataset,
     },
     resource: {
       serviceName: resource.serviceName,

@@ -6,6 +6,8 @@ import {
 } from "@ch3tools/contracts";
 
 import {
+  applyClaudePromptEffortPrefix,
+  stripClaudePromptEffortPrefix,
   buildProviderOptionSelectionsFromDescriptors,
   createModelCapabilities,
   createModelSelection,
@@ -162,6 +164,29 @@ describe("model slug normalization", () => {
     expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-5");
     expect(normalizeCustomModelSlug(" opus ")).toBe("opus");
   });
+
+  it("resolves every Fable 5.1 short alias a Task-tool delegation might name", () => {
+    const claude = ProviderDriverKind.make("claudeAgent");
+
+    // Exact-match lookup, no dot/hyphen folding — each form needs its own
+    // entry. A missing one here is not cosmetic: it is a delegation that
+    // never resolves to the real slug, and therefore never gets recognised
+    // as the metered model it actually is.
+    expect(normalizeModelSlug("fable", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable-5", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable-5-1", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable-5.1", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("claude-fable-5.1", claude)).toBe("claude-fable-5-1");
+  });
+
+  it("carries a conversation recorded on the retired Fable 5 slug forward to Fable 5.1", () => {
+    const claude = ProviderDriverKind.make("claudeAgent");
+
+    // A thread records the slug it ran on. When the catalogue swaps a model
+    // for its successor, the recorded slug must still resolve or the
+    // conversation silently reopens on the tier default.
+    expect(normalizeModelSlug("claude-fable-5", claude)).toBe("claude-fable-5-1");
+  });
 });
 
 describe("output style option selections", () => {
@@ -236,5 +261,24 @@ describe("output style option selections", () => {
         [{ id: OUTPUT_STYLE_OPTION_ID, value: "Caveman" }],
       ),
     ).toEqual([{ id: OUTPUT_STYLE_OPTION_ID, value: "Learning" }]);
+  });
+});
+
+describe("the ultrathink prompt marker", () => {
+  it("goes on once and only once", () => {
+    expect(applyClaudePromptEffortPrefix("ship it", "ultrathink")).toBe("Ultrathink:\nship it");
+    expect(applyClaudePromptEffortPrefix("Ultrathink:\nship it", "ultrathink")).toBe(
+      "Ultrathink:\nship it",
+    );
+  });
+
+  it("comes back off, which is how a prompt with only the marker reads as empty", () => {
+    // An outgoing prompt is not the draft it came from. A queued message
+    // edited down to nothing still carries the marker, and asking `.trim()`
+    // whether it says anything gets the wrong answer.
+    expect(stripClaudePromptEffortPrefix("Ultrathink:")).toBe("");
+    expect(stripClaudePromptEffortPrefix("Ultrathink:\n   ")).toBe("");
+    expect(stripClaudePromptEffortPrefix("Ultrathink:\nship it")).toBe("ship it");
+    expect(stripClaudePromptEffortPrefix("ship it")).toBe("ship it");
   });
 });

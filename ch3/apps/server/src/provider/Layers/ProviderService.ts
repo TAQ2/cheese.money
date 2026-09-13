@@ -51,7 +51,10 @@ import {
   ProviderUnsupportedError,
   ProviderValidationError,
 } from "../Errors.ts";
-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterShape,
+  ProviderReattachedSession,
+} from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
@@ -60,6 +63,7 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import { touchProviderActivity } from "../providerActivityClock.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
 /**
@@ -294,6 +298,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> =>
     Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
+      // The stall watchdog's clock: the last moment this thread's provider
+      // said anything at all. Stamped here because every driver's events pass
+      // through this one function.
+      Effect.tap((canonicalEvent) =>
+        DateTime.now.pipe(
+          Effect.map((now) => {
+            touchProviderActivity(
+              canonicalEvent.threadId,
+              canonicalEvent.type,
+              DateTime.toEpochMillis(now),
+            );
+          }),
+        ),
+      ),
       Effect.flatMap((canonicalEvent) =>
         increment(providerRuntimeEventsTotal, {
           provider: canonicalEvent.provider,
@@ -310,8 +328,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // `runStopAll` — replacing the pre-Slice-D startup snapshot so hot-added
   // instances become visible to those call sites as soon as settings edits
   // land.
+  //
+  // Each entry also carries the continuation key of the instance *build* it
+  // came from. That is what lets `listSessions` say which build is actually
+  // serving a session: the instance id survives a rebuild, the continuation
+  // key does not, because Claude and Codex both derive it from the home
+  // directory their processes are spawned with.
   const subscribedAdapters = yield* Ref.make(
-    new Map<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>(),
+    new Map<
+      ProviderInstanceId,
+      {
+        readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+        readonly continuationKey: string;
+      }
+    >(),
   );
 
   const getAdapterEntries = Ref.get(subscribedAdapters).pipe(
@@ -327,15 +357,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const reconcileInstanceSubscriptions = Effect.gen(function* () {
     const previous = yield* Ref.get(subscribedAdapters);
     const currentIds = yield* registry.listInstances();
-    const next = new Map<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>();
+    const next = new Map<
+      ProviderInstanceId,
+      {
+        readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+        readonly continuationKey: string;
+      }
+    >();
     for (const id of currentIds) {
       const adapterOption = yield* registry
         .getByInstance(id)
         .pipe(Effect.tapError(Effect.logWarning), Effect.option);
       if (Option.isNone(adapterOption)) continue;
+      const infoOption = yield* registry
+        .getInstanceInfo(id)
+        .pipe(Effect.tapError(Effect.logWarning), Effect.option);
+      if (Option.isNone(infoOption)) continue;
       const adapter = adapterOption.value;
-      next.set(id, adapter);
-      if (previous.get(id) !== adapter) {
+      next.set(id, {
+        adapter,
+        continuationKey: infoOption.value.continuationIdentity.continuationKey,
+      });
+      if (previous.get(id)?.adapter !== adapter) {
         yield* Stream.runForEach(adapter.streamEvents, (event) =>
           processRuntimeEvent(
             {
@@ -496,7 +539,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const currentAdapters = yield* getAdapterEntries;
     yield* Effect.forEach(
       currentAdapters,
-      ([instanceId, adapter]) =>
+      ([instanceId, { adapter }]) =>
         instanceId === input.currentInstanceId
           ? Effect.void
           : Effect.gen(function* () {
@@ -888,15 +931,23 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const listSessions: ProviderServiceMethod<"listSessions"> = Effect.fn("listSessions")(
     function* () {
       const currentAdapters = yield* getAdapterEntries;
-      const sessionsByProvider = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
-        adapter.listSessions().pipe(
-          Effect.map((sessions) =>
-            sessions.map((session) => ({
-              ...session,
-              providerInstanceId: instanceId,
-            })),
+      const sessionsByProvider = yield* Effect.forEach(
+        currentAdapters,
+        ([instanceId, { adapter, continuationKey }]) =>
+          adapter.listSessions().pipe(
+            Effect.map((sessions) =>
+              sessions.map((session) => ({
+                ...session,
+                providerInstanceId: instanceId,
+                // Which instance BUILD is serving this session, not merely
+                // which id it is filed under. A rebuilt instance keeps its id
+                // and gets a new continuation key, so this is the only field
+                // that can tell a turn-start that the live session belongs to
+                // the settings the user has just moved off.
+                instanceContinuationKey: continuationKey,
+              })),
+            ),
           ),
-        ),
       );
       const activeSessions = sessionsByProvider.flatMap((sessions) => sessions);
       const persistedBindings = yield* directory.listThreadIds().pipe(
@@ -1019,10 +1070,70 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const reattachSessions: ProviderServiceMethod<"reattachSessions"> = Effect.fn(
+    "ProviderService.reattachSessions",
+  )(function* () {
+    const currentAdapters = yield* getAdapterEntries;
+    const knownInstanceIds = new Set<string>(currentAdapters.map(([id]) => id));
+    const reattached: Array<ThreadId> = [];
+    for (const [instanceId, { adapter }] of currentAdapters) {
+      if (adapter.reattachAll === undefined) continue;
+      const results = yield* adapter.reattachAll(knownInstanceIds).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider reattach failed", {
+            providerInstanceId: instanceId,
+            errorTag: causeErrorTag(cause),
+          }).pipe(Effect.as([] as ReadonlyArray<ProviderReattachedSession>)),
+        ),
+      );
+      for (const result of results) {
+        const session = { ...result.session, providerInstanceId: instanceId };
+        if (result.mcpSession !== null) {
+          yield* McpSessionRegistry.adoptActiveMcpCredential(result.mcpSession);
+          McpProviderSession.setMcpProviderSession(result.mcpSession);
+        }
+        yield* upsertSessionBinding(session, session.threadId, {
+          lastRuntimeEvent: "provider.reattach",
+          lastRuntimeEventAt: yield* nowIso,
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("provider reattach could not bind the session", {
+              threadId: session.threadId,
+              error,
+            }),
+          ),
+        );
+        reattached.push(session.threadId);
+      }
+    }
+    if (reattached.length > 0) {
+      yield* Effect.logInfo("provider sessions reattached after restart", {
+        threadIds: reattached,
+      });
+    }
+    return reattached;
+  });
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
-    const activeSessions = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
+    // Processes that can outlive this server are let go of first; their
+    // bindings stay exactly as they are, so the next server finds a running
+    // session to rebuild rather than a stopped one to mourn.
+    const detached = new Set<ThreadId>();
+    for (const [instanceId, { adapter }] of currentAdapters) {
+      if (adapter.detachAll === undefined) continue;
+      const threadIdsDetached = yield* adapter.detachAll().pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider detach failed; stopping instead", {
+            providerInstanceId: instanceId,
+            errorTag: causeErrorTag(cause),
+          }).pipe(Effect.as([] as ReadonlyArray<ThreadId>)),
+        ),
+      );
+      for (const threadId of threadIdsDetached) detached.add(threadId);
+    }
+    const activeSessions = yield* Effect.forEach(currentAdapters, ([instanceId, { adapter }]) =>
       adapter.listSessions().pipe(
         Effect.map((sessions) =>
           sessions.map((session) => ({
@@ -1032,20 +1143,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ),
       ),
     ).pipe(Effect.map((sessionsByAdapter) => sessionsByAdapter.flatMap((sessions) => sessions)));
-    yield* Effect.forEach(activeSessions, (session) =>
-      Effect.flatMap(nowIso, (lastRuntimeEventAt) =>
-        upsertSessionBinding(session, session.threadId, {
-          lastRuntimeEvent: "provider.stopAll",
-          lastRuntimeEventAt,
-        }),
-      ),
+    yield* Effect.forEach(
+      activeSessions.filter((session) => !detached.has(session.threadId)),
+      (session) =>
+        Effect.flatMap(nowIso, (lastRuntimeEventAt) =>
+          upsertSessionBinding(session, session.threadId, {
+            lastRuntimeEvent: "provider.stopAll",
+            lastRuntimeEventAt,
+          }),
+        ),
     ).pipe(Effect.asVoid);
-    yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
+    yield* Effect.forEach(currentAdapters, ([, { adapter }]) => adapter.stopAll()).pipe(
+      Effect.asVoid,
+    );
     yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
     McpProviderSession.clearAllMcpProviderSessions();
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) =>
       Effect.gen(function* () {
+        if (detached.has(binding.threadId)) return;
         const providerInstanceId = dieOnMissingBindingInstanceId(
           "ProviderService.stopAll",
           binding,
@@ -1196,6 +1312,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listRewindTargets,
     rewindFiles,
     listSessions,
+    reattachSessions,
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,

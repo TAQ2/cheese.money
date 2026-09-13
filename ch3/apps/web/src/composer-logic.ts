@@ -460,6 +460,37 @@ export function resolveInterceptedComposerBuiltin(input: {
     : null;
 }
 
+/**
+ * Built-ins that throw away the conversation the running turn is using.
+ *
+ * Only `/clear` so far. Both of its paths are destructive mid-turn and neither
+ * asks first: a runtime that advertises its own executes it in-session — Claude
+ * answered one with `conversation_reset` while the turn was still streaming —
+ * and CH3's fallback stops the provider session out from under it.
+ */
+const CONTEXT_RESETTING_BUILTINS: ReadonlySet<ComposerInteractiveBuiltin> = new Set(["clear"]);
+
+/**
+ * The context-resetting built-in this prompt would run against a turn that is
+ * still in flight, or null when there is nothing to stop.
+ *
+ * Checked BEFORE interception, because the answer is the same whichever path
+ * would have handled it. A message sent mid-turn is ordinary steering and stays
+ * that way — this is only about the ones that destroy what the turn is standing
+ * on. The user keeps both ways out: let the turn finish, or stop it.
+ */
+export function resolveBlockedContextReset(input: {
+  readonly trimmedPrompt: string;
+  readonly hasAttachments: boolean;
+  readonly isTurnInFlight: boolean;
+}): ComposerInteractiveBuiltin | null {
+  if (!input.isTurnInFlight) return null;
+  if (input.hasAttachments) return null;
+  const builtin = parseComposerInteractiveBuiltin(input.trimmedPrompt);
+  if (builtin === null || !CONTEXT_RESETTING_BUILTINS.has(builtin)) return null;
+  return builtin;
+}
+
 /** Notice copy for a guarded built-in; null when it has a native CH3 view. */
 export function describeInteractiveBuiltin(
   command: ComposerInteractiveBuiltin,

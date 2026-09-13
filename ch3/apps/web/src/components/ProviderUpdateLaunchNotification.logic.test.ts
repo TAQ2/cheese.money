@@ -120,7 +120,7 @@ describe("provider update launch notification logic", () => {
           instanceId: instanceId("codex"),
           latestVersion: "1.1.0",
         }),
-        provider({ driver: driver("cursor"), latestVersion: "0.3.0" }),
+        provider({ driver: driver("opencode"), latestVersion: "0.3.0" }),
       ]),
     ).toHaveLength(2);
   });
@@ -206,13 +206,13 @@ describe("provider update launch notification logic", () => {
       version: "1.0.0",
       latestVersion: "1.1.0",
     });
-    const cursor = updateCandidate({
-      driver: driver("cursor"),
+    const maple = updateCandidate({
+      driver: driver("opencode"),
       version: "0.2.0",
       latestVersion: "0.3.0",
     });
 
-    expect(providerUpdateNotificationKey([codex, cursor])).toBe("codex:1.1.0|cursor:0.3.0");
+    expect(providerUpdateNotificationKey([codex, maple])).toBe("codex:1.1.0|opencode:0.3.0");
     expect(providerUpdateNotificationKey([])).toBeNull();
   });
 
@@ -295,12 +295,12 @@ describe("provider update launch notification logic", () => {
     const view = getProviderUpdateInitialToastView({
       updateProviders: [
         updateCandidate({ driver: driver("codex"), canUpdate: false }),
-        updateCandidate({ driver: driver("cursor"), canUpdate: false }),
+        updateCandidate({ driver: driver("opencode"), canUpdate: false }),
       ],
       oneClickProviders: [],
     });
 
-    expect(view.description).toBe("Codex and Cursor can be updated from provider settings.");
+    expect(view.description).toBe("Codex and OpenCode can be updated from provider settings.");
   });
 
   it("uses server update state for running progress", () => {
@@ -378,7 +378,7 @@ describe("provider update launch notification logic", () => {
     const view = getProviderUpdateProgressToastView({
       providers: [
         provider({
-          driver: driver("cursor"),
+          driver: driver("opencode"),
           updateState: {
             status: "unchanged",
             startedAt: checkedAt,
@@ -395,7 +395,7 @@ describe("provider update launch notification logic", () => {
       phase: "unchanged",
       type: "warning",
       title: "Provider still needs an update",
-      description: "Cursor still appears outdated. Check provider settings for details.",
+      description: "OpenCode still appears outdated. Check provider settings for details.",
     });
   });
 
@@ -464,17 +464,36 @@ describe("provider update launch notification logic", () => {
     });
   });
 
+  it("prefers the server's own reason over the sentence wrapping it", () => {
+    // `ServerProviderUpdateError.message` prefixes the reason with "Provider
+    // update failed for <driver>:", which is noise next to a toast title that
+    // already names the provider. The reason is the part written for a person:
+    // what the updater said, and what to do about it.
+    const reason =
+      "The update command finished without an error, but this provider is still on 1.18.23. GitHub rate-limits anonymous API requests per network address, and this one has spent its hourly quota.";
+    const error = Object.assign(new Error(`Provider update failed for opencode: ${reason}`), {
+      _tag: "ServerProviderUpdateError",
+      reason,
+    });
+    const results = [AsyncResult.failure(Cause.fail(error))];
+
+    expect(firstFailedProviderUpdateMessage(results)).toBe(reason);
+    expect(firstRejectedProviderUpdateMessage([{ status: "rejected", reason: error }])).toBe(
+      reason,
+    );
+  });
+
   it("collects only attempted provider snapshots from update responses", () => {
     const codex = provider({ driver: driver("codex") });
-    const cursor = provider({ driver: driver("cursor") });
-    const results = [AsyncResult.success({ providers: [codex, cursor] })];
+    const maple = provider({ driver: driver("opencode") });
+    const results = [AsyncResult.success({ providers: [codex, maple] })];
 
     expect(
       collectUpdatedProviderSnapshots({
         results,
-        providerInstanceIds: new Set([cursor.instanceId]),
+        providerInstanceIds: new Set([maple.instanceId]),
       }),
-    ).toEqual([cursor]);
+    ).toEqual([maple]);
   });
 
   it("summarizes active provider updates for the sidebar pill", () => {
@@ -490,7 +509,7 @@ describe("provider update launch notification logic", () => {
         },
       }),
       provider({
-        driver: driver("cursor"),
+        driver: driver("opencode"),
         updateState: {
           status: "queued",
           startedAt: null,
@@ -504,7 +523,7 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       tone: "loading",
       title: "Updating 2 providers",
-      description: "Codex and Cursor updates are in progress.",
+      description: "Codex and OpenCode updates are in progress.",
     });
   });
 
@@ -589,7 +608,7 @@ describe("provider update launch notification logic", () => {
     const view = getProviderUpdateSidebarPillView(
       [
         provider({
-          driver: driver("cursor"),
+          driver: driver("opencode"),
           updateState: {
             status: "unchanged",
             startedAt: checkedAt,
@@ -603,9 +622,9 @@ describe("provider update launch notification logic", () => {
     );
 
     expect(view).toMatchObject({
-      key: "unchanged:cursor:2026-04-23T10:00:00.000Z:still old",
+      key: "unchanged:opencode:2026-04-23T10:00:00.000Z:still old",
       tone: "warning",
-      title: "Cursor still needs an update",
+      title: "OpenCode still needs an update",
       dismissible: true,
     });
   });
@@ -681,7 +700,7 @@ describe("provider update launch notification logic", () => {
     expect(
       getProviderUpdateSidebarPillView([
         provider({ driver: driver("codex"), canUpdate: true }),
-        provider({ driver: driver("cursor"), canUpdate: false }),
+        provider({ driver: driver("opencode"), canUpdate: false }),
       ]),
     ).toBeNull();
   });

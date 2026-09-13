@@ -462,6 +462,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
             runtimeMode: "full-access",
             activeTurnId: "turn-1" as TurnId,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
           latestUserMessageAt: now,
@@ -472,6 +473,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
 
         const orchestrationEngine = {
           readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
           dispatch: () => Effect.succeed({ sequence: 1 }),
           streamDomainEvents: Stream.fromQueue(events),
           latestSequence: Effect.succeed(0),
@@ -620,6 +622,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
             runtimeMode: "full-access",
             activeTurnId: "turn-1" as TurnId,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
           latestUserMessageAt: now,
@@ -664,6 +667,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
           }),
           Layer.succeed(OrchestrationEngineService, {
             readEvents: () => Stream.empty,
+            readThreadEvents: () => Stream.empty,
             dispatch: () => Effect.succeed({ sequence: 1 }),
             streamDomainEvents: Stream.fromQueue(events),
             latestSequence: Effect.succeed(0),

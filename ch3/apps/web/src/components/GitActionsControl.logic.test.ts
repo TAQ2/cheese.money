@@ -32,6 +32,19 @@ function status(overrides: Partial<VcsStatusResult> = {}): VcsStatusResult {
   };
 }
 
+/**
+ * The menu minus Pull and Publish.
+ *
+ * Those two moved into the menu when the always-visible button became
+ * "View <change request>", and they are covered on their own below. The
+ * assertions in this file are about commit/push/change-request availability,
+ * so they read the menu without the transport entries rather than restating
+ * two more expectations in every case.
+ */
+function coreMenuItems(...args: Parameters<typeof buildMenuItems>) {
+  return buildMenuItems(...args).filter((item) => item.id !== "pull" && item.id !== "publish");
+}
+
 describe("when: ref is clean and has an open PR", () => {
   it("resolveQuickAction opens the existing PR", () => {
     const quick = resolveQuickAction(
@@ -51,7 +64,7 @@ describe("when: ref is clean and has an open PR", () => {
   });
 
   it("buildMenuItems disables commit/push and enables open PR", () => {
-    const items = buildMenuItems(
+    const items = coreMenuItems(
       status({
         pr: {
           number: 11,
@@ -104,7 +117,7 @@ describe("when: actions are busy", () => {
   });
 
   it("buildMenuItems disables all actions", () => {
-    const items = buildMenuItems(status(), true);
+    const items = coreMenuItems(status(), true);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -146,7 +159,7 @@ describe("when: git status is unavailable", () => {
   });
 
   it("buildMenuItems returns no menu items", () => {
-    const items = buildMenuItems(null, false);
+    const items = coreMenuItems(null, false);
     assert.deepEqual(items, []);
   });
 });
@@ -184,7 +197,7 @@ describe("when: ref is clean, ahead, and has an open PR", () => {
   });
 
   it("buildMenuItems enables push and keeps open PR available", () => {
-    const items = buildMenuItems(
+    const items = coreMenuItems(
       status({
         aheadCount: 2,
         pr: {
@@ -227,17 +240,8 @@ describe("when: ref is clean, ahead, and has an open PR", () => {
 });
 
 describe("when: ref is clean, ahead, and has no open PR", () => {
-  it("resolveQuickAction pushes and creates a PR", () => {
-    const quick = resolveQuickAction(status({ aheadCount: 2, pr: null }), false);
-    assert.deepInclude(quick, {
-      kind: "run_action",
-      action: "create_pr",
-      label: "Push & create PR",
-    });
-  });
-
   it("buildMenuItems enables push and create PR, with commit disabled", () => {
-    const items = buildMenuItems(status({ aheadCount: 2, pr: null }), false);
+    const items = coreMenuItems(status({ aheadCount: 2, pr: null }), false);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -279,17 +283,18 @@ describe("when: source control provider uses merge requests", () => {
     });
 
     const quick = resolveQuickAction(gitlabStatus, false);
-    const items = buildMenuItems(gitlabStatus, false);
+    const items = coreMenuItems(gitlabStatus, false);
 
+    // The provider's own word for a change request shows up in the quick
+    // action and in the menu entry alike.
     assert.deepInclude(quick, {
       kind: "run_action",
-      action: "create_pr",
       label: "Push & create MR",
     });
-    assert.deepInclude(items[2], {
-      id: "pr",
-      label: "Create MR",
-    });
+    assert.deepInclude(
+      items.find((item) => item.id === "pr"),
+      { id: "pr", label: "Create MR" },
+    );
   });
 });
 
@@ -302,28 +307,13 @@ describe("when: ref is clean, up to date, and has no open PR", () => {
       pr: null,
     });
 
-    const quick = resolveQuickAction(syncedFeature, false);
-    assert.deepInclude(quick, {
-      label: "Create PR",
-      disabled: false,
-      kind: "run_action",
-      action: "create_pr",
-    });
-
-    const items = buildMenuItems(syncedFeature, false);
+    // Creating is offered by the menu; the button itself never becomes it.
+    const items = coreMenuItems(syncedFeature, false);
     assert.equal(items.find((item) => item.id === "pr")?.disabled, false);
   });
 
-  it("resolveQuickAction returns disabled no-action state", () => {
-    const quick = resolveQuickAction(
-      status({ aheadCount: 0, behindCount: 0, hasWorkingTreeChanges: false, pr: null }),
-      false,
-    );
-    assert.deepInclude(quick, { kind: "show_hint", label: "Commit", disabled: true });
-  });
-
   it("buildMenuItems disables commit, push, and create PR", () => {
-    const items = buildMenuItems(status({ aheadCount: 0, behindCount: 0, pr: null }), false);
+    const items = coreMenuItems(status({ aheadCount: 0, behindCount: 0, pr: null }), false);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -354,13 +344,8 @@ describe("when: ref is clean, up to date, and has no open PR", () => {
 });
 
 describe("when: ref is behind upstream", () => {
-  it("resolveQuickAction returns pull", () => {
-    const quick = resolveQuickAction(status({ behindCount: 2 }), false);
-    assert.deepInclude(quick, { kind: "run_pull", label: "Pull", disabled: false });
-  });
-
   it("buildMenuItems disables push and create PR", () => {
-    const items = buildMenuItems(status({ behindCount: 1, pr: null }), false);
+    const items = coreMenuItems(status({ behindCount: 1, pr: null }), false);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -391,14 +376,29 @@ describe("when: ref is behind upstream", () => {
 });
 
 describe("when: ref has diverged from upstream", () => {
-  it("resolveQuickAction returns a disabled sync hint", () => {
-    const quick = resolveQuickAction(status({ aheadCount: 2, behindCount: 1 }), false);
-    assert.deepEqual(quick, {
-      label: "Sync ref",
-      disabled: true,
+  it("offers Pull in the menu and still shows the change request on the button", () => {
+    const diverged = status({ aheadCount: 2, behindCount: 3, pr: null });
+    // Pull used to be the always-visible action in this state. It moved into
+    // the menu rather than disappearing, and is enabled only while behind.
+    assert.deepInclude(
+      buildMenuItems(diverged, false).find((item) => item.id === "pull"),
+      { id: "pull", label: "Pull", disabled: false, kind: "run_pull" },
+    );
+    // The button itself refuses: a diverged ref has to be rebased or merged
+    // before anything can be pushed from it.
+    assert.deepInclude(resolveQuickAction(diverged, false), {
       kind: "show_hint",
-      hint: "Branch has diverged from upstream. Rebase/merge first.",
+      label: "Sync ref",
     });
+  });
+
+  it("disables Pull once the ref is not behind", () => {
+    assert.equal(
+      buildMenuItems(status({ aheadCount: 2, behindCount: 0 }), false).find(
+        (item) => item.id === "pull",
+      )?.disabled,
+      true,
+    );
   });
 });
 
@@ -449,7 +449,7 @@ describe("when: working tree has local changes", () => {
   });
 
   it("buildMenuItems enables commit and disables push and PR", () => {
-    const items = buildMenuItems(status({ hasWorkingTreeChanges: true }), false);
+    const items = coreMenuItems(status({ hasWorkingTreeChanges: true }), false);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -479,7 +479,7 @@ describe("when: working tree has local changes", () => {
   });
 
   it("buildMenuItems enables push for ahead commits while local changes remain uncommitted", () => {
-    const items = buildMenuItems(
+    const items = coreMenuItems(
       status({
         refName: "feature/test",
         hasWorkingTreeChanges: true,
@@ -522,50 +522,27 @@ describe("when: working tree has local changes", () => {
 });
 
 describe("when: on default ref without open PR", () => {
-  it("resolveQuickAction returns commit and push when local changes exist", () => {
-    const quick = resolveQuickAction(
-      status({ refName: "main", hasWorkingTreeChanges: true }),
-      false,
-      true,
-    );
-    assert.deepInclude(quick, {
-      kind: "run_action",
-      action: "commit_push",
-      label: "Commit & push",
-      disabled: false,
-    });
+  it("still shows the change request button, and explains there is none", () => {
+    // Even here the button is never the action that writes: it says what is
+    // missing instead of quietly turning into commit & push.
+    const quick = resolveQuickAction(status({ refName: "main", pr: null }), false, true);
+    assert.equal(quick.kind, "show_hint");
+    assert.equal(quick.label, "View PR");
+    assert.equal(quick.disabled, false);
+    assert.include(quick.hint ?? "", "default branch");
   });
 
-  it("resolveQuickAction returns push when ref is ahead", () => {
-    const quick = resolveQuickAction(
-      status({ refName: "main", aheadCount: 2, pr: null }),
-      false,
-      true,
+  it("offers Publish in the menu when there is no origin remote", () => {
+    assert.deepInclude(
+      buildMenuItems(status({ pr: null }), false, false).find((item) => item.id === "publish"),
+      { id: "publish", label: "Publish repository", kind: "open_publish", disabled: false },
     );
-    assert.deepInclude(quick, {
-      kind: "run_action",
-      action: "commit_push",
-      label: "Push",
-      disabled: false,
-    });
   });
 });
 
 describe("when: working tree has local changes and ref is behind upstream", () => {
-  it("resolveQuickAction still prefers commit, push, and create PR", () => {
-    const quick = resolveQuickAction(
-      status({ hasWorkingTreeChanges: true, behindCount: 1 }),
-      false,
-    );
-    assert.deepInclude(quick, {
-      kind: "run_action",
-      action: "commit_push_pr",
-      label: "Commit, push & PR",
-    });
-  });
-
   it("buildMenuItems enables commit and keeps push and PR disabled", () => {
-    const items = buildMenuItems(status({ hasWorkingTreeChanges: true, behindCount: 2 }), false);
+    const items = coreMenuItems(status({ hasWorkingTreeChanges: true, behindCount: 2 }), false);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -605,7 +582,7 @@ describe("when: HEAD is detached and there are no local changes", () => {
   });
 
   it("buildMenuItems keeps commit, push, and PR disabled", () => {
-    const items = buildMenuItems(status({ refName: null, hasWorkingTreeChanges: false }), false);
+    const items = coreMenuItems(status({ refName: null, hasWorkingTreeChanges: false }), false);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -636,19 +613,6 @@ describe("when: HEAD is detached and there are no local changes", () => {
 });
 
 describe("when: ref has no upstream configured", () => {
-  it("resolveQuickAction is disabled when clean, no upstream, and no local commits are ahead", () => {
-    const quick = resolveQuickAction(
-      status({ hasUpstream: false, pr: null, aheadCount: 0 }),
-      false,
-    );
-    assert.deepInclude(quick, {
-      kind: "show_hint",
-      label: "Push",
-      hint: "No local commits to push.",
-      disabled: true,
-    });
-  });
-
   it("resolveQuickAction opens PR when clean, no upstream, no local commits are ahead, and PR exists", () => {
     const quick = resolveQuickAction(
       status({
@@ -696,7 +660,7 @@ describe("when: ref has no upstream configured", () => {
   });
 
   it("buildMenuItems disables push and create PR when no commits are ahead", () => {
-    const items = buildMenuItems(status({ hasUpstream: false, pr: null, aheadCount: 0 }), false);
+    const items = coreMenuItems(status({ hasUpstream: false, pr: null, aheadCount: 0 }), false);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -725,43 +689,8 @@ describe("when: ref has no upstream configured", () => {
     ]);
   });
 
-  it("resolveQuickAction runs push and create PR when no upstream and commits are ahead", () => {
-    const quick = resolveQuickAction(
-      status({
-        hasUpstream: false,
-        aheadCount: 2,
-        pr: null,
-      }),
-      false,
-    );
-    assert.deepInclude(quick, {
-      kind: "run_action",
-      action: "create_pr",
-      label: "Push & create PR",
-      disabled: false,
-    });
-  });
-
-  it("resolveQuickAction publishes when no origin remote exists", () => {
-    const quick = resolveQuickAction(
-      status({
-        hasUpstream: false,
-        aheadCount: 2,
-        pr: null,
-      }),
-      false,
-      false,
-      false,
-    );
-    assert.deepEqual(quick, {
-      kind: "open_publish",
-      label: "Publish repository",
-      disabled: false,
-    });
-  });
-
   it("buildMenuItems enables create PR when no upstream and commits are ahead", () => {
-    const items = buildMenuItems(status({ hasUpstream: false, pr: null, aheadCount: 2 }), false);
+    const items = coreMenuItems(status({ hasUpstream: false, pr: null, aheadCount: 2 }), false);
     assert.deepEqual(items, [
       {
         id: "commit",
@@ -791,7 +720,7 @@ describe("when: ref has no upstream configured", () => {
   });
 
   it("buildMenuItems hides push and create PR when no origin remote exists", () => {
-    const items = buildMenuItems(
+    const items = coreMenuItems(
       status({ hasUpstream: false, pr: null, aheadCount: 2 }),
       false,
       false,
@@ -808,46 +737,8 @@ describe("when: ref has no upstream configured", () => {
     ]);
   });
 
-  it("resolveQuickAction is disabled on default ref when no upstream exists and no commits are ahead", () => {
-    const quick = resolveQuickAction(
-      status({
-        refName: "main",
-        hasUpstream: false,
-        aheadCount: 0,
-        pr: null,
-      }),
-      false,
-      true,
-    );
-    assert.deepInclude(quick, {
-      kind: "show_hint",
-      label: "Push",
-      hint: "No local commits to push.",
-      disabled: true,
-    });
-  });
-
-  it("resolveQuickAction uses push-only on default ref when no upstream exists and commits are ahead", () => {
-    const quick = resolveQuickAction(
-      status({
-        refName: "main",
-        hasUpstream: false,
-        aheadCount: 1,
-        pr: null,
-      }),
-      false,
-      true,
-    );
-    assert.deepInclude(quick, {
-      kind: "run_action",
-      action: "commit_push",
-      label: "Push",
-      disabled: false,
-    });
-  });
-
   it("buildMenuItems still disables push and create PR when ref is behind", () => {
-    const items = buildMenuItems(
+    const items = coreMenuItems(
       status({
         hasUpstream: false,
         behindCount: 1,

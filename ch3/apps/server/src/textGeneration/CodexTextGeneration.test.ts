@@ -163,9 +163,9 @@ function makeFakeCodexBinary(
             ]
           : []),
         'if [ -n "$output_path" ]; then',
-        "  cat > \"$output_path\" <<'__CH3CODE_FAKE_CODEX_OUTPUT__'",
+        "  cat > \"$output_path\" <<'__CH3_FAKE_CODEX_OUTPUT__'",
         input.output,
-        "__CH3CODE_FAKE_CODEX_OUTPUT__",
+        "__CH3_FAKE_CODEX_OUTPUT__",
         "fi",
         `exit ${input.exitCode ?? 0}`,
         "",

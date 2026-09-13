@@ -1,6 +1,7 @@
 import type { ScopedProjectRef } from "@ch3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@ch3tools/client-runtime/environment";
 import { FolderPlusIcon } from "lucide-react";
+
 import { useCallback, useMemo } from "react";
 
 import { openCommandPalette } from "~/commandPaletteBus";
@@ -144,8 +145,11 @@ export function DraftHeroHeadline({
     </button>
   );
 
+  const headlineClassName =
+    "mx-auto w-full max-w-5xl text-center font-normal text-2xl text-foreground tracking-tight sm:text-3xl";
+
   return (
-    <h1 className="mx-auto w-full max-w-5xl text-center font-normal text-2xl text-foreground tracking-tight sm:text-3xl">
+    <h1 className={headlineClassName}>
       {hasResolvedProject ? (
         <>What should we build in {projectSelector}?</>
       ) : canChooseProject ? (

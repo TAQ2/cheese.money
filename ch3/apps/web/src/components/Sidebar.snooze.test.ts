@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveSnoozePresets, snoozeWakeDescription, snoozeWakeLabel } from "./Sidebar.snooze";
+import {
+  customSnoozeDefaultInput,
+  resolveCustomSnooze,
+  resolveSnoozePresets,
+  snoozeWakeDescription,
+  snoozeWakeLabel,
+} from "./Sidebar.snooze";
 
 // Local-time constructor so preset math is timezone-stable in tests.
 function localDate(year: number, month: number, day: number, hour: number, minute = 0): Date {
@@ -90,5 +96,43 @@ describe("snoozeWakeDescription", () => {
       "tomorrow",
     );
     expect(snoozeWakeDescription(localDate(2026, 4, 13, 9).toISOString(), now)).toMatch(/Mon/);
+  });
+});
+
+describe("customSnoozeDefaultInput", () => {
+  it("opens on tomorrow 9:00, written as local wall time", () => {
+    expect(customSnoozeDefaultInput(localDate(2026, 4, 8, 22, 30))).toBe("2026-04-09T09:00");
+  });
+
+  it("crosses the month boundary by calendar day, not by adding 24h", () => {
+    expect(customSnoozeDefaultInput(localDate(2026, 4, 30, 10))).toBe("2026-05-01T09:00");
+  });
+});
+
+describe("resolveCustomSnooze", () => {
+  const now = localDate(2026, 4, 8, 10);
+
+  it("reads the field as local wall time and returns that instant as ISO", () => {
+    const snoozedUntil = resolveCustomSnooze("2026-04-09T14:30", now);
+    expect(snoozedUntil).not.toBeNull();
+    const wake = new Date(snoozedUntil!);
+    expect(wake.getFullYear()).toBe(2026);
+    expect(wake.getMonth()).toBe(3);
+    expect(wake.getDate()).toBe(9);
+    expect(wake.getHours()).toBe(14);
+    expect(wake.getMinutes()).toBe(30);
+  });
+
+  it("refuses empty, unparseable, past, and exactly-now values", () => {
+    expect(resolveCustomSnooze("", now)).toBeNull();
+    expect(resolveCustomSnooze("not-a-date", now)).toBeNull();
+    expect(resolveCustomSnooze("2026-04-08T09:00", now)).toBeNull();
+    // Strictly-future only: the decider rejects a wake time equal to now.
+    expect(resolveCustomSnooze("2026-04-08T10:00", now)).toBeNull();
+  });
+
+  it("accepts a wake time a minute out and one years away", () => {
+    expect(resolveCustomSnooze("2026-04-08T10:01", now)).not.toBeNull();
+    expect(resolveCustomSnooze("2031-01-01T00:00", now)).not.toBeNull();
   });
 });

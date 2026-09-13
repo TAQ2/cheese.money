@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -35,6 +36,7 @@ import * as Stream from "effect/Stream";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -262,6 +264,44 @@ validationLayer("CodexAdapterLive validation", (it) => {
       NodeAssert.equal(validationRuntimeFactory.factory.mock.calls.length, 0);
     }),
   );
+  /**
+   * Codex registers the same CH3 MCP server Claude does, so it needs the
+   * same clock: `spawn_model_agent` waits on a child model by design, and a
+   * default that cuts the call off throws the answer away rather than the
+   * wait — the exact defect the Claude side had at 60 s.
+   */
+  it.effect("gives the CH3 MCP server the same half-hour clock Claude gets", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-codex-mcp-clock");
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("11111111-1111-4111-8111-111111111111"),
+        threadId,
+        providerSessionId: "session-codex-mcp",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:1/mcp",
+        authorizationHeader: "Bearer test",
+      });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId)),
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const call = validationRuntimeFactory.factory.mock.calls[0]?.[0] as
+        | { readonly appServerArgs?: ReadonlyArray<string> }
+        | undefined;
+      const args = call?.appServerArgs ?? [];
+      NodeAssert.ok(args.includes("mcp_servers.ch3.tool_timeout_sec=1800"));
+      NodeAssert.equal(McpProviderSession.CH3CODE_MCP_TOOL_TIMEOUT_MS / 1000, 1800);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("maps codex model options before starting a session", () =>
     Effect.gen(function* () {
       validationRuntimeFactory.factory.mockClear();

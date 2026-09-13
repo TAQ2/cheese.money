@@ -1,5 +1,6 @@
 import type {
   OrchestrationEvent,
+  OrchestrationThreadActivitiesPage,
   OrchestrationThreadActivity,
   OrchestrationThreadDetailSnapshot,
 } from "@ch3tools/contracts";
@@ -187,6 +188,18 @@ export function projectActivityPayload(
     projectedData.kind = data.kind;
   }
 
+  // A Task call names the model it wants in `input.model`, and the subagent
+  // roster reads it to say what each delegation is running on. Copy that one
+  // field rather than `input` itself: the same object carries the agent's
+  // whole prompt, which is unbounded and is the sort of bulk this projection
+  // exists to drop.
+  if (payload.itemType === "collab_agent_tool_call") {
+    const model = asRecord(data.input)?.model;
+    if (typeof model === "string" && model.trim().length > 0) {
+      projectedData.input = { model };
+    }
+  }
+
   const rawOutput = projectRawOutput(data.rawOutput);
   if (rawOutput) {
     projectedData.rawOutput = rawOutput;
@@ -258,6 +271,21 @@ export function projectThreadDetailSnapshot(
         projectActivityPayload,
       ),
     },
+  };
+}
+
+/**
+ * Same trimming as the snapshot path, applied to one older-activities page.
+ * The stale context-window filter sees only this page's rows: a turn split
+ * across a page boundary may keep one extra context-window activity, which is
+ * cosmetic and resolves as the reader keeps paging.
+ */
+export function projectThreadActivitiesPage(
+  page: OrchestrationThreadActivitiesPage,
+): OrchestrationThreadActivitiesPage {
+  return {
+    ...page,
+    activities: dropStaleContextWindowActivities(page.activities).map(projectActivityPayload),
   };
 }
 

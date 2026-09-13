@@ -259,6 +259,12 @@ export function ProviderUpdatePrimaryNotification() {
             view: getProviderUpdateRejectedToastView(providerCount, failedMessage),
             openSettings,
           });
+          // Do not re-offer this exact version on the next launch. The reason it
+          // failed has not changed, and an unexplained prompt that never works
+          // is worse than no prompt; provider settings keeps the badge, the
+          // reason and a deliberate "Try again", and a newer version keys a new
+          // prompt anyway.
+          dismissNotificationKey(notificationKey);
           activeToastRef.current = null;
           return;
         }

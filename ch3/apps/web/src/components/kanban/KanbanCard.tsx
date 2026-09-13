@@ -6,6 +6,7 @@ import type { CSSProperties } from "react";
 import { cn } from "../../lib/utils";
 import type { SidebarThreadSummary } from "../../types";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { ThreadIdChip } from "../ThreadIdChip";
 import { kanbanCardType } from "./Kanban.logic";
 import { KANBAN_CARD_TYPES, kanbanCardTypeConfig, type KanbanCardTypeConfig } from "./kanbanConfig";
 
@@ -138,6 +139,7 @@ export function KanbanCard({
           />
           <span className="truncate">{projectTitle}</span>
         </span>
+        <ThreadIdChip threadId={thread.id} className="w-auto px-1" />
       </div>
 
       <div className="flex items-center gap-1.5">

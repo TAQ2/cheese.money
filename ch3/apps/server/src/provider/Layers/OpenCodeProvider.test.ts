@@ -522,7 +522,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
     Effect.gen(function* () {
       runtimeMock.state.commands = [
         { name: "refresh", description: "Manual context compaction", template: "", hints: [] },
-        { name: "usage", description: "Maple spend", template: "", hints: ["days"] },
+        { name: "usage", description: "OpenCode spend", template: "", hints: ["days"] },
         { name: "speak", description: "Toggle TTS", template: "", hints: [], source: "skill" },
       ];
       const snapshot = yield* checkOpenCodeProviderStatus(

@@ -22,6 +22,7 @@ import React, {
   Suspense,
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
+  Fragment,
   isValidElement,
   use,
   useCallback,
@@ -58,6 +59,10 @@ import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
+import {
+  nextStreamingHighlight,
+  type StreamingHighlightState,
+} from "./chatMarkdownStreamingHighlight";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { useTheme } from "../hooks/useTheme";
 import { getClientSettings } from "../hooks/useSettings";
@@ -71,6 +76,7 @@ import {
   buildVerifiedFileLinkMeta,
   normalizeMarkdownLinkDestination,
   resolveInlineCodeFileLinkMeta,
+  resolveProseFileLinkMeta,
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
   type MarkdownFileLinkMeta,
@@ -95,7 +101,7 @@ import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
 import {
-  isBrowserPreviewFile,
+  canOpenFileInBrowserPreview,
   openFileInPreview,
   openUrlInPreview,
   BrowserPreviewUnavailableError,
@@ -672,8 +678,10 @@ function SuspenseShikiCodeBlock({
   isStreaming,
 }: SuspenseShikiCodeBlockProps) {
   const language = extractFenceLanguage(className);
-  const cacheKey = createHighlightCacheKey(code, language, themeName);
-  const cachedHighlightedHtml = !isStreaming ? highlightedCodeCache.get(cacheKey) : null;
+  // While streaming the cache is bypassed, so hashing the whole code string
+  // for the key would be wasted work on every delta.
+  const cacheKey = isStreaming ? null : createHighlightCacheKey(code, language, themeName);
+  const cachedHighlightedHtml = cacheKey !== null ? highlightedCodeCache.get(cacheKey) : null;
 
   if (cachedHighlightedHtml != null) {
     return (
@@ -699,7 +707,8 @@ interface UncachedShikiCodeBlockProps {
   code: string;
   language: string;
   themeName: DiffThemeName;
-  cacheKey: string;
+  /** `null` while streaming — partial highlights are never cached. */
+  cacheKey: string | null;
   isStreaming: boolean;
 }
 
@@ -711,22 +720,39 @@ function UncachedShikiCodeBlock({
   isStreaming,
 }: UncachedShikiCodeBlockProps) {
   const highlighter = use(getSyntaxHighlighterPromise(language));
+  // While streaming, full Shiki passes are throttled: between passes the
+  // previous highlight is reused with the new tail spliced in as plain text.
+  // The state lives on the mounted block and resets when streaming ends.
+  const streamingHighlightRef = useRef<StreamingHighlightState | null>(null);
   const highlightedHtml = useMemo(() => {
-    try {
-      return highlighter.codeToHtml(code, { lang: language, theme: themeName });
-    } catch (error) {
-      // Log highlighting failures for debugging while falling back to plain text
-      console.warn(
-        `Code highlighting failed for language "${language}", falling back to plain text.`,
-        error instanceof Error ? error.message : error,
-      );
-      // If highlighting fails for this language, render as plain text
-      return highlighter.codeToHtml(code, { lang: "text", theme: themeName });
+    const highlight = (source: string) => {
+      try {
+        return highlighter.codeToHtml(source, { lang: language, theme: themeName });
+      } catch (error) {
+        // Log highlighting failures for debugging while falling back to plain text
+        console.warn(
+          `Code highlighting failed for language "${language}", falling back to plain text.`,
+          error instanceof Error ? error.message : error,
+        );
+        // If highlighting fails for this language, render as plain text
+        return highlighter.codeToHtml(source, { lang: "text", theme: themeName });
+      }
+    };
+    if (!isStreaming) {
+      streamingHighlightRef.current = null;
+      return highlight(code);
     }
-  }, [code, highlighter, language, themeName]);
+    const next = nextStreamingHighlight(streamingHighlightRef.current, {
+      code,
+      now: performance.now(),
+      highlight,
+    });
+    streamingHighlightRef.current = next.state;
+    return next.html;
+  }, [code, highlighter, isStreaming, language, themeName]);
 
   useEffect(() => {
-    if (!isStreaming) {
+    if (!isStreaming && cacheKey !== null) {
       highlightedCodeCache.set(
         cacheKey,
         highlightedHtml,
@@ -1142,6 +1168,18 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     })();
   }, [onOpen, targetPath]);
 
+  /**
+   * A chip that names a line can only be honoured by the file preview.
+   *
+   * `file://` opens the whole file with nowhere to scroll to — `openFileInPreview`
+   * takes a path and no line, so `main.ts · L2387` lands at the top of the file
+   * and the number the agent gave the user is gone. The browser stays the
+   * primary click for everything else, which is the feature; it is also still
+   * one right-click away here, as "Open in integrated browser".
+   */
+  const filePreviewCanAnchorLine =
+    typeof line === "number" && threadRef !== undefined && workspaceRelativePath !== null;
+
   const handleOpenInFilePreview = useCallback(() => {
     if (!threadRef || !workspaceRelativePath) {
       handleOpenInEditor();
@@ -1227,6 +1265,23 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     [targetPath],
   );
 
+  /**
+   * Everything CH3 can open, it opens itself.
+   *
+   * The pill and the arrow next to it are one control with one destination.
+   * The arrow used to leave the app for the user's editor, which made the most
+   * clickable thing in a chip the one that ejects you — backwards for a
+   * feature whose whole point is staying in. The editor is still on the
+   * right-click menu, where someone who wants it will look for it.
+   */
+  const openInsideCH3 = useCallback(() => {
+    if (onOpenInBrowser && !filePreviewCanAnchorLine) {
+      handleOpenInBrowser();
+      return;
+    }
+    handleOpenInFilePreview();
+  }, [filePreviewCanAnchorLine, handleOpenInBrowser, handleOpenInFilePreview, onOpenInBrowser]);
+
   const handleContextMenu = useCallback(
     async (event: ReactMouseEvent<HTMLAnchorElement>) => {
       event.preventDefault();
@@ -1242,6 +1297,11 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
             ...(onOpenInBrowser
               ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
               : []),
+            // The click used to land here; the browser took that slot, so the
+            // line-anchored file view keeps a way in.
+            ...(threadRef && workspaceRelativePath
+              ? ([{ id: "open-in-file-preview", label: "Open in file preview" }] as const)
+              : []),
             { id: "copy-relative", label: "Copy relative path" },
             { id: "copy-full", label: "Copy full path" },
           ] as const,
@@ -1254,6 +1314,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         }
         if (clicked === "open-in-browser") {
           handleOpenInBrowser();
+          return;
+        }
+        if (clicked === "open-in-file-preview") {
+          handleOpenInFilePreview();
           return;
         }
         if (clicked === "copy-relative") {
@@ -1270,7 +1334,17 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         );
       }
     },
-    [displayPath, handleCopy, handleOpenInBrowser, handleOpenInEditor, onOpenInBrowser, targetPath],
+    [
+      displayPath,
+      handleCopy,
+      handleOpenInBrowser,
+      handleOpenInEditor,
+      handleOpenInFilePreview,
+      onOpenInBrowser,
+      targetPath,
+      threadRef,
+      workspaceRelativePath,
+    ],
   );
 
   return (
@@ -1289,11 +1363,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                if (onOpenInBrowser) {
-                  handleOpenInBrowser();
-                  return;
-                }
-                handleOpenInFilePreview();
+                openInsideCH3();
               }}
               onContextMenu={handleContextMenu}
             >
@@ -1310,13 +1380,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           </div>
         </TooltipPopup>
       </Tooltip>
-      {/* The chip itself opens CH3's own preview; the arrow is the way OUT of
-          the app, into whichever editor the user set as their preferred one.
-          Before this it lived only in the right-click menu. */}
-      <InlineOpenExternalButton
-        label={`Open ${displayPath} in editor`}
-        onOpen={handleOpenInEditor}
-      />
+      {/* Same destination as the pill. The arrow is the affordance people
+          actually aim for — a bare pill of text does not read as a button — so
+          it must not be the one that leaves the app. */}
+      <InlineOpenExternalButton label={`Open ${displayPath} in CH3`} onOpen={openInsideCH3} />
     </span>
   );
 }, areMarkdownFileLinkPropsEqual);
@@ -1474,6 +1541,8 @@ function ChatMarkdown({
     },
     [openPreview, threadRef],
   );
+  const environmentHttpBaseUrl =
+    preparedConnection._tag === "None" ? null : preparedConnection.value.httpBaseUrl;
   const openMarkdownFileInPreview = useCallback(
     (path: string) => {
       if (!threadRef || preparedConnection._tag === "None") {
@@ -1497,13 +1566,32 @@ function ChatMarkdown({
     },
     [createAssetUrl, openPreview, preparedConnection, threadRef],
   );
+  // The message text and its derived link maps change on every streamed
+  // delta. Renderers read them through this ref so `markdownComponents` keeps
+  // a stable identity across deltas — react-markdown uses these functions as
+  // element types, so a new identity would remount the whole markdown tree
+  // per token.
+  const streamedContentRef = useRef({
+    text,
+    markdownFileLinkMetaByHref,
+    inlineCodeFileLinkMetaByText,
+    fileLinkParentSuffixByPath,
+  });
+  streamedContentRef.current = {
+    text,
+    markdownFileLinkMetaByHref,
+    inlineCodeFileLinkMetaByText,
+    fileLinkParentSuffixByPath,
+  };
   const markdownComponents = useMemo<Components>(() => {
     const fileLinkChip = (
       fileLinkMeta: MarkdownFileLinkMeta,
       copyMarkdown: string,
       className?: string,
     ) => {
-      const parentSuffix = fileLinkParentSuffixByPath.get(fileLinkMeta.filePath);
+      const parentSuffix = streamedContentRef.current.fileLinkParentSuffixByPath.get(
+        fileLinkMeta.filePath,
+      );
       const labelParts = [fileLinkMeta.basename];
       if (typeof parentSuffix === "string" && parentSuffix.length > 0) {
         labelParts.push(parentSuffix);
@@ -1529,8 +1617,9 @@ function ChatMarkdown({
           onOpen={openInPreferredEditor}
           onOpenInBrowser={
             threadRef &&
+            environmentHttpBaseUrl !== null &&
             isPreviewSupportedInRuntime() &&
-            isBrowserPreviewFile(fileLinkMeta.filePath)
+            canOpenFileInBrowserPreview(fileLinkMeta.filePath, environmentHttpBaseUrl)
               ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
               : undefined
           }
@@ -1539,17 +1628,39 @@ function ChatMarkdown({
       );
     };
 
+    /**
+     * A bare absolute path written in a sentence, drawn as the same chip a
+     * backticked one gets.
+     *
+     * Only paths that resolve are replaced; `resolveProseFileLinkMeta`
+     * returning null leaves the text exactly as written, which is the safe
+     * direction — a sentence that merely looks like a path stays readable.
+     * No probe here, unlike the inline-code path: these are absolute, so
+     * there is nothing for the project index to disambiguate.
+     */
+    const renderProseFilePath = (path: string, key: string) => {
+      const meta = resolveProseFileLinkMeta(path, cwd);
+      if (!meta) return null;
+      return <Fragment key={key}>{fileLinkChip(meta, path)}</Fragment>;
+    };
+
     return {
       p({ node: _node, children, ...props }) {
-        return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
+        return (
+          <p {...props}>
+            {renderSkillInlineMarkdownChildren(children, skills, renderProseFilePath)}
+          </p>
+        );
       },
       li({ node, children, ...props }) {
         const listItemStart = node?.position?.start.offset;
         const markerOffset =
-          typeof listItemStart === "number" ? findTaskListMarkerOffset(text, listItemStart) : null;
+          typeof listItemStart === "number"
+            ? findTaskListMarkerOffset(streamedContentRef.current.text, listItemStart)
+            : null;
         return (
           <li {...props} data-task-marker-offset={markerOffset ?? undefined}>
-            {renderSkillInlineMarkdownChildren(children, skills)}
+            {renderSkillInlineMarkdownChildren(children, skills, renderProseFilePath)}
           </li>
         );
       },
@@ -1584,7 +1695,9 @@ function ChatMarkdown({
       },
       a({ node, href, children, ...props }) {
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-        const fileLinkMeta = normalizedHref ? markdownFileLinkMetaByHref.get(normalizedHref) : null;
+        const fileLinkMeta = normalizedHref
+          ? streamedContentRef.current.markdownFileLinkMetaByHref.get(normalizedHref)
+          : null;
         if (!fileLinkMeta) {
           const faviconHost = resolveExternalWebLinkHost(href);
           const isSameDocumentLink = href?.startsWith("#") ?? false;
@@ -1664,7 +1777,7 @@ function ChatMarkdown({
         if (node?.properties?.dataInlineCode != null) {
           const codeText = nodeToPlainText(children);
           const fileLinkMeta =
-            inlineCodeFileLinkMetaByText.get(codeText.trim()) ??
+            streamedContentRef.current.inlineCodeFileLinkMetaByText.get(codeText.trim()) ??
             resolveInlineCodeFileLinkMeta(codeText, cwd);
           if (fileLinkMeta) {
             return fileLinkChip(fileLinkMeta, `\`${codeText}\``);
@@ -1752,18 +1865,15 @@ function ChatMarkdown({
   }, [
     cwd,
     diffThemeName,
+    environmentHttpBaseUrl,
     environmentId,
-    fileLinkParentSuffixByPath,
-    inlineCodeFileLinkMetaByText,
     isStreaming,
-    markdownFileLinkMetaByHref,
     onTaskListChange,
     openInPreferredEditor,
     openExternalLinkInPreview,
     openMarkdownFileInPreview,
     resolvedTheme,
     skills,
-    text,
     threadRef,
   ]);
 

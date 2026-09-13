@@ -691,6 +691,28 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("omits the server's pid-only progress row, which is roster data", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "task-pid",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "task.progress",
+        summary: "pid 54560",
+        tone: "info",
+        payload: { taskId: "bsz3u4b2k", pid: 54560 },
+      }),
+      makeActivity({
+        id: "task-progress",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "task.progress",
+        summary: "Loading pairs",
+        tone: "info",
+        payload: { taskId: "bsz3u4b2k", title: "Loading pairs", detail: "Loading pairs" },
+      }),
+    ];
+    expect(deriveWorkLogEntries(activities).map((entry) => entry.id)).toEqual(["task-progress"]);
+  });
+
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -738,6 +760,38 @@ describe("deriveWorkLogEntries", () => {
 
     const entries = deriveWorkLogEntries(activities);
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
+  });
+
+  it("carries the failed message id on a provider.turn.start.failed entry for Retry", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "turn-start-failed",
+        createdAt: "2026-02-23T00:00:04.000Z",
+        kind: "provider.turn.start.failed",
+        summary: "Provider turn start failed",
+        tone: "error",
+        payload: { detail: "turn/setPermissionMode failed", messageId: "message-1" },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.retryMessageId).toBe(MessageId.make("message-1"));
+  });
+
+  it("leaves retryMessageId unset when the failed activity names no message", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "turn-start-failed-no-message",
+        createdAt: "2026-02-23T00:00:04.000Z",
+        kind: "provider.turn.start.failed",
+        summary: "Provider turn start failed",
+        tone: "error",
+        payload: { detail: "User message 'message-1' was not found for turn start request." },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.retryMessageId).toBeUndefined();
   });
 
   it("uses payload summary as label for task entries when available", () => {
@@ -1002,6 +1056,35 @@ describe("deriveWorkLogEntries", () => {
     const [entry] = deriveWorkLogEntries(activities);
     expect(entry?.toolTitle).toBe("ch3 · preview_status");
     expect(entry?.toolData).toEqual(item);
+  });
+
+  it("carries a flat MCP call the Claude runtime emits with no nested item", () => {
+    // Captured from a live spawn_model_agent call: `data` is `{ toolName,
+    // input, result }` with no `item`. Without the fallback the entry carried
+    // no data at all and nothing could read the call's name or result.
+    const data = {
+      toolName: "mcp__ch3__spawn_model_agent",
+      input: { model: "glm-5-3-flash", prompt: "Say hello." },
+      result: { tool_use_id: "toolu_01", type: "tool_result", content: "{}" },
+    };
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "mcp-flat-started",
+        kind: "tool.started",
+        summary: "spawn_model_agent",
+        // An empty `data` on the first row must not become the entry's data.
+        payload: { itemType: "mcp_tool_call", toolCallId: "call-flat", data: {} },
+      }),
+      makeActivity({
+        id: "mcp-flat-done",
+        kind: "tool.completed",
+        summary: "spawn_model_agent",
+        payload: { itemType: "mcp_tool_call", toolCallId: "call-flat", data },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.toolData).toEqual(data);
   });
 
   it("keeps MCP payloads while collapsing lifecycle updates", () => {

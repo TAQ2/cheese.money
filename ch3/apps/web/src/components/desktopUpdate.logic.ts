@@ -1,4 +1,5 @@
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@ch3tools/contracts";
+import { displayVersion } from "@ch3tools/shared/releaseVersion";
 import { isWindowsPlatform } from "../lib/utils";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
@@ -45,7 +46,7 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
 
   const action = resolveDesktopUpdateButtonAction(state);
   if (action === "download") {
-    return "This Mac has Apple Silicon, but CH3 is still running the Intel build under Rosetta. Download the available update to switch to the native Apple Silicon build.";
+    return "This Mac has Apple Silicon, but CH3 is still running the Intel build under Rosetta. Install the available update to switch to the native Apple Silicon build.";
   }
   if (action === "install") {
     return "This Mac has Apple Silicon, but CH3 is still running the Intel build under Rosetta. Restart to install the downloaded Apple Silicon build.";
@@ -53,21 +54,29 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
   return "This Mac has Apple Silicon, but CH3 is still running the Intel build under Rosetta. The next app update will replace it with the native Apple Silicon build.";
 }
 
+/**
+ * Versions on screen are the two-part release number (`0.46`), never the
+ * three-part semver the updater carries (`0.46.0`). Null stays null so the
+ * callers' own fallbacks ("available", "ready") still apply.
+ */
+const shown = (version: string | null | undefined): string | null =>
+  version === null || version === undefined ? null : displayVersion(version);
+
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
   if (state.status === "available") {
-    return `Update ${state.availableVersion ?? "available"} ready to download`;
+    return `Update ${shown(state.availableVersion) ?? "available"} ready to install`;
   }
   if (state.status === "downloading") {
-    const progress =
-      typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
-    return `Downloading update${progress}`;
+    // The installer narrates its log into `message` — "Downloading…",
+    // "Quitting CH3…" — and the updater shows it here as it happens.
+    return state.message ?? DESKTOP_UPDATE_IN_PROGRESS_MESSAGE;
   }
   if (state.status === "downloaded") {
-    return `Update ${state.downloadedVersion ?? state.availableVersion ?? "ready"} downloaded. Click to restart and install.`;
+    return `Update ${shown(state.downloadedVersion) ?? shown(state.availableVersion) ?? "ready"} downloaded. Click to restart and install.`;
   }
   if (state.status === "error") {
     if (state.errorContext === "download" && state.availableVersion) {
-      return `Download failed for ${state.availableVersion}. Click to retry.`;
+      return `Update to ${shown(state.availableVersion)} failed${state.message ? `: ${state.message}` : ""}. Click to retry.`;
     }
     if (state.errorContext === "install" && state.downloadedVersion) {
       return `Install failed for ${state.downloadedVersion}. Click to retry.`;
@@ -75,6 +84,24 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
     return state.message ?? "Update failed";
   }
   return "Up to date";
+}
+
+/** Shown while install.sh runs, until its own log says something more specific. */
+export const DESKTOP_UPDATE_IN_PROGRESS_MESSAGE =
+  "Updating — CH3 closes and reopens by itself. Leave it; there is nothing to click.";
+
+/**
+ * What the person agrees to before the update runs. The update is
+ * install.sh: it downloads the release, QUITS CH3, swaps the app and
+ * reopens it. A person who did not know the quit was coming reopened the
+ * app by hand in the middle of it; this says so up front, in the order it
+ * happens.
+ */
+export function getDesktopUpdateDownloadConfirmationMessage(
+  state: Pick<DesktopUpdateState, "availableVersion" | "currentVersion">,
+): string {
+  const version = shown(state.availableVersion) ?? "the new version";
+  return `Update CH3 ${shown(state.currentVersion) ?? state.currentVersion} → ${version}?\n\nCH3 will download the release, close, and reopen by itself on ${version} — usually within a minute. Leave it closed while that happens; do not open it yourself.\n\nAny running tasks will be interrupted.`;
 }
 
 export function getDesktopUpdateInstallConfirmationMessage(

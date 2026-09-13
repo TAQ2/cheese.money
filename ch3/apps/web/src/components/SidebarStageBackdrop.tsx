@@ -5,22 +5,38 @@ import { APP_STAGE_LABEL } from "../branding";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
 import { primaryServerConfigAtom } from "../state/server";
 
-export type SidebarStageBackdropVariant = "nightly" | "dev";
+/**
+ * Which header artwork a window wears.
+ *
+ * Named for the art rather than for a build stage, because it no longer maps
+ * one-to-one onto one: the blueprint is what every window shows unless it is a
+ * nightly, so calling it "dev" would have it reading as a mislabelled window on
+ * every shipped build.
+ */
+export type SidebarStageBackdropVariant = "nightly" | "blueprint";
 export type EnvironmentIdentificationPillLabel = "Dev" | "Nightly";
 
 // A wide viewBox keeps the 96-unit art height at a fixed scale while sidebar resizing reveals
 // more horizontal canvas instead of zooming the scene.
 const STAGE_BACKDROP_VIEW_BOX = "0 0 8192 96";
 
+/**
+ * The artwork for a stage, or `null` when the user has turned artwork off.
+ *
+ * Every stage gets art. It began as a way to tell a Dev or Nightly window from
+ * the real app at a glance, which left the app people actually use as the one
+ * with a blank header — the plainest window being the one you look at all day.
+ * Nightly keeps its own sky; everything else, shipped builds included, wears
+ * the blueprint. Dev and Nightly windows are still identifiable without it:
+ * both carry their stage in the window title, and the pill mode names them
+ * outright.
+ */
 export function resolveSidebarStageBackdropVariant(
   stageLabel: string,
   enabled = true,
 ): SidebarStageBackdropVariant | null {
   if (!enabled) return null;
-  const normalized = stageLabel.trim().toLowerCase();
-  if (normalized === "nightly") return "nightly";
-  if (normalized === "dev") return "dev";
-  return null;
+  return stageLabel.trim().toLowerCase() === "nightly" ? "nightly" : "blueprint";
 }
 
 export function resolveEnvironmentIdentificationPillLabel(
@@ -46,6 +62,56 @@ export function useSidebarStageBackdropVariant(enabled = true): SidebarStageBack
   return resolveSidebarStageBackdropVariant(useEnvironmentStageLabel(), enabled);
 }
 
+/**
+ * Artwork that exists to say "this is NOT the app you installed".
+ *
+ * The header art is now on everywhere, which is what makes this a separate
+ * question. The send button and the sidebar toggle change COLOUR when a window
+ * is marked — the most-used control in the app stops being `bg-primary` — and
+ * that is a price worth paying to tell a dev window apart, but not one to
+ * charge every shipped install for. Those two surfaces stay on Dev and Nightly
+ * only; the header is the part that greets everyone.
+ */
+export function resolveStageIdentificationVariant(
+  stageLabel: string,
+  enabled = true,
+): SidebarStageBackdropVariant | null {
+  if (!enabled) return null;
+  const normalized = stageLabel.trim().toLowerCase();
+  if (normalized === "nightly") return "nightly";
+  return normalized === "dev" ? "blueprint" : null;
+}
+
+export function useStageIdentificationVariant(enabled = true): SidebarStageBackdropVariant | null {
+  return resolveStageIdentificationVariant(useEnvironmentStageLabel(), enabled);
+}
+
+/**
+ * Glyphs that drift in the art and scatter away from the pointer. Positions are
+ * fixed so the layout never depends on random values, and the sparse right-hand
+ * half keeps them clear of the wordmark.
+ */
+const STAGE_PARTICLES: ReadonlyArray<{
+  glyph: string;
+  x: number;
+  y: number;
+  size: number;
+  opacity: number;
+}> = [
+  { glyph: "+", x: 18, y: 22, size: 11, opacity: 0.4 },
+  { glyph: "×", x: 44, y: 58, size: 9, opacity: 0.32 },
+  { glyph: "⟡", x: 70, y: 16, size: 10, opacity: 0.46 },
+  { glyph: "·", x: 96, y: 46, size: 13, opacity: 0.36 },
+  { glyph: "◇", x: 124, y: 66, size: 9, opacity: 0.3 },
+  { glyph: "+", x: 152, y: 26, size: 10, opacity: 0.42 },
+  { glyph: "⌁", x: 180, y: 54, size: 11, opacity: 0.34 },
+  { glyph: "×", x: 208, y: 14, size: 9, opacity: 0.44 },
+  { glyph: "∘", x: 238, y: 62, size: 12, opacity: 0.3 },
+  { glyph: "+", x: 268, y: 34, size: 10, opacity: 0.38 },
+  { glyph: "⋯", x: 300, y: 52, size: 11, opacity: 0.32 },
+  { glyph: "⟡", x: 332, y: 20, size: 9, opacity: 0.4 },
+];
+
 /** Stage-channel header art; palettes mirror the per-channel app icons in `assets/`. */
 export function SidebarStageBackdrop({ variant }: { variant: SidebarStageBackdropVariant }) {
   return (
@@ -54,6 +120,23 @@ export function SidebarStageBackdrop({ variant }: { variant: SidebarStageBackdro
       className="sidebar-stage-backdrop pointer-events-none absolute inset-x-0 top-0 z-0 h-20 select-none overflow-hidden"
     >
       <StageBackdropArt variant={variant} />
+      <div className="stage-spotlight" />
+      <div className="stage-particles">
+        {STAGE_PARTICLES.map((particle) => (
+          <span
+            key={`${particle.glyph}-${particle.x}`}
+            data-stage-particle
+            style={{
+              left: particle.x,
+              top: particle.y,
+              fontSize: particle.size,
+              opacity: particle.opacity,
+            }}
+          >
+            {particle.glyph}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -105,10 +188,11 @@ function NightlySkyArt({ compact = false }: { compact?: boolean }) {
   const softId = `${idPrefix}-stage-night-soft`;
   const starsId = `${idPrefix}-stage-night-stars`;
   const glowsId = `${idPrefix}-stage-night-glows`;
+  const skyBreatheId = `${idPrefix}-stage-night-sky-breathe`;
 
   return (
     <svg
-      className="h-full w-full"
+      className="stage-night h-full w-full"
       fill="none"
       preserveAspectRatio="xMinYMin slice"
       viewBox={compact ? "96 0 8192 96" : STAGE_BACKDROP_VIEW_BOX}
@@ -127,6 +211,20 @@ function NightlySkyArt({ compact = false }: { compact?: boolean }) {
           <stop stopColor="#07152F" />
           <stop offset="0.5" stopColor="#151443" />
           <stop offset="1" stopColor="#32155B" />
+        </linearGradient>
+        {/* The breathing counterpart of the sky; see the blueprint art. */}
+        <linearGradient
+          id={skyBreatheId}
+          x1="264"
+          y1="0"
+          x2="24"
+          y2="96"
+          gradientUnits="userSpaceOnUse"
+          spreadMethod="reflect"
+        >
+          <stop stopColor="#32155B" />
+          <stop offset="0.5" stopColor="#07152F" />
+          <stop offset="1" stopColor="#151443" />
         </linearGradient>
         <radialGradient
           id={glowId}
@@ -175,8 +273,17 @@ function NightlySkyArt({ compact = false }: { compact?: boolean }) {
       </defs>
 
       <rect width="100%" height="96" fill={`url(#${skyId})`} />
-      <rect width="100%" height="96" fill={`url(#${glowsId})`} />
-      <rect width="100%" height="96" fill={`url(#${starsId})`} />
+      <rect className="stage-breathe" width="100%" height="96" fill={`url(#${skyBreatheId})`} />
+      <rect
+        className="stage-glow-layer"
+        x="-640"
+        width="200%"
+        height="96"
+        fill={`url(#${glowsId})`}
+      />
+      <g className="stage-grid-layer">
+        <rect width="100%" height="96" fill={`url(#${starsId})`} />
+      </g>
 
       <g filter={`url(#${softId})`}>
         <path
@@ -195,17 +302,30 @@ function NightlySkyArt({ compact = false }: { compact?: boolean }) {
   );
 }
 
+/**
+ * Drafting paper: grid, rulers and dimension annotations.
+ *
+ * Purple rather than blueprint blue — the motif is what the name refers to,
+ * and the ink is CH3's. Every hue here sits in a 248-279deg band centred on
+ * `--ch3-brand` (262deg), and each colour kept the saturation and lightness
+ * of the blue it replaced, so nothing about contrast against the white
+ * wordmark and the traffic lights changed. The paper gradient reads its three
+ * stops from `--stage-bp-*` in `index.css`, which is where the light and dark
+ * ramps live; the glows and the ink are here, next to the stops they belong
+ * to.
+ */
 function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
   const idPrefix = useId().replaceAll(":", "");
   const paperId = `${idPrefix}-stage-bp-paper`;
   const glowId = `${idPrefix}-stage-bp-glow`;
-  const celesteGlowId = `${idPrefix}-stage-bp-glow-celeste`;
-  const violetGlowId = `${idPrefix}-stage-bp-glow-violet`;
+  const indigoGlowId = `${idPrefix}-stage-bp-glow-indigo`;
+  const orchidGlowId = `${idPrefix}-stage-bp-glow-orchid`;
   const minorGridId = `${idPrefix}-stage-bp-grid-minor`;
   const majorGridId = `${idPrefix}-stage-bp-grid-major`;
   const rulerId = `${idPrefix}-stage-bp-ruler`;
   const glowsId = `${idPrefix}-stage-bp-glows`;
   const annotationsId = `${idPrefix}-stage-bp-annotations`;
+  const paperBreatheId = `${idPrefix}-stage-bp-paper-breathe`;
 
   return (
     <svg
@@ -229,6 +349,21 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
           <stop offset="0.5" style={{ stopColor: "var(--stage-bp-mid)" }} />
           <stop offset="1" style={{ stopColor: "var(--stage-bp-top)" }} />
         </linearGradient>
+        {/* Same three tokens, raked the other way; cross-fading the two is what
+            makes the paper look like it is slowly breathing. */}
+        <linearGradient
+          id={paperBreatheId}
+          x1="220"
+          y1="0"
+          x2="60"
+          y2="96"
+          gradientUnits="userSpaceOnUse"
+          spreadMethod="reflect"
+        >
+          <stop style={{ stopColor: "var(--stage-bp-top)" }} />
+          <stop offset="0.5" style={{ stopColor: "var(--stage-bp-bottom)" }} />
+          <stop offset="1" style={{ stopColor: "var(--stage-bp-mid)" }} />
+        </linearGradient>
         <radialGradient
           id={glowId}
           cx="0"
@@ -237,55 +372,55 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
           gradientTransform="translate(216 14) rotate(137) scale(120 84)"
           gradientUnits="userSpaceOnUse"
         >
-          <stop stopColor="#D4F6FF" stopOpacity="0.4" />
-          <stop offset="0.52" stopColor="#65C8FF" stopOpacity="0.16" />
-          <stop offset="1" stopColor="#276AF1" stopOpacity="0" />
+          <stop stopColor="#DFD4FF" stopOpacity="0.4" />
+          <stop offset="0.52" stopColor="#9665FF" stopOpacity="0.16" />
+          <stop offset="1" stopColor="#8727F1" stopOpacity="0" />
         </radialGradient>
         <radialGradient
-          id={celesteGlowId}
+          id={indigoGlowId}
           cx="0"
           cy="0"
           r="1"
           gradientTransform="translate(474 44) rotate(166) scale(156 92)"
           gradientUnits="userSpaceOnUse"
         >
-          <stop stopColor="#D2FFFF" stopOpacity="0.34" />
-          <stop offset="0.5" stopColor="#48DCF5" stopOpacity="0.18" />
-          <stop offset="1" stopColor="#277EF1" stopOpacity="0" />
+          <stop stopColor="#D8D2FF" stopOpacity="0.34" />
+          <stop offset="0.5" stopColor="#6D48F5" stopOpacity="0.18" />
+          <stop offset="1" stopColor="#7D27F1" stopOpacity="0" />
         </radialGradient>
         <radialGradient
-          id={violetGlowId}
+          id={orchidGlowId}
           cx="0"
           cy="0"
           r="1"
           gradientTransform="translate(704 18) rotate(145) scale(132 88)"
           gradientUnits="userSpaceOnUse"
         >
-          <stop stopColor="#D9D8FF" stopOpacity="0.3" />
-          <stop offset="0.52" stopColor="#7C8BFF" stopOpacity="0.14" />
-          <stop offset="1" stopColor="#3155DF" stopOpacity="0" />
+          <stop stopColor="#F2D8FF" stopOpacity="0.3" />
+          <stop offset="0.52" stopColor="#C97CFF" stopOpacity="0.14" />
+          <stop offset="1" stopColor="#8F31DF" stopOpacity="0" />
         </radialGradient>
         <pattern id={minorGridId} width="8" height="8" patternUnits="userSpaceOnUse">
-          <path d="M8 0H0V8" stroke="#EAF6FF" strokeOpacity="0.14" strokeWidth="0.5" />
+          <path d="M8 0H0V8" stroke="#F1EAFF" strokeOpacity="0.14" strokeWidth="0.5" />
         </pattern>
         <pattern id={majorGridId} width="32" height="32" patternUnits="userSpaceOnUse">
-          <path d="M32 0H0V32" stroke="#EAF6FF" strokeOpacity="0.26" strokeWidth="0.6" />
+          <path d="M32 0H0V32" stroke="#F1EAFF" strokeOpacity="0.26" strokeWidth="0.6" />
         </pattern>
         <pattern id={rulerId} width="32" height="6" patternUnits="userSpaceOnUse">
           <path
             d="M4 0V2.5M12 0V2.5M20 0V4M28 0V2.5"
-            stroke="#DDF7FF"
+            stroke="#E6DDFF"
             strokeOpacity="0.5"
             strokeWidth="0.5"
           />
         </pattern>
         <pattern id={glowsId} width="768" height="96" patternUnits="userSpaceOnUse">
           <rect width="768" height="96" fill={`url(#${glowId})`} />
-          <rect width="768" height="96" fill={`url(#${celesteGlowId})`} />
-          <rect width="768" height="96" fill={`url(#${violetGlowId})`} />
+          <rect width="768" height="96" fill={`url(#${indigoGlowId})`} />
+          <rect width="768" height="96" fill={`url(#${orchidGlowId})`} />
         </pattern>
         <pattern id={annotationsId} width="768" height="96" patternUnits="userSpaceOnUse">
-          <g stroke="#DDF7FF" strokeLinecap="round" strokeOpacity="0.6" strokeWidth="0.7">
+          <g stroke="#E6DDFF" strokeLinecap="round" strokeOpacity="0.6" strokeWidth="0.7">
             <path d="M180 64H264" strokeDasharray="5 4" />
             <path d="M180 61V67M264 61V67" />
             <path d="M276 10V44" strokeDasharray="4 4" strokeOpacity="0.5" />
@@ -298,7 +433,7 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
             <path d="M590 67V73M724 67V73" strokeOpacity="0.55" />
           </g>
 
-          <g stroke="#DDF7FF" strokeLinecap="round" strokeOpacity="0.55" strokeWidth="0.6">
+          <g stroke="#E6DDFF" strokeLinecap="round" strokeOpacity="0.55" strokeWidth="0.6">
             <g>
               <path d="M34 60L38 64M38 60L34 64" />
             </g>
@@ -322,7 +457,7 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
             </g>
           </g>
 
-          <g stroke="#DDF7FF" strokeOpacity="0.35" strokeWidth="0.6">
+          <g stroke="#E6DDFF" strokeOpacity="0.35" strokeWidth="0.6">
             <circle cx="196" cy="38" r="13" strokeDasharray="3.5 4" />
             <path d="M196 33V43M191 38H201" strokeOpacity="0.6" strokeWidth="0.4" />
             <circle cx="414" cy="64" r="10" strokeDasharray="2.5 3.5" />
@@ -334,11 +469,22 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
       </defs>
 
       <rect width="100%" height="96" fill={`url(#${paperId})`} />
-      <rect width="100%" height="96" fill={`url(#${glowsId})`} />
-      <rect width="100%" height="96" fill={`url(#${minorGridId})`} />
-      <rect width="100%" height="96" fill={`url(#${majorGridId})`} />
-      <rect width="100%" height="6" fill={`url(#${rulerId})`} />
-      <rect width="100%" height="96" fill={`url(#${annotationsId})`} />
+      <rect className="stage-breathe" width="100%" height="96" fill={`url(#${paperBreatheId})`} />
+      {/* Drawn one pattern tile wide on each side so the drift can translate a
+          whole tile and land back where it started — a loop with no seam. */}
+      <rect
+        className="stage-glow-layer"
+        x="-768"
+        width="200%"
+        height="96"
+        fill={`url(#${glowsId})`}
+      />
+      <g className="stage-grid-layer">
+        <rect width="100%" height="96" fill={`url(#${minorGridId})`} />
+        <rect width="100%" height="96" fill={`url(#${majorGridId})`} />
+        <rect width="100%" height="6" fill={`url(#${rulerId})`} />
+        <rect width="100%" height="96" fill={`url(#${annotationsId})`} />
+      </g>
     </svg>
   );
 }

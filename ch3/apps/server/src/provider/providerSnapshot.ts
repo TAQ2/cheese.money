@@ -18,7 +18,20 @@ import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { createProviderVersionAdvisory } from "./providerMaintenance.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
-export const DEFAULT_TIMEOUT_MS = 4_000;
+/**
+ * How long a provider CLI gets to answer `--version`.
+ *
+ * Four seconds was not a margin. Measured on an idle developer machine,
+ * `claude --version` takes **2.8 seconds** — a Node CLI that loads its own
+ * bundle before printing a string — so any load at all pushed it past the line
+ * and the settings panel announced "Claude Agent CLI is installed but failed to
+ * run. Timed out while running command." about a CLI that was working.
+ *
+ * The cost of waiting longer is a slower health check on a genuinely broken
+ * CLI. The cost of waiting less is telling somebody their working install is
+ * broken, which sends them to reinstall it.
+ */
+export const DEFAULT_TIMEOUT_MS = 15_000;
 // Auth status checks involve disk/network lookups and can be slow on first run (especially Windows)
 export const AUTH_PROBE_TIMEOUT_MS = 10_000;
 

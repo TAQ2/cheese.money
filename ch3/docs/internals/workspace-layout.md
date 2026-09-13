@@ -14,8 +14,6 @@ the task commands.
   components, and web-specific platform layers.
 - `apps/desktop` (`@ch3tools/desktop`): Electron shell. Supervises a desktop-scoped `ch3` backend,
   loads the web bundle over the `ch3://` protocol, and owns SSH-managed remote environments.
-- `apps/mobile` (`@ch3tools/mobile`): Expo/React Native client. Same client runtime composition as
-  web, different platform layer and UI.
 - `apps/marketing` (`@ch3tools/marketing`): Astro marketing site.
 
 ## packages
@@ -26,7 +24,7 @@ the task commands.
   (`DrainableWorker`, git and source-control helpers, relay auth and signing, DPoP, semver, logging,
   observability, and more).
 - `packages/client-runtime` (`@ch3tools/client-runtime`): connection lifecycle, authorization, RPC
-  session, environment registry, and Atom-based domain state shared by web and mobile. See its
+  session, environment registry, and Atom-based domain state, consumed by the web client. See its
   [README](../../packages/client-runtime/README.md).
 - `packages/ssh` (`@ch3tools/ssh`): SSH config parsing, auth prompts, command execution, and the
   tunnel/environment manager behind desktop-managed SSH environments.
@@ -40,14 +38,14 @@ the task commands.
 ## infra
 
 - `infra/relay` (`ch3-relay`): the hosted CH3 Connect relay, deployed with Alchemy. Handles
-  environment discovery, cloud-side records, and mobile notifications. It is not in the hot path;
+  environment discovery and cloud-side records. It is not in the hot path;
   after connect, client traffic goes directly to the environment. See
   [ch3-connect.md](./ch3-connect.md).
 
 ## Other top-level directories
 
 - `scripts/`: workspace tooling run through `vp run`. Dev runner, desktop artifact builds, release
-  helpers, mobile static checks and showcase capture, update-manifest merging.
+  helpers, update-manifest merging.
 - `assets/`: brand and app icon sources per channel (`dev`, `nightly`, `prod`).
 - `patches/`: pnpm patches for pinned upstream dependencies.
 - `oxlint-plugin-ch3/`: repo-specific lint rules.

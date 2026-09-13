@@ -16,8 +16,10 @@ import {
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
   buildLoadingThreadFromShell,
+  buildLocalDraftThread,
   buildOutgoingTurnText,
   buildThreadTurnInterruptInput,
+  buildTurnStartFailureReportPrompt,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
@@ -85,8 +87,57 @@ const readySession = {
   runtimeMode: "full-access" as const,
   activeTurnId: null,
   lastError: null,
+  lastErrorClass: null,
   updatedAt: "2026-03-29T00:00:10.000Z",
 };
+
+describe("buildLocalDraftThread", () => {
+  const draftThread = {
+    threadId,
+    environmentId,
+    projectId,
+    logicalProjectKey: "environment-local:/repo",
+    createdAt: now,
+    runtimeMode: null,
+    interactionMode: null,
+    branch: null,
+    worktreePath: null,
+    envMode: "local" as const,
+    startFromOrigin: false,
+    promotedTo: null,
+  };
+  const modelSelection = {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: "gpt-5.4",
+  };
+
+  it("opens a draft nobody chose modes for on the configured new-thread modes", () => {
+    // The reported bug, at the point it is visible: Settings says Full access,
+    // the composer said Auto, and the thread the draft started ran on Auto. The
+    // draft carried the mode it was seeded with at creation — the shipped
+    // `auto`, because the primary server's config had not arrived yet — and
+    // that seeded value outranked the setting for the life of the draft.
+    const thread = buildLocalDraftThread(threadId, draftThread, modelSelection, {
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+    });
+
+    expect(thread.runtimeMode).toBe("full-access");
+    expect(thread.interactionMode).toBe("plan");
+  });
+
+  it("keeps the modes carried onto the draft from the thread it was opened in", () => {
+    const thread = buildLocalDraftThread(
+      threadId,
+      { ...draftThread, runtimeMode: "approval-required", interactionMode: "plan" },
+      modelSelection,
+      { runtimeMode: "full-access", interactionMode: "default" },
+    );
+
+    expect(thread.runtimeMode).toBe("approval-required");
+    expect(thread.interactionMode).toBe("plan");
+  });
+});
 
 describe("buildLoadingThreadFromShell", () => {
   it("preserves shell metadata and supplies empty detail collections", () => {
@@ -523,6 +574,35 @@ describe("startNewThreadForProject", () => {
       }),
     ).toBe(false);
     expect(called).toBe(false);
+  });
+});
+
+describe("buildTurnStartFailureReportPrompt", () => {
+  it("names the failed thread, message, timestamp and detail", () => {
+    const prompt = buildTurnStartFailureReportPrompt({
+      threadId,
+      messageId: MessageId.make("message-1"),
+      detail: "turn/setPermissionMode failed",
+      createdAt: now,
+    });
+
+    expect(prompt).toContain(`Thread: ${threadId}`);
+    expect(prompt).toContain("Message: message-1");
+    expect(prompt).toContain(`When: ${now}`);
+    expect(prompt).toContain("Detail: turn/setPermissionMode failed");
+  });
+
+  it("falls back to 'unknown'/'no detail captured' for missing fields", () => {
+    const prompt = buildTurnStartFailureReportPrompt({
+      threadId: null,
+      messageId: null,
+      detail: "",
+      createdAt: now,
+    });
+
+    expect(prompt).toContain("Thread: unknown");
+    expect(prompt).toContain("Message: unknown");
+    expect(prompt).toContain("Detail: no detail captured");
   });
 });
 

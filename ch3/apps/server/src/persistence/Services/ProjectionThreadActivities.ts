@@ -38,18 +38,36 @@ export const ListProjectionThreadActivitiesInput = Schema.Struct({
 });
 export type ListProjectionThreadActivitiesInput = typeof ListProjectionThreadActivitiesInput.Type;
 
+export const ListProjectionThreadActivitiesForKindsInput = Schema.Struct({
+  threadId: ThreadId,
+  /** Activity kinds to read. An empty list reads nothing, not everything. */
+  kinds: Schema.Array(Schema.String),
+});
+export type ListProjectionThreadActivitiesForKindsInput =
+  typeof ListProjectionThreadActivitiesForKindsInput.Type;
+
+export const CountLiveDelegationsInput = Schema.Struct({
+  threadId: ThreadId,
+  /** Only this turn's delegations are live; earlier turns are history. */
+  turnId: Schema.String,
+});
+export type CountLiveDelegationsInput = typeof CountLiveDelegationsInput.Type;
+
 export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
 });
 export type DeleteProjectionThreadActivitiesInput =
   typeof DeleteProjectionThreadActivitiesInput.Type;
 
-/** A background task with a `task.started` row and no `task.completed` row. */
-export const OpenBackgroundTask = Schema.Struct({
+/** A background task that was started and never reported an outcome. */
+export const OpenProjectionThreadTask = Schema.Struct({
   threadId: ThreadId,
   taskId: Schema.String,
+  turnId: Schema.NullOr(TurnId),
+  summary: Schema.String,
+  createdAt: IsoDateTime,
 });
-export type OpenBackgroundTask = typeof OpenBackgroundTask.Type;
+export type OpenProjectionThreadTask = typeof OpenProjectionThreadTask.Type;
 
 /**
  * ProjectionThreadActivityRepositoryShape - Service API for projected thread activity.
@@ -75,18 +93,30 @@ export interface ProjectionThreadActivityRepositoryShape {
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
   /**
-   * Every background task that reported a start and never an end.
+   * The rows of a thread whose `kind` is one the caller names.
    *
-   * Used once, at boot, to close them. A task is owned by the agent process
-   * the server spawned, so if a task is still open when the server starts, the
-   * process that could have finished it is already gone and no completion will
-   * ever arrive. Left alone these accumulate forever: the agent panel showed
-   * entries whose timers had been counting for over two weeks.
+   * The shell summary needs a handful of user-input activities to recount what
+   * a thread is waiting on. Reading the whole thread to find them meant loading
+   * every activity payload it ever had — 20 MB on the busiest one here — on
+   * every event, inside the write transaction.
    */
-  readonly listOpenBackgroundTasks: () => Effect.Effect<
-    ReadonlyArray<OpenBackgroundTask>,
-    ProjectionRepositoryError
-  >;
+  readonly listByThreadIdForKinds: (
+    input: ListProjectionThreadActivitiesForKindsInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
+
+  /**
+   * How many subagents this turn started and has not finished.
+   *
+   * A number rather than the rows, and this is the difference between a scalar
+   * and megabytes: `tool.started` and `tool.completed` are the two most common
+   * activity kinds there are — 9,134 rows and 16.8 MB on the busiest thread on
+   * one real machine — and this runs on every event a thread receives, inside
+   * the write transaction. Reading them to add up +1 and −1 in TypeScript
+   * undid the narrowing the summary read was fixed with in the first place.
+   */
+  readonly countLiveDelegations: (
+    input: CountLiveDelegationsInput,
+  ) => Effect.Effect<number, ProjectionRepositoryError>;
 
   /**
    * Delete projected thread activity rows by thread.
@@ -94,6 +124,19 @@ export interface ProjectionThreadActivityRepositoryShape {
   readonly deleteByThreadId: (
     input: DeleteProjectionThreadActivitiesInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Every background task started but never completed, across ALL threads.
+   *
+   * Across threads on purpose: the only caller is the boot-time reconciler,
+   * and the tasks it must close belong to whichever threads happened to be
+   * running when the process died — a per-thread read would have to walk every
+   * thread that ever existed to find them.
+   */
+  readonly listOpenTasks: Effect.Effect<
+    ReadonlyArray<OpenProjectionThreadTask>,
+    ProjectionRepositoryError
+  >;
 }
 
 /**

@@ -22,6 +22,12 @@ export interface McpIssuedCredential {
 
 export interface McpSessionRegistryShape {
   readonly issue: (request: McpCredentialRequest) => Effect.Effect<McpIssuedCredential>;
+  /**
+   * Take a credential issued by a previous server back into the registry. A
+   * CLI that outlived the restart still presents the token it was given at
+   * spawn; without this the token is unknown and every tool call is a 401.
+   */
+  readonly adopt: (config: McpProviderSession.McpProviderSessionConfig) => Effect.Effect<void>;
   readonly resolve: (
     rawToken: string,
   ) => Effect.Effect<McpInvocationContext.McpInvocationScope | undefined>;
@@ -149,6 +155,28 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     },
   );
 
+  const adopt: McpSessionRegistryShape["adopt"] = Effect.fn("McpSessionRegistry.adopt")(
+    function* (config) {
+      const rawToken = config.authorizationHeader.replace(/^Bearer\s+/u, "");
+      if (rawToken.length === 0) return;
+      const adoptedAt = yield* currentTimeMillis;
+      const tokenHash = yield* hashToken(rawToken);
+      const scope: McpInvocationContext.McpInvocationScope = {
+        environmentId,
+        threadId: ThreadId.make(config.threadId),
+        providerSessionId: config.providerSessionId,
+        providerInstanceId: ProviderInstanceId.make(config.providerInstanceId),
+        capabilities: new Set(["preview"]),
+        issuedAt: adoptedAt,
+      };
+      yield* SynchronizedRef.update(state, ({ records }) => {
+        const next = new Map(pruneDead(records, adoptedAt));
+        next.set(tokenHash, { tokenHash, scope, lastAliveAt: adoptedAt });
+        return { records: next };
+      });
+    },
+  );
+
   const resolve: McpSessionRegistryShape["resolve"] = Effect.fn("McpSessionRegistry.resolve")(
     function* (rawToken) {
       if (rawToken.length === 0) return undefined;
@@ -188,6 +216,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
 
   return McpSessionRegistry.of({
     issue,
+    adopt,
     resolve,
     touch,
     revokeProviderSession: Effect.fn("McpSessionRegistry.revokeProviderSession")(
@@ -230,6 +259,15 @@ export const issueActiveMcpCredential = (
         .revokeThread(request.threadId)
         .pipe(Effect.andThen(activeMcpSessionRegistry.issue(request)))
     : Effect.sync((): McpIssuedCredential | undefined => undefined);
+
+/**
+ * Takes a credential a previous server issued back under management, so a
+ * session rebuilt from a keeper keeps the token its CLI is already holding
+ * instead of being handed a new one it never hears about.
+ */
+export const adoptActiveMcpCredential = (
+  config: McpProviderSession.McpProviderSessionConfig,
+): Effect.Effect<void> => activeMcpSessionRegistry?.adopt(config) ?? Effect.void;
 
 /**
  * Refreshes the liveness of a thread's MCP credential. Called on every provider

@@ -1,8 +1,8 @@
 import { memo, type PointerEventHandler } from "react";
-import { ChevronDownIcon, ChevronLeftIcon, ClockIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronLeftIcon, ClockIcon, PlusIcon } from "lucide-react";
 import { useEnvironmentIdentificationMode } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
-import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../SidebarStageBackdrop";
+import { StageBackdropButtonArt, useStageIdentificationVariant } from "../SidebarStageBackdrop";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
@@ -19,8 +19,14 @@ interface ComposerPrimaryActionsProps {
   compact: boolean;
   pendingAction: PendingActionState | null;
   isRunning: boolean;
-  /** A send is already waiting for this turn to finish. */
+  /** The message *in the composer right now* is waiting for this turn to finish. */
   isQueued: boolean;
+  /**
+   * This thread has something queued, so there is a queue to stack behind.
+   * True while a frozen message waits even though the composer itself is not
+   * queued — that is exactly the state a second + press starts from.
+   */
+  canStackQueuedSend: boolean;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -34,6 +40,8 @@ interface ComposerPrimaryActionsProps {
   onInterrupt: () => void;
   /** Toggles the queued send on and off. */
   onQueue: () => void;
+  /** Freezes the composer's message behind the queue and hands it back empty. */
+  onStackQueuedSend: () => void;
   onImplementPlanInNewThread: () => void;
 }
 
@@ -64,6 +72,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   pendingAction,
   isRunning,
   isQueued,
+  canStackQueuedSend,
   showPlanFollowUpPrompt,
   promptHasText,
   isSendBusy,
@@ -76,6 +85,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   onPreviousPendingQuestion,
   onInterrupt,
   onQueue,
+  onStackQueuedSend,
   onImplementPlanInNewThread,
 }: ComposerPrimaryActionsProps) {
   const pointerFocusProps = preserveComposerFocusOnPointerDown
@@ -83,7 +93,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     : undefined;
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
   const isSendDisabled = sendDisabledReason !== null;
-  const stageBackdropVariant = useSidebarStageBackdropVariant(
+  const stageBackdropVariant = useStageIdentificationVariant(
     environmentIdentificationMode === "artwork",
   );
 
@@ -147,38 +157,61 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     //   Send  — push it into the running turn now, steering the work in
     //           flight. This is what typing at the CLI while it works does.
     //   Stop  — interrupt.
+    // The + under Queue is a fourth: hold *another* message behind the one
+    // already waiting, so a queue can be two or three deep.
     const canSend = hasSendableContent && !isSendDisabled && !isConnecting;
     return (
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
-        <button
-          type="button"
-          className={cn(
-            "flex size-8 items-center justify-center rounded-full border transition-all duration-150 disabled:pointer-events-none disabled:opacity-30",
-            isQueued
-              ? "border-primary bg-primary/15 text-primary"
-              : "border-border/70 text-muted-foreground enabled:cursor-pointer enabled:hover:scale-105 enabled:hover:text-foreground",
-          )}
-          {...pointerFocusProps}
-          onClick={onQueue}
-          disabled={!isQueued && !canSend}
-          aria-pressed={isQueued}
-          aria-label={
-            isQueued
-              ? "Queued — sends when the agent finishes. Click to cancel."
-              : "Queue until the agent finishes"
-          }
-          title={
-            isQueued
-              ? "Queued — sends when the agent finishes. Click to cancel."
-              : "Queue until the agent finishes"
-          }
-        >
-          {isQueued ? (
-            <Spinner className="size-3.5" aria-hidden="true" />
-          ) : (
-            <ClockIcon className="size-3.5" aria-hidden="true" />
-          )}
-        </button>
+        <div className="flex flex-col items-center gap-0.5">
+          <button
+            type="button"
+            className={cn(
+              "flex size-8 items-center justify-center rounded-full border transition-all duration-150 disabled:pointer-events-none disabled:opacity-30",
+              isQueued
+                ? "border-primary bg-primary/15 text-primary"
+                : "border-border/70 text-muted-foreground enabled:cursor-pointer enabled:hover:scale-105 enabled:hover:text-foreground",
+            )}
+            {...pointerFocusProps}
+            onClick={onQueue}
+            disabled={!isQueued && !canSend}
+            aria-pressed={isQueued}
+            aria-label={
+              isQueued
+                ? "Queued — sends when the agent finishes. Click to cancel."
+                : "Queue until the agent finishes"
+            }
+            title={
+              isQueued
+                ? "Queued — sends when the agent finishes. Click to cancel."
+                : "Queue until the agent finishes"
+            }
+          >
+            {isQueued ? (
+              <Spinner className="size-3.5" aria-hidden="true" />
+            ) : (
+              <ClockIcon className="size-3.5" aria-hidden="true" />
+            )}
+          </button>
+          {/* Only once something is queued: with an empty queue there is
+              nothing to stack behind, and Queue is the button for that. */}
+          {canStackQueuedSend ? (
+            <button
+              type="button"
+              data-composer-stack-queued-send="true"
+              // Smaller than the Queue button above it and sitting a little
+              // lower: it is the secondary of the pair, and at the same weight
+              // the two read as one control split in half.
+              className="mt-0.5 flex size-4 items-center justify-center rounded-full border border-border/70 text-muted-foreground transition-all duration-150 enabled:cursor-pointer enabled:hover:scale-105 enabled:hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+              {...pointerFocusProps}
+              onClick={onStackQueuedSend}
+              disabled={!canSend}
+              aria-label="Queue this behind the messages already waiting"
+              title="Queue this behind the messages already waiting"
+            >
+              <PlusIcon className="size-2.5" aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
         <button
           type="submit"
           className="flex size-8 items-center justify-center rounded-full bg-primary/90 text-primary-foreground shadow-xs shadow-primary/24 transition-all duration-150 enabled:cursor-pointer enabled:hover:scale-105 enabled:hover:bg-primary disabled:pointer-events-none disabled:opacity-30"

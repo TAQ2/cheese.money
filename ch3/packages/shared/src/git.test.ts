@@ -12,23 +12,17 @@ import {
 
 describe("normalizeGitRemoteUrl", () => {
   it("canonicalizes equivalent GitHub remotes across protocol variants", () => {
-    expect(normalizeGitRemoteUrl("git@github.com:CH3Tools/CH3.git")).toBe(
-      "github.com/ch3tools/ch3",
-    );
-    expect(normalizeGitRemoteUrl("https://github.com/CH3Tools/CH3.git")).toBe(
-      "github.com/ch3tools/ch3",
-    );
-    expect(normalizeGitRemoteUrl("ssh://git@github.com/CH3Tools/CH3")).toBe(
-      "github.com/ch3tools/ch3",
-    );
+    expect(normalizeGitRemoteUrl("git@github.com:ch3/ch3.git")).toBe("github.com/ch3/ch3");
+    expect(normalizeGitRemoteUrl("https://github.com/ch3/CH3.git")).toBe("github.com/ch3/ch3");
+    expect(normalizeGitRemoteUrl("ssh://git@github.com/ch3/CH3")).toBe("github.com/ch3/ch3");
   });
 
   it("preserves nested group paths for providers like GitLab", () => {
-    expect(normalizeGitRemoteUrl("git@gitlab.com:CH3Tools/platform/CH3.git")).toBe(
-      "gitlab.com/ch3tools/platform/ch3",
+    expect(normalizeGitRemoteUrl("git@gitlab.com:ch3/platform/CH3.git")).toBe(
+      "gitlab.com/ch3/platform/ch3",
     );
-    expect(normalizeGitRemoteUrl("https://gitlab.com/CH3Tools/platform/CH3.git")).toBe(
-      "gitlab.com/ch3tools/platform/ch3",
+    expect(normalizeGitRemoteUrl("https://gitlab.com/ch3/platform/CH3.git")).toBe(
+      "gitlab.com/ch3/platform/ch3",
     );
   });
 
@@ -44,12 +38,12 @@ describe("normalizeGitRemoteUrl", () => {
 
 describe("parseGitHubRepositoryNameWithOwnerFromRemoteUrl", () => {
   it("extracts the owner and repository from common GitHub remote shapes", () => {
-    expect(parseGitHubRepositoryNameWithOwnerFromRemoteUrl("git@github.com:CH3Tools/CH3.git")).toBe(
-      "CH3Tools/CH3",
+    expect(parseGitHubRepositoryNameWithOwnerFromRemoteUrl("git@github.com:ch3/ch3.git")).toBe(
+      "ch3/ch3",
     );
-    expect(
-      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("https://github.com/CH3Tools/CH3.git"),
-    ).toBe("CH3Tools/CH3");
+    expect(parseGitHubRepositoryNameWithOwnerFromRemoteUrl("https://github.com/ch3/ch3.git")).toBe(
+      "ch3/ch3",
+    );
   });
 });
 

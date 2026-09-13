@@ -94,7 +94,14 @@ interface PlatformConfig {
   readonly archChoices: ReadonlyArray<typeof BuildArch.Type>;
 }
 
-export function resolveResourceMonitorRustTargets(
+/**
+ * The Rust targets to build for a platform/arch pair. More than one means a
+ * macOS `universal` build, and the caller `lipo`s the results together.
+ *
+ * Shared by every native binary the app ships, because the mapping is a
+ * property of the platform, not of any one crate.
+ */
+export function resolveRustTargets(
   platform: typeof BuildPlatform.Type,
   arch: typeof BuildArch.Type,
 ): ReadonlyArray<string> {
@@ -110,8 +117,12 @@ export function resolveResourceMonitorRustTargets(
   return [arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc"];
 }
 
-export function resourceMonitorExecutableName(platform: typeof BuildPlatform.Type): string {
-  return platform === "win" ? "ch3-resource-monitor.exe" : "ch3-resource-monitor";
+/** Cargo's output name for a crate on this platform. */
+export function nativeExecutableName(
+  crateBinaryName: string,
+  platform: typeof BuildPlatform.Type,
+): string {
+  return platform === "win" ? `${crateBinaryName}.exe` : crateBinaryName;
 }
 
 const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
@@ -269,9 +280,10 @@ export class BuildCommandFailedError extends Schema.TaggedErrorClass<BuildComman
   }
 }
 
-export class ResourceMonitorBuildOutputMissingError extends Schema.TaggedErrorClass<ResourceMonitorBuildOutputMissingError>()(
-  "ResourceMonitorBuildOutputMissingError",
+export class NativeBinaryBuildOutputMissingError extends Schema.TaggedErrorClass<NativeBinaryBuildOutputMissingError>()(
+  "NativeBinaryBuildOutputMissingError",
   {
+    crate: Schema.String,
     binaryPath: Schema.String,
     rustTarget: Schema.String,
     platform: BuildPlatform,
@@ -279,7 +291,7 @@ export class ResourceMonitorBuildOutputMissingError extends Schema.TaggedErrorCl
   },
 ) {
   override get message(): string {
-    return `Resource monitor build for ${this.rustTarget} did not produce ${this.binaryPath}.`;
+    return `${this.crate} build for ${this.rustTarget} did not produce ${this.binaryPath}.`;
   }
 }
 
@@ -864,6 +876,29 @@ ${associatedDomains}
 `;
 }
 
+// Signed builds without a passkey provisioning profile still need hardened
+// runtime entitlements: notarization enforces the hardened runtime, and
+// without allow-jit/allow-unsigned-executable-memory Electron cannot allocate
+// executable memory and dies at launch. disable-library-validation lets the
+// bundled native modules (node-pty, ffi-rs, resource-monitor) load. This is
+// the passkey entitlements set minus everything that requires a provisioning
+// profile (application-identifier, team-identifier, associated-domains).
+export function renderMacHardenedRuntimeEntitlements(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>
+`;
+}
+
 export function resolveFffNativeDependencies(
   platform: typeof BuildPlatform.Type,
   arch: typeof BuildArch.Type,
@@ -1180,18 +1215,32 @@ const runCommand = Effect.fn("runCommand")(function* (
   }
 });
 
-const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input: {
+/**
+ * Build one `native/` crate and put its binary where the packaged app can find
+ * it, under `<resources>/<destinationName>/`.
+ *
+ * One function for every native binary the app ships: crates differ only in
+ * which one is built and what the result is called, and a second copy of this
+ * would be one more place to forget a `chmod` or a `lipo`.
+ */
+const stageNativeBinary = Effect.fn("stageNativeBinary")(function* (input: {
   readonly repoRoot: string;
   readonly stageResourcesDir: string;
+  /** Directory under the repo root holding the crate's `Cargo.toml`. */
+  readonly crateDir: string;
+  /** Cargo's `[[bin]]` name, without any platform extension. */
+  readonly crateBinaryName: string;
+  /** Directory name inside the app's resources. */
+  readonly destinationName: string;
   readonly platform: typeof BuildPlatform.Type;
   readonly arch: typeof BuildArch.Type;
   readonly verbose: boolean;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const manifestPath = path.join(input.repoRoot, "native/resource-monitor/Cargo.toml");
-  const executableName = resourceMonitorExecutableName(input.platform);
-  const rustTargets = resolveResourceMonitorRustTargets(input.platform, input.arch);
+  const manifestPath = path.join(input.repoRoot, input.crateDir, "Cargo.toml");
+  const executableName = nativeExecutableName(input.crateBinaryName, input.platform);
+  const rustTargets = resolveRustTargets(input.platform, input.arch);
   const builtBinaries: string[] = [];
 
   for (const rustTarget of rustTargets) {
@@ -1210,20 +1259,22 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
         shell: spawnCommand.shell,
       }),
       {
-        label: `cargo build resource monitor (${rustTarget})`,
+        label: `cargo build ${input.destinationName} (${rustTarget})`,
         verbose: input.verbose,
       },
     );
 
     const binaryPath = path.join(
       input.repoRoot,
-      "native/resource-monitor/target",
+      input.crateDir,
+      "target",
       rustTarget,
       "release",
       executableName,
     );
     if (!(yield* fs.exists(binaryPath))) {
-      return yield* new ResourceMonitorBuildOutputMissingError({
+      return yield* new NativeBinaryBuildOutputMissingError({
+        crate: input.destinationName,
         binaryPath,
         rustTarget,
         platform: input.platform,
@@ -1233,7 +1284,7 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
     builtBinaries.push(binaryPath);
   }
 
-  const destinationDirectory = path.join(input.stageResourcesDir, "resource-monitor");
+  const destinationDirectory = path.join(input.stageResourcesDir, input.destinationName);
   const destinationPath = path.join(destinationDirectory, executableName);
   yield* fs.remove(destinationDirectory, { recursive: true, force: true }).pipe(Effect.ignore);
   yield* fs.makeDirectory(destinationDirectory, { recursive: true });
@@ -1244,7 +1295,7 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
     yield* runCommand(
       ChildProcess.make("lipo", ["-create", ...builtBinaries, "-output", destinationPath]),
       {
-        label: "lipo resource monitor universal binary",
+        label: `lipo ${input.destinationName} universal binary`,
         verbose: input.verbose,
       },
     );
@@ -1254,6 +1305,22 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
     yield* fs.chmod(destinationPath, 0o755);
   }
 });
+
+/**
+ * The native crates that ship inside the app.
+ *
+ * `destinationName` is the directory the binary lands in under the app's
+ * resources, and both the extra-resources mapping below and the server's
+ * lookup are written against these names — change one and the app resolves a
+ * path that does not exist.
+ */
+export const STAGED_NATIVE_BINARIES = [
+  {
+    crateDir: "native/resource-monitor",
+    crateBinaryName: "ch3-resource-monitor",
+    destinationName: "resource-monitor",
+  },
+] as const;
 
 function generateMacIconSet(
   sourcePng: string,
@@ -1530,10 +1597,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   signed: boolean,
   mockUpdates: boolean,
   mockUpdateServerPort: number | undefined,
-  macPasskeySigning:
+  macSigning:
     | {
         readonly entitlementsPath: string;
-        readonly provisioningProfilePath: string;
+        // Only passkey builds carry a provisioning profile; plain signed
+        // builds (Developer ID + notarization, no associated domains) don't.
+        readonly provisioningProfilePath: string | undefined;
       }
     | undefined,
 ) {
@@ -1566,7 +1635,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   }
 
   if (platform === "mac") {
-    const localSignIdentity = signed ? undefined : readLocalSignIdentity();
+    const localSignIdentity = signed ? undefined : yield* readLocalSignIdentity();
+    if (!signed) {
+      yield* Effect.log(
+        localSignIdentity === undefined
+          ? "[desktop-artifact] No local signing identity found, so this build is ad-hoc signed. macOS will re-ask for keychain and app-data permission after every install — see docs/operations/desktop-build-install.md."
+          : `[desktop-artifact] Signing locally as "${localSignIdentity}", so permission grants survive the reinstall.`,
+      );
+    }
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
@@ -1577,10 +1653,19 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           schemes: ["ch3", "ch3-dev"],
         },
       ],
-      ...(macPasskeySigning
+      // Signed builds notarize: electron-builder submits the app to Apple's
+      // notary service (credentials come from the APPLE_API_KEY* env vars)
+      // and staples the ticket, so Gatekeeper accepts the download with no
+      // quarantine handling. Explicit rather than relying on electron-builder
+      // env auto-detection, so a signed build with missing notary credentials
+      // fails loudly instead of shipping a signed-but-unnotarized dmg.
+      ...(signed ? { notarize: true } : {}),
+      ...(macSigning
         ? {
-            entitlements: macPasskeySigning.entitlementsPath,
-            provisioningProfile: macPasskeySigning.provisioningProfilePath,
+            entitlements: macSigning.entitlementsPath,
+            ...(macSigning.provisioningProfilePath !== undefined
+              ? { provisioningProfile: macSigning.provisioningProfilePath }
+              : {}),
           }
         : {}),
       // A local, self-signed identity for a build that is not going through
@@ -1602,6 +1687,17 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           }
         : {}),
     };
+  }
+
+  if (platform === "mac" && target === "dmg") {
+    // The macOS updater downloads the zip and explicitly skips the dmg
+    // (findFile(files, "zip", ["pkg", "dmg"]) in electron-updater), so a dmg
+    // entry in latest-mac.yml is never fetched. Worse, it would be wrong: the
+    // release job staples the notarization ticket to the dmg after this
+    // manifest is written, changing the bytes the recorded checksum describes.
+    // Leaving the dmg out keeps the manifest honest and lists only what the
+    // updater actually uses.
+    buildConfig.dmg = { writeUpdateInfo: false };
   }
 
   if (platform === "linux") {
@@ -1644,10 +1740,47 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
  * Absent, the build stays ad-hoc signed exactly as before, so this changes
  * nothing for anyone who has not created such an identity.
  */
-function readLocalSignIdentity(): string | undefined {
-  const identity = process.env["CH3CODE_DESKTOP_LOCAL_SIGN_IDENTITY"]?.trim();
-  return identity !== undefined && identity.length > 0 ? identity : undefined;
-}
+/**
+ * Self-signed identities this looks for when nobody named one, newest
+ * convention first. `T3 Local Signing` is the name upstream used and is still
+ * in the keychain of everybody who was here before the rename, so it is
+ * accepted rather than orphaned.
+ */
+const LOCAL_SIGN_IDENTITY_NAMES = ["CH3 Dev", "T3 Local Signing"] as const;
+
+/**
+ * The identity a local build signs with — named, discovered, or none.
+ *
+ * Ad-hoc is not "unsigned but harmless". macOS keys both keychain access and
+ * TCC grants to the code identity, and an ad-hoc bundle gets a fresh one on
+ * every build, so every reinstall arrives as a stranger and macOS asks again —
+ * for the login keychain, and for "access data from other apps" — over and
+ * over, each answer voided by the next install. Signing every local build with
+ * the SAME self-signed identity is what makes one answer stick.
+ *
+ * Discovery, rather than only the documented environment variable: "export
+ * this before you build" is the step nobody remembers on a new machine, and
+ * the prompt storm it causes reads as a macOS bug rather than a missing
+ * export.
+ */
+const readLocalSignIdentity = Effect.fn("readLocalSignIdentity")(function* () {
+  const named = yield* Config.string("CH3CODE_DESKTOP_LOCAL_SIGN_IDENTITY").pipe(Config.option);
+  const explicit = Option.getOrUndefined(named)?.trim();
+  if (explicit !== undefined && explicit.length > 0) return explicit;
+
+  const hostPlatform = yield* HostProcessPlatform;
+  if (hostPlatform !== "darwin") return undefined;
+
+  const probe = yield* spawnAndCollectOutput(
+    ChildProcess.make("security", ["find-identity", "-p", "codesigning", "-v"]),
+  ).pipe(Effect.orElseSucceed(() => ({ stdout: "", stderr: "", exitCode: 1 })));
+  if (probe.exitCode !== 0) return undefined;
+
+  const available = new Set(
+    [...probe.stdout.matchAll(/"([^"]+)"/gu)].map((match) => match[1] ?? ""),
+  );
+  return LOCAL_SIGN_IDENTITY_NAMES.find((name) => available.has(name));
+});
 
 const assertPlatformBuildResources = Effect.fn("assertPlatformBuildResources")(function* (
   platform: typeof BuildPlatform.Type,
@@ -1861,13 +1994,16 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
-  yield* stageResourceMonitor({
-    repoRoot,
-    stageResourcesDir,
-    platform: options.platform,
-    arch: options.arch,
-    verbose: options.verbose,
-  });
+  for (const nativeBinary of STAGED_NATIVE_BINARIES) {
+    yield* stageNativeBinary({
+      repoRoot,
+      stageResourcesDir,
+      ...nativeBinary,
+      platform: options.platform,
+      arch: options.arch,
+      verbose: options.verbose,
+    });
+  }
 
   yield* assertPlatformBuildResources(
     options.platform,
@@ -1883,10 +2019,19 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   yield* fs.copy(stageResourcesDir, path.join(stageAppDir, "apps/desktop/prod-resources"));
 
+  // Signed macOS builds always get entitlements. With a provisioning profile
+  // configured (CH3CODE_MACOS_PROVISIONING_PROFILE) the full passkey signing
+  // configuration is resolved and enforced; without one the build signs with
+  // plain hardened-runtime entitlements — Developer ID plus notarization,
+  // no associated domains, which is what the internal distribution ships.
+  const macSigningRequested = options.platform === "mac" && options.signed;
+  const repoEnv = macSigningRequested ? loadRepoEnv({ repoRoot }) : undefined;
+  const passkeyProfileConfigured =
+    (repoEnv?.["CH3CODE_MACOS_PROVISIONING_PROFILE"]?.trim() ?? "").length > 0;
   const configuredMacPasskeySigning =
-    options.platform === "mac" && options.signed
+    repoEnv !== undefined && passkeyProfileConfigured
       ? yield* Effect.try({
-          try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
+          try: () => resolveMacPasskeySigningConfiguration(repoEnv),
           catch: MacPasskeySigningConfigurationResolutionError.fromCause,
         })
       : undefined;
@@ -1899,16 +2044,23 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         ),
       }
     : undefined;
-  const macEntitlementsPath = macPasskeySigning
+  const macEntitlementsPath = macSigningRequested
     ? path.join(stageAppDir, "entitlements.mac.plist")
     : undefined;
-  if (macPasskeySigning && macEntitlementsPath) {
-    if (!(yield* fs.exists(macPasskeySigning.provisioningProfilePath))) {
-      return yield* new MacProvisioningProfileNotFoundError({
-        provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
-      });
+  if (macEntitlementsPath !== undefined) {
+    if (macPasskeySigning) {
+      if (!(yield* fs.exists(macPasskeySigning.provisioningProfilePath))) {
+        return yield* new MacProvisioningProfileNotFoundError({
+          provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
+        });
+      }
+      yield* fs.writeFileString(
+        macEntitlementsPath,
+        renderMacPasskeyEntitlements(macPasskeySigning),
+      );
+    } else {
+      yield* fs.writeFileString(macEntitlementsPath, renderMacHardenedRuntimeEntitlements());
     }
-    yield* fs.writeFileString(macEntitlementsPath, renderMacPasskeyEntitlements(macPasskeySigning));
   }
 
   const stageDependencies = {
@@ -1943,7 +2095,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     private: true,
     packageManager: rootPackageJson.packageManager,
     description: "CH3 desktop build",
-    author: "CH3 Tools",
+    author: "CH3",
     main: "apps/desktop/dist-electron/main.cjs",
     build: yield* createBuildConfig(
       options.platform,
@@ -1952,10 +2104,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.signed,
       options.mockUpdates,
       options.mockUpdateServerPort,
-      macPasskeySigning && macEntitlementsPath
+      macEntitlementsPath !== undefined
         ? {
             entitlementsPath: macEntitlementsPath,
-            provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
+            provisioningProfilePath: macPasskeySigning?.provisioningProfilePath,
           }
         : undefined,
     ),

@@ -35,8 +35,8 @@ const TARGET = new PrimaryConnectionTarget({
 const PUBLISH_RESULT: SourceControlPublishRepositoryResult = {
   repository: {
     provider: "github",
-    nameWithOwner: "ch3tools/ch3",
-    url: "https://github.com/ch3tools/ch3",
+    nameWithOwner: "ch3/ch3",
+    url: "https://github.com/ch3/ch3",
     sshUrl: "git@github.com:ch3tools/ch3.git",
   },
   remoteName: "origin",
@@ -138,7 +138,7 @@ describe("source control environment atoms", () => {
             input: {
               cwd: "/repo",
               provider: "github",
-              repository: "ch3tools/ch3",
+              repository: "ch3/ch3",
               visibility: "private",
             },
           }),
@@ -154,7 +154,7 @@ describe("source control environment atoms", () => {
             input: {
               cwd: "/repo",
               provider: "github",
-              repository: "ch3tools/ch3",
+              repository: "ch3/ch3",
               visibility: "private",
             },
           }),

@@ -28,6 +28,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadOrder: [],
     manuallyUnreadThreadKeys: [],
     threadLastVisitedAtById: {},
+    lastOpenedThreadKey: null,
     speechVoice: "en-GB-RyanNeural",
     speechVoiceSpanish: "es-MX-JorgeNeural",
     speechLanguageMode: "detect",
@@ -284,6 +285,9 @@ describe("parsePersistedState", () => {
       threadLastVisitedAtById: {
         "environment:thread-1": "2026-02-25T12:35:00.000Z",
       },
+      // Absent from the payload, so a client that has never recorded one comes
+      // back to the draft landing rather than to a thread it invented.
+      lastOpenedThreadKey: null,
       // Absent from the payload, so the read-aloud preferences fall back to
       // their defaults rather than landing undefined.
       speechVoice: "en-GB-RyanNeural",
@@ -389,6 +393,7 @@ describe("uiStateStore persistence", () => {
       threadLastVisitedAtById: {
         "environment:thread-1": "2026-02-25T12:35:00.000Z",
       },
+      lastOpenedThreadKey: null,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
           "turn-1": false,
@@ -417,6 +422,9 @@ describe("uiStateStore persistence", () => {
       threadLastVisitedAtById: {
         "environment:thread-1": "2026-02-25T12:35:00.000Z",
       },
+      // Written even when null: a client that has cleared it must come back to
+      // the draft landing rather than to whatever the previous value named.
+      lastOpenedThreadKey: null,
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       threadChangedFilesExpansionVersion: 1,
       threadChangedFilesExpandedById: {
@@ -453,5 +461,25 @@ describe("speech language mode persistence", () => {
     expect(parse("english")).toBe("english");
     expect(parse("detect")).toBe("detect");
     expect(parse("klingon")).toBe("detect");
+  });
+});
+
+describe("lastOpenedThreadKey", () => {
+  // The value a cold start reads to decide where to return. Kept apart from
+  // the visit map on purpose: that map holds thread update times, so the
+  // newest-updated thread would win over the one actually opened last.
+  it("is not the same answer as the newest visited thread", () => {
+    const state = makeUiState({
+      threadLastVisitedAtById: {
+        "env-1:thread-newer": "2026-08-29T10:00:00.000Z",
+        "env-1:thread-older": "2026-08-29T09:00:00.000Z",
+      },
+      lastOpenedThreadKey: "env-1:thread-older",
+    });
+    const newestVisited = Object.entries(state.threadLastVisitedAtById).toSorted((left, right) =>
+      right[1].localeCompare(left[1]),
+    )[0]?.[0];
+    expect(newestVisited).toBe("env-1:thread-newer");
+    expect(state.lastOpenedThreadKey).toBe("env-1:thread-older");
   });
 });

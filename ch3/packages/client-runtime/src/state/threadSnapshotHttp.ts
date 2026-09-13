@@ -1,4 +1,8 @@
-import type { OrchestrationThreadDetailSnapshot, ThreadId } from "@ch3tools/contracts";
+import type {
+  OrchestrationThreadActivitiesPage,
+  OrchestrationThreadDetailSnapshot,
+  ThreadId,
+} from "@ch3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -61,6 +65,44 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
 export type FetchEnvironmentThreadSnapshotError = RemoteEnvironmentRequestError;
 
 /**
+ * Load one page of a thread's activities older than `beforeSequence` — the
+ * on-demand tail behind the snapshot's windowed activity list.
+ */
+export const fetchEnvironmentThreadActivitiesPage = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentThreadActivitiesPage",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly threadId: ThreadId;
+  readonly beforeSequence: number;
+  readonly signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
+  readonly timeoutMs?: number;
+}) {
+  const requestUrl = environmentEndpointUrl(
+    input.prepared.httpBaseUrl,
+    `/api/orchestration/threads/${input.threadId}/activities-page`,
+  );
+  const client = yield* makeEnvironmentHttpApiClient(input.prepared.httpBaseUrl);
+  const headers = yield* buildEnvironmentAuthHeaders(
+    input.prepared.httpAuthorization,
+    "POST",
+    requestUrl,
+    input.signer,
+  );
+  return yield* executeEnvironmentHttpRequest(
+    requestUrl,
+    input.timeoutMs ?? DEFAULT_THREAD_SNAPSHOT_TIMEOUT_MS,
+    withEnvironmentCredentials(
+      input.prepared.httpAuthorization,
+      client.orchestration.threadActivitiesPage({
+        params: { threadId: input.threadId },
+        payload: { beforeSequence: input.beforeSequence },
+        headers,
+      }),
+    ),
+  );
+});
+
+/**
  * Loads a thread's detail snapshot over HTTP, returning `Option.none()` when it
  * cannot be loaded (so the caller falls back to the socket-embedded snapshot).
  * Decouples the thread state machine from the underlying HTTP + DPoP details and
@@ -73,6 +115,15 @@ export class ThreadSnapshotLoader extends Context.Service<
       prepared: PreparedConnection,
       threadId: ThreadId,
     ) => Effect.Effect<Option.Option<OrchestrationThreadDetailSnapshot>>;
+    /**
+     * Older-activities page fetch; `Option.none()` on any failure so the
+     * caller simply leaves the "more" state in place for a retry.
+     */
+    readonly loadActivitiesPage: (
+      prepared: PreparedConnection,
+      threadId: ThreadId,
+      beforeSequence: number,
+    ) => Effect.Effect<Option.Option<OrchestrationThreadActivitiesPage>>;
   }
 >()("@ch3tools/client-runtime/state/threadSnapshotHttp/ThreadSnapshotLoader") {}
 
@@ -112,6 +163,21 @@ export const threadSnapshotLoaderLayer: Layer.Layer<
             ).pipe(
               Effect.annotateLogs({ threadId, cause: Cause.pretty(cause) }),
               Effect.as(Option.none<OrchestrationThreadDetailSnapshot>()),
+            ),
+          ),
+        ),
+      loadActivitiesPage: (
+        prepared: PreparedConnection,
+        threadId: ThreadId,
+        beforeSequence: number,
+      ) =>
+        fetchEnvironmentThreadActivitiesPage({ prepared, threadId, beforeSequence, signer }).pipe(
+          Effect.map(Option.some<OrchestrationThreadActivitiesPage>),
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Could not load an older thread activities page over HTTP.").pipe(
+              Effect.annotateLogs({ threadId, beforeSequence, cause: Cause.pretty(cause) }),
+              Effect.as(Option.none<OrchestrationThreadActivitiesPage>()),
             ),
           ),
         ),

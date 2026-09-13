@@ -8,7 +8,6 @@ import {
   dismissVersionMismatch,
   isVersionMismatchDismissed,
   resolveServerConfigVersionMismatch,
-  resolveServerSelfUpdateCapability,
   resolveVersionMismatch,
   serverUpdateGuidance,
 } from "./versionSkew";
@@ -78,25 +77,7 @@ describe("versionSkew", () => {
     );
   });
 
-  it("reads desktop-managed update capabilities from config descriptors", () => {
-    expect(
-      resolveServerSelfUpdateCapability({
-        environment: {
-          environmentId: EnvironmentId.make("environment-desktop"),
-          label: "Desktop",
-          platform: { os: "darwin", arch: "arm64" },
-          serverVersion: "9.9.9",
-          capabilities: {
-            repositoryIdentity: true,
-            serverSelfUpdate: "desktop-managed",
-          },
-        },
-      }),
-    ).toBe("desktop-managed");
-    expect(resolveServerSelfUpdateCapability(null)).toBeNull();
-  });
-
-  it("matches version-drift guidance to the advertised update path", () => {
+  it("matches the guidance to the update path the server offers", () => {
     expect(serverUpdateGuidance("respawn", "Remote server")).toBe(
       "Update the Remote server so they stay in sync.",
     );

@@ -8,11 +8,22 @@ const CONNECT_AUTHORIZE_PATH = "/connect";
 const CONNECT_CALLBACK_PATH = "/connect/callback";
 
 /**
- * The CLI prints URLs against this origin and the web bundle uses it to
- * decide whether it is the hosted deployment — the two must agree, so the
- * default lives here.
+ * There is deliberately NO default hosted app origin.
+ *
+ * A default used to be baked in here. It named a domain nobody owns —
+ * `ch3.codes` is unregistered, as was the upstream `ch3.codes` it was
+ * renamed from — while being the origin the CLI prints for out-of-band OAuth
+ * and the origin pairing links are built against. Anyone who registered that
+ * domain would have become the sign-in and pairing endpoint for every install,
+ * without touching this repository. A dangling default is worse than no
+ * default: it fails open, silently, to whoever claims the name.
+ *
+ * The hosted flow is therefore opt-in and explicit. Set `CH3CODE_HOSTED_APP_URL`
+ * (server) or `VITE_HOSTED_APP_URL` (web bundle) to an origin CH3 actually
+ * controls. Unset, the hosted paths report that they are not configured
+ * instead of pointing somewhere.
  */
-export const DEFAULT_HOSTED_APP_URL = "https://app.ch3.codes";
+export const HOSTED_APP_URL_ENV_VAR = "CH3CODE_HOSTED_APP_URL";
 
 /**
  * Requested at authorize time by the hosted page and honored by the CLI's

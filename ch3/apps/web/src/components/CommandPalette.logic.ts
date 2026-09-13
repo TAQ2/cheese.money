@@ -25,6 +25,8 @@ export type SearchOverlayMode = "command" | "files" | "content";
 
 export interface CommandPaletteOpenIntent {
   readonly kind: "add-project" | "new-thread-in";
+  /** For `new-thread-in`: where the picked project goes. See `commandPaletteBus.ts`. */
+  readonly newThreadTarget?: "kanban";
 }
 
 export interface CommandPaletteUiState {
@@ -37,7 +39,7 @@ export type CommandPaletteUiAction =
   | { readonly _tag: "SetOpen"; readonly open: boolean }
   | { readonly _tag: "ToggleMode"; readonly mode: SearchOverlayMode }
   | { readonly _tag: "OpenAddProject" }
-  | { readonly _tag: "OpenNewThreadIn" }
+  | { readonly _tag: "OpenNewThreadIn"; readonly newThreadTarget?: "kanban" }
   | { readonly _tag: "ClearOpenIntent" };
 
 export function reduceCommandPaletteUiState(
@@ -58,7 +60,16 @@ export function reduceCommandPaletteUiState(
     case "OpenAddProject":
       return { open: true, mode: "command", openIntent: { kind: "add-project" } };
     case "OpenNewThreadIn":
-      return { open: true, mode: "command", openIntent: { kind: "new-thread-in" } };
+      return {
+        open: true,
+        mode: "command",
+        openIntent: {
+          kind: "new-thread-in",
+          ...(action.newThreadTarget === undefined
+            ? {}
+            : { newThreadTarget: action.newThreadTarget }),
+        },
+      };
     case "ClearOpenIntent":
       return state.openIntent ? { ...state, openIntent: null } : state;
   }

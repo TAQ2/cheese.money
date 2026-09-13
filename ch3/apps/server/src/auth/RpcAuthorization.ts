@@ -77,8 +77,16 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.claudeListAccountProfiles]: AuthOrchestrationReadScope,
   [WS_METHODS.claudeStartAccountLogin]: AuthOrchestrationOperateScope,
   [WS_METHODS.claudeAwaitAccountLogin]: AuthOrchestrationOperateScope,
+  [WS_METHODS.claudeCancelAccountLogin]: AuthOrchestrationOperateScope,
   [WS_METHODS.claudeSignOutAccount]: AuthOrchestrationOperateScope,
+  // Installs software on the machine, so it sits with operate rather than read.
+  [WS_METHODS.claudeInstallCli]: AuthOrchestrationOperateScope,
   [WS_METHODS.claudeCurrentAccountUsage]: AuthOrchestrationReadScope,
+  // Sends a request to Anthropic on the person's demand and clears a pause the
+  // endpoint asked CH3 to keep. Reading is the effect, but SPENDING a
+  // rate-limited read against someone's account is an act on this machine's
+  // credentials, not a passive read of local state.
+  [WS_METHODS.claudeForceAccountUsageRead]: AuthOrchestrationOperateScope,
   [WS_METHODS.subscribeVcsStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeResourceTelemetry]: AuthOrchestrationReadScope,
   [WS_METHODS.vcsRefreshStatus]: AuthOrchestrationReadScope,

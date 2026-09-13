@@ -26,15 +26,21 @@ import {
   ProviderMcpStatusResult,
 } from "./providerMcpStatus.ts";
 import {
+  ClaudeCliInstallInput,
+  ClaudeCliInstallResult,
   ClaudeAccountError,
   ClaudeAccountLoginAwaitInput,
   ClaudeAccountLoginAwaitResult,
+  ClaudeAccountLoginCancelInput,
+  ClaudeAccountLoginCancelResult,
   ClaudeAccountLoginStartInput,
   ClaudeAccountLoginStartResult,
   ClaudeAccountProfilesInput,
   ClaudeAccountProfilesResult,
   ClaudeAccountSignOutInput,
   ClaudeAccountSignOutResult,
+  ClaudeAccountUsageForceReadInput,
+  ClaudeAccountUsageForceReadResult,
   ClaudeCurrentUsageInput,
   ClaudeCurrentUsageResult,
 } from "./claudeAccounts.ts";
@@ -222,6 +228,7 @@ export const WS_METHODS = {
   projectsListEntries: "projects.listEntries",
   projectsReadFile: "projects.readFile",
   speechSynthesize: "speech.synthesize",
+
   projectsSearchContents: "projects.searchContents",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
@@ -315,8 +322,11 @@ export const WS_METHODS = {
   claudeListAccountProfiles: "claude.listAccountProfiles",
   claudeStartAccountLogin: "claude.startAccountLogin",
   claudeAwaitAccountLogin: "claude.awaitAccountLogin",
+  claudeCancelAccountLogin: "claude.cancelAccountLogin",
   claudeSignOutAccount: "claude.signOutAccount",
+  claudeInstallCli: "claude.installCli",
   claudeCurrentAccountUsage: "claude.currentAccountUsage",
+  claudeForceAccountUsageRead: "claude.forceAccountUsageRead",
 
   // Source control methods
   sourceControlLookupRepository: "sourceControl.lookupRepository",
@@ -379,22 +389,6 @@ export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvide
   success: ServerProviderUpdatedPayload,
   error: Schema.Union([ServerProviderUpdateError, EnvironmentAuthorizationError]),
 });
-
-export const WsServerUpdateServerRpc = Rpc.make(WS_METHODS.serverUpdateServer, {
-  payload: ServerSelfUpdateInput,
-  success: ServerSelfUpdateResult,
-  error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
-});
-
-export const WsServerUpdateServerWithProgressRpc = Rpc.make(
-  WS_METHODS.serverUpdateServerWithProgress,
-  {
-    payload: ServerSelfUpdateInput,
-    success: ServerSelfUpdateProgressEvent,
-    error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
-    stream: true,
-  },
-);
 
 export const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
   payload: Schema.Struct({}),
@@ -485,6 +479,22 @@ export const WsServerGetBackgroundPolicyRpc = Rpc.make(WS_METHODS.serverGetBackg
   error: EnvironmentAuthorizationError,
 });
 
+export const WsServerUpdateServerRpc = Rpc.make(WS_METHODS.serverUpdateServer, {
+  payload: ServerSelfUpdateInput,
+  success: ServerSelfUpdateResult,
+  error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerUpdateServerWithProgressRpc = Rpc.make(
+  WS_METHODS.serverUpdateServerWithProgress,
+  {
+    payload: ServerSelfUpdateInput,
+    success: ServerSelfUpdateProgressEvent,
+    error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
+    stream: true,
+  },
+);
+
 export const WsSourceControlLookupRepositoryRpc = Rpc.make(
   WS_METHODS.sourceControlLookupRepository,
   {
@@ -527,16 +537,16 @@ export const WsProjectsListEntriesRpc = Rpc.make(WS_METHODS.projectsListEntries,
   error: Schema.Union([ProjectListEntriesError, EnvironmentAuthorizationError]),
 });
 
-export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
-  payload: ProjectReadFileInput,
-  success: ProjectReadFileResult,
-  error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError]),
-});
-
 export const WsSpeechSynthesizeRpc = Rpc.make(WS_METHODS.speechSynthesize, {
   payload: SpeechSynthesizeInput,
   success: SpeechSynthesizeResult,
   error: Schema.Union([SpeechSynthesizeError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
+  payload: ProjectReadFileInput,
+  success: ProjectReadFileResult,
+  error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError]),
 });
 
 export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
@@ -647,9 +657,38 @@ export const WsClaudeAwaitAccountLoginRpc = Rpc.make(WS_METHODS.claudeAwaitAccou
   error: Schema.Union([ClaudeAccountError, EnvironmentAuthorizationError]),
 });
 
+export const WsClaudeCancelAccountLoginRpc = Rpc.make(WS_METHODS.claudeCancelAccountLogin, {
+  payload: ClaudeAccountLoginCancelInput,
+  success: ClaudeAccountLoginCancelResult,
+  error: Schema.Union([ClaudeAccountError, EnvironmentAuthorizationError]),
+});
+
 export const WsClaudeSignOutAccountRpc = Rpc.make(WS_METHODS.claudeSignOutAccount, {
   payload: ClaudeAccountSignOutInput,
   success: ClaudeAccountSignOutResult,
+  error: Schema.Union([ClaudeAccountError, EnvironmentAuthorizationError]),
+});
+
+/**
+ * Install the Claude Code CLI, and say whether it runs afterwards.
+ *
+ * Cannot fail: a machine with no network and no package manager answers
+ * `ok: false` with a reason, because "we could not install it" is information
+ * the panel shows rather than an error it swallows.
+ */
+export const WsClaudeInstallCliRpc = Rpc.make(WS_METHODS.claudeInstallCli, {
+  payload: ClaudeCliInstallInput,
+  success: ClaudeCliInstallResult,
+  error: Schema.Union([EnvironmentAuthorizationError]),
+});
+
+/**
+ * Force one account's usage read, clearing its pause. See
+ * `ClaudeAccountUsageForceReadInput` for why a force exists at all.
+ */
+export const WsClaudeForceAccountUsageReadRpc = Rpc.make(WS_METHODS.claudeForceAccountUsageRead, {
+  payload: ClaudeAccountUsageForceReadInput,
+  success: ClaudeAccountUsageForceReadResult,
   error: Schema.Union([ClaudeAccountError, EnvironmentAuthorizationError]),
 });
 
@@ -963,8 +1002,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
-  WsServerUpdateServerRpc,
-  WsServerUpdateServerWithProgressRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
@@ -981,6 +1018,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetBackgroundPolicyRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
+  WsServerUpdateServerRpc,
+  WsServerUpdateServerWithProgressRpc,
   WsSourceControlLookupRepositoryRpc,
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
@@ -1052,7 +1091,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsClaudeListAccountProfilesRpc,
   WsClaudeStartAccountLoginRpc,
   WsClaudeAwaitAccountLoginRpc,
+  WsClaudeCancelAccountLoginRpc,
   WsClaudeSignOutAccountRpc,
+  WsClaudeInstallCliRpc,
   WsClaudeCurrentAccountUsageRpc,
+  WsClaudeForceAccountUsageReadRpc,
   WsVcsFetchRemoteRpc,
 );

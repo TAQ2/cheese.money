@@ -997,6 +997,11 @@ export interface DesktopBridge {
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
+  /**
+   * Relaunch the app at the person's request, with a reason for the lifecycle
+   * log. Optional: a bridge from a build that predates it simply has no button.
+   */
+  relaunchApp?: (reason: string) => Promise<void>;
   setTailscaleServeEnabled: (input: {
     readonly enabled: boolean;
     readonly port?: number;
@@ -1014,7 +1019,27 @@ export interface DesktopBridge {
     position?: { x: number; y: number },
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
+  /**
+   * Name the account the next Claude sign-in window is for, so the shell can
+   * type it into the page's email box. Send `null` for a brand-new account —
+   * that both says "nothing to prefill" and clears any address a previous,
+   * abandoned attempt left pending.
+   */
+  setClaudeSignInEmailHint: (email: string | null) => Promise<void>;
   onMenuAction: (listener: (action: string) => void) => () => void;
+  /**
+   * Report whether any agent run is live in this renderer. While one is, the
+   * shell holds a power-save blocker so the machine does not idle-sleep and
+   * suspend the run. Optional so a renderer served by an older shell degrades
+   * silently.
+   */
+  setAgentActivity?: (input: { readonly active: boolean }) => Promise<void>;
+  /**
+   * Fires when the machine wakes from sleep. The renderer reconnects its
+   * environment sockets immediately instead of waiting out reconnect backoff
+   * on a half-open connection. Optional for the same reason as above.
+   */
+  onPowerResume?: (listener: () => void) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;

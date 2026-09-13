@@ -412,7 +412,10 @@ export function ProviderInstanceCard({
     : null;
   const summary = rawSummary;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
-  const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
+  const versionAdvisory = getProviderVersionAdvisoryPresentation(
+    liveProvider?.versionAdvisory,
+    liveProvider?.updateState,
+  );
   const updateCommand = versionAdvisory?.updateCommand ?? null;
   const FallbackIconComponent = driverOption?.icon;
   const displayName =
@@ -471,13 +474,18 @@ export function ProviderInstanceCard({
     typeof (instance.config as { homePath?: unknown } | undefined)?.homePath === "string"
       ? ((instance.config as { homePath: string }).homePath ?? "")
       : "";
+  // All three are opt-OUT: absent means enabled, matching the schema defaults.
   const claudeFailoverEnabled =
     (instance.config as { accountFailoverEnabled?: unknown } | undefined)
-      ?.accountFailoverEnabled === true;
-  // Opt-in: absent means disabled, matching the server's own read.
+      ?.accountFailoverEnabled !== false;
+  // Rotation alone is opt-IN: its scoring probe reads the login keychain on a
+  // timer that first fires at startup, so absent means off, as the server reads it.
   const claudeRotationEnabled =
     (instance.config as { accountRotationEnabled?: unknown } | undefined)
       ?.accountRotationEnabled === true;
+  const claudeKeepWarmEnabled =
+    (instance.config as { accountRiddleKeepWarmEnabled?: unknown } | undefined)
+      ?.accountRiddleKeepWarmEnabled !== false;
 
   const updateEnabled = (value: boolean) => {
     onUpdate({ ...instance, enabled: value });
@@ -638,7 +646,7 @@ export function ProviderInstanceCard({
                             ? "text-warning hover:text-warning"
                             : "text-primary hover:text-primary",
                         )}
-                        aria-label="Update available — view details"
+                        aria-label={`${versionAdvisory.title} — view details`}
                       >
                         <ArrowUpCircleIcon className="size-3.5 [animation:bounce_2.4s_ease-in-out_infinite] motion-reduce:animate-none" />
                       </Button>
@@ -650,13 +658,16 @@ export function ProviderInstanceCard({
                     className="w-[min(21rem,calc(100vw-1.5rem))] [--popup-width:min(21rem,calc(100vw-1.5rem))]"
                   >
                     <div className="grid min-w-0 gap-3">
-                      <div className="grid gap-0.5">
+                      <div className="grid min-w-0 gap-0.5">
                         <p className="text-[13px] font-semibold leading-tight text-foreground">
-                          Update available
+                          {versionAdvisory.title}
                         </p>
                         <p
                           className={cn(
-                            "text-xs leading-snug",
+                            // A failure quotes the updater, and updaters quote
+                            // URLs: without a break opportunity the longest
+                            // token decides the width and the reason is clipped.
+                            "min-w-0 text-xs leading-snug break-words",
                             versionAdvisory.emphasis === "strong"
                               ? "text-warning"
                               : "text-muted-foreground",
@@ -675,7 +686,11 @@ export function ProviderInstanceCard({
                           onClick={onRunUpdate}
                         >
                           {isUpdating ? <LoaderIcon className="animate-spin" /> : <DownloadIcon />}
-                          {isUpdating ? "Updating" : "Update now"}
+                          {isUpdating
+                            ? "Updating"
+                            : versionAdvisory.retry
+                              ? "Try again"
+                              : "Update now"}
                         </Button>
                       ) : null}
                       {onRunUpdate && updateCommand ? (
@@ -722,6 +737,7 @@ export function ProviderInstanceCard({
               {driverKind === "claudeAgent" && accountSwitcherEnvironmentId ? (
                 <ClaudeAccountSwitcher
                   environmentId={accountSwitcherEnvironmentId}
+                  instanceId={instanceId}
                   currentHomePath={claudeHomePath}
                   onSelectHomePath={(homePath) => {
                     // Switching accounts is a settings change: point this
@@ -753,6 +769,18 @@ export function ProviderInstanceCard({
                       config: nextConfigBlobWithValue(
                         instance.config,
                         "accountRotationEnabled",
+                        enabled,
+                      ),
+                    } as ProviderInstanceConfig);
+                  }}
+                  keepWarmEnabled={claudeKeepWarmEnabled}
+                  onKeepWarmEnabledChange={(enabled) => {
+                    const { config: _omit, ...rest } = instance;
+                    onUpdate({
+                      ...rest,
+                      config: nextConfigBlobWithValue(
+                        instance.config,
+                        "accountRiddleKeepWarmEnabled",
                         enabled,
                       ),
                     } as ProviderInstanceConfig);

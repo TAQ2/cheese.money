@@ -94,6 +94,38 @@ export function resolveSnoozePresets(now: Date): ReadonlyArray<SnoozePreset> {
 }
 
 /**
+ * `<input type="datetime-local">` speaks local wall time in
+ * `YYYY-MM-DDTHH:mm`. `toISOString()` would shift the field by the UTC
+ * offset and show the user a time they did not pick.
+ */
+function toDateTimeLocalInput(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * Opening value for the custom picker: tomorrow 9:00, the same anchor as
+ * the "Tomorrow" preset, so the field starts somewhere useful instead of
+ * empty.
+ */
+export function customSnoozeDefaultInput(now: Date): string {
+  return toDateTimeLocalInput(atHour(addDays(now, 1), MORNING_HOUR));
+}
+
+/**
+ * Wake time for a hand-picked date and time, or null when the field is
+ * empty, unparseable, or not strictly in the future. That last condition
+ * is the one the decider rejects, checked here so the dialog refuses
+ * before dispatching a command that could only fail.
+ */
+export function resolveCustomSnooze(value: string, now: Date): string | null {
+  const picked = new Date(value);
+  if (Number.isNaN(picked.getTime())) return null;
+  if (picked.getTime() <= now.getTime()) return null;
+  return picked.toISOString();
+}
+
+/**
  * Compact "wakes in" label for snoozed rows: "2h", "18h", "3d". Minutes
  * round up so a snooze never reads "0m" while still hidden.
  */

@@ -3,7 +3,13 @@ import { safeErrorLogAttributes } from "@ch3tools/client-runtime/errors";
 import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 
-const ThemePreference = Schema.Literals(["light", "dark", "system"]);
+/**
+ * "ch3" is the brand mode: dark, with the CH3 purple running through
+ * every accent. It behaves as dark everywhere below (the desktop shell and
+ * `resolvedTheme` both see "dark"); the only difference is the `ch3`
+ * class on the root element, which the stylesheet uses to re-hue tokens.
+ */
+const ThemePreference = Schema.Literals(["light", "dark", "system", "ch3"]);
 type Theme = typeof ThemePreference.Type;
 type ThemeSnapshot = {
   theme: Theme;
@@ -15,7 +21,8 @@ type DesktopThemeBridge = Pick<DesktopBridge, "setTheme">;
 const STORAGE_KEY = "ch3:theme";
 const MEDIA_QUERY = "(prefers-color-scheme: dark)";
 const DEFAULT_THEME_SNAPSHOT: ThemeSnapshot = {
-  theme: "system",
+  // CH3 opens in brand mode; System/Light/Dark remain one click away.
+  theme: "ch3",
   systemDark: false,
 };
 const THEME_COLOR_META_NAME = "theme-color";
@@ -81,7 +88,7 @@ export function readThemePreference(): Theme {
       cause,
     });
   }
-  if (raw === "light" || raw === "dark" || raw === "system") return raw;
+  if (raw === "light" || raw === "dark" || raw === "system" || raw === "ch3") return raw;
   return DEFAULT_THEME_SNAPSHOT.theme;
 }
 
@@ -184,8 +191,9 @@ function applyTheme(theme: Theme, suppressTransitions = false) {
   if (suppressTransitions) {
     document.documentElement.classList.add("no-transitions");
   }
-  const isDark = theme === "dark" || (theme === "system" && systemDark);
+  const isDark = theme === "dark" || theme === "ch3" || (theme === "system" && systemDark);
   document.documentElement.classList.toggle("dark", isDark);
+  document.documentElement.classList.toggle("ch3", theme === "ch3");
   lastAppliedTheme = { theme, systemDark };
   syncBrowserChromeTheme();
   syncDesktopTheme(theme);
@@ -201,7 +209,7 @@ function applyTheme(theme: Theme, suppressTransitions = false) {
 
 export async function syncDesktopThemePreference(
   bridge: DesktopThemeBridge,
-  theme: Theme,
+  theme: "light" | "dark" | "system",
 ): Promise<void> {
   try {
     await bridge.setTheme(theme);
@@ -218,7 +226,10 @@ export function syncDesktopTheme(theme: Theme) {
   }
 
   lastDesktopTheme = theme;
-  void syncDesktopThemePreference(bridge, theme).catch((cause: unknown) => {
+  // The shell's native chrome only knows light/dark/system; the brand mode
+  // is dark to everything outside the stylesheet.
+  const shellTheme = theme === "ch3" ? "dark" : theme;
+  void syncDesktopThemePreference(bridge, shellTheme).catch((cause: unknown) => {
     const error = isDesktopThemeSyncError(cause)
       ? cause
       : new DesktopThemeSyncError({ theme, cause });
@@ -288,7 +299,13 @@ export function useTheme() {
   const theme = snapshot.theme;
 
   const resolvedTheme: "light" | "dark" =
-    theme === "system" ? (snapshot.systemDark ? "dark" : "light") : theme;
+    theme === "system"
+      ? snapshot.systemDark
+        ? "dark"
+        : "light"
+      : theme === "ch3"
+        ? "dark"
+        : theme;
 
   const setTheme = useCallback((next: Theme) => {
     if (typeof window === "undefined") return;

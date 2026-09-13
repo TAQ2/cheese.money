@@ -2,6 +2,7 @@ import { Children, cloneElement, isValidElement, type ReactNode } from "react";
 import type { ServerProviderSkill } from "@ch3tools/contracts";
 
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
+import { detectProseFilePaths } from "./proseFilePaths";
 import {
   CHAT_INLINE_CHIP_CLASS_NAME,
   CHAT_INLINE_CHIP_LABEL_CLASS_NAME,
@@ -14,9 +15,45 @@ const SKILL_TOKEN_REGEX = /(^|\s)\$([a-zA-Z][a-zA-Z0-9:_-]*)(?=\s|$)/g;
 
 type InlineSkill = Pick<ServerProviderSkill, "name" | "displayName">;
 
-export function SkillInlineText(props: { text: string; skills: ReadonlyArray<InlineSkill> }) {
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
+/**
+ * Turns one absolute path found in prose into a chip, or returns null to
+ * leave it as text.
+ *
+ * A callback rather than something this module resolves itself: deciding that
+ * a path names a real file needs the thread's cwd and environment, which live
+ * in `ChatMarkdown`, and the chip it builds is the same one a backticked path
+ * gets. Absent — a caller with no cwd — paths stay as they are today.
+ */
+export type InlineFilePathRenderer = (path: string, key: string) => ReactNode | null;
+
+export interface InlineTextOptions {
+  readonly skills: ReadonlyArray<InlineSkill>;
+  readonly renderFilePath?: InlineFilePathRenderer | undefined;
+}
+
+/** One token found in prose, at the position it was found. */
+interface InlineToken {
+  readonly start: number;
+  readonly end: number;
+  readonly node: ReactNode;
+}
+
+/**
+ * Prose with its inline tokens replaced by chips: `$skill` names, and now
+ * absolute file paths.
+ *
+ * Both kinds are collected into ONE ordered pass rather than each getting its
+ * own walk. Two passes over the same string would have to re-scan the nodes
+ * the first one had already replaced, and the second scanner would see chips
+ * where it expected text.
+ */
+export function SkillInlineText(
+  props: { text: string; skills: ReadonlyArray<InlineSkill> } & Pick<
+    InlineTextOptions,
+    "renderFilePath"
+  >,
+) {
+  const tokens: InlineToken[] = [];
 
   for (const match of props.text.matchAll(SKILL_TOKEN_REGEX)) {
     const prefix = match[1] ?? "";
@@ -27,17 +64,41 @@ export function SkillInlineText(props: { text: string; skills: ReadonlyArray<Inl
     if (!skill) {
       continue;
     }
-
-    if (start > cursor) {
-      nodes.push(props.text.slice(cursor, start));
-    }
-    nodes.push(<SkillChip key={`${start}:${name}`} skill={skill} rawText={rawText} />);
-    cursor = start + rawText.length;
+    tokens.push({
+      start,
+      end: start + rawText.length,
+      node: <SkillChip key={`skill:${start}:${name}`} skill={skill} rawText={rawText} />,
+    });
   }
 
-  if (cursor === 0) {
+  if (props.renderFilePath) {
+    for (const match of detectProseFilePaths(props.text)) {
+      const node = props.renderFilePath(match.path, `path:${match.start}`);
+      if (node === null) continue;
+      tokens.push({ start: match.start, end: match.end, node });
+    }
+  }
+
+  if (tokens.length === 0) {
     return <>{props.text}</>;
   }
+
+  tokens.sort((left, right) => left.start - right.start);
+
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const token of tokens) {
+    // A skill name inside a path, or any other overlap, keeps whichever token
+    // started first; the loser is dropped rather than allowed to slice the
+    // text twice.
+    if (token.start < cursor) continue;
+    if (token.start > cursor) {
+      nodes.push(props.text.slice(cursor, token.start));
+    }
+    nodes.push(token.node);
+    cursor = token.end;
+  }
+
   if (cursor < props.text.length) {
     nodes.push(props.text.slice(cursor));
   }
@@ -47,10 +108,11 @@ export function SkillInlineText(props: { text: string; skills: ReadonlyArray<Inl
 export function renderSkillInlineMarkdownChildren(
   children: ReactNode,
   skills: ReadonlyArray<InlineSkill>,
+  renderFilePath?: InlineFilePathRenderer,
 ): ReactNode {
   return Children.map(children, (child) => {
     if (typeof child === "string") {
-      return <SkillInlineText text={child} skills={skills} />;
+      return <SkillInlineText text={child} skills={skills} renderFilePath={renderFilePath} />;
     }
     if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(child)) {
       return child;
@@ -67,7 +129,7 @@ export function renderSkillInlineMarkdownChildren(
     return cloneElement(
       child,
       undefined,
-      renderSkillInlineMarkdownChildren(child.props.children, skills),
+      renderSkillInlineMarkdownChildren(child.props.children, skills, renderFilePath),
     );
   });
 }

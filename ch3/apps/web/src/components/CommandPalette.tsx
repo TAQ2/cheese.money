@@ -33,6 +33,7 @@ import {
   FileSearchIcon,
   FolderIcon,
   FolderPlusIcon,
+  FolderSearchIcon,
   LinkIcon,
   MessageSquareIcon,
   SettingsIcon,
@@ -69,6 +70,7 @@ import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments"
 import { useProjects, useThreadShells } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
+import { openKanbanNewThread } from "../kanbanNewThreadBus";
 import {
   appendBrowsePathSegment,
   ensureBrowseDirectoryPath,
@@ -370,13 +372,22 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     mode: "command",
     openIntent: null,
   });
+  // Owned here rather than inside the palette body, which unmounts the moment
+  // the palette closes — the discover dialog has to outlive that.
   const setOpen = useCallback((open: boolean) => dispatch({ _tag: "SetOpen", open }), []);
   const toggleMode = useCallback(
     (mode: SearchOverlayMode) => dispatch({ _tag: "ToggleMode", mode }),
     [],
   );
   const openAddProject = useCallback(() => dispatch({ _tag: "OpenAddProject" }), []);
-  const openNewThreadIn = useCallback(() => dispatch({ _tag: "OpenNewThreadIn" }), []);
+  const openNewThreadIn = useCallback(
+    (newThreadTarget?: "kanban") =>
+      dispatch({
+        _tag: "OpenNewThreadIn",
+        ...(newThreadTarget === undefined ? {} : { newThreadTarget }),
+      }),
+    [],
+  );
   const clearOpenIntent = useCallback(() => dispatch({ _tag: "ClearOpenIntent" }), []);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const composerHandleRef = useRef<ChatComposerHandle | null>(null);
@@ -437,7 +448,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     () =>
       onOpenCommandPalette((detail) => {
         if (detail.open === "new-thread-in") {
-          openNewThreadIn();
+          openNewThreadIn(detail.newThreadTarget);
         } else if (detail.open === "add-project") {
           openAddProject();
         } else {
@@ -941,6 +952,11 @@ function OpenCommandPaletteDialog(props: {
     [openProjectFromSearch, pickerProjects, projectGroupByTargetKey],
   );
 
+  // Where the next "new thread in..." pick goes. The open intent is cleared
+  // the moment the list is shown, long before the pick, so its target is
+  // kept here. This component unmounts with the palette, which is what
+  // forgets it.
+  const newThreadTargetRef = useRef<"kanban" | null>(null);
   const projectThreadItems = useMemo(
     () =>
       enumerateCommandPaletteItems(
@@ -969,11 +985,15 @@ function OpenCommandPaletteDialog(props: {
                   projectRef.environmentId === contextualProjectRef.environmentId &&
                   projectRef.projectId === contextualProjectRef.projectId,
               );
-            await handleNewThread(
-              contextualRefBelongsToGroup
-                ? contextualProjectRef
-                : scopeProjectRef(project.environmentId, project.id),
-            );
+            const projectRef = contextualRefBelongsToGroup
+              ? contextualProjectRef
+              : scopeProjectRef(project.environmentId, project.id);
+            if (newThreadTargetRef.current === "kanban") {
+              // The board's dialog takes it from here; no draft, no navigation.
+              openKanbanNewThread(projectRef);
+              return;
+            }
+            await handleNewThread(projectRef);
           },
         }),
       ),
@@ -1319,9 +1339,23 @@ function OpenCommandPaletteDialog(props: {
   }, [clearOpenIntent, openAddProjectFlow, openIntent]);
 
   useLayoutEffect(() => {
-    if (openIntent?.kind !== "new-thread-in" || projectThreadItems.length === 0) {
+    if (openIntent?.kind !== "new-thread-in") {
       return;
     }
+    // No projects YET is the common case on a cold open — the intent stays
+    // armed so it can fire the moment they land.
+    if (projectThreadItems.length === 0) {
+      return;
+    }
+    // Except once somebody has typed. The effect resets the view and clears the
+    // query, so firing late — after projects loaded a tick later — threw away
+    // whatever they had entered in the meantime. A query means they went to do
+    // something else, and the intent has been overtaken.
+    if (query.trim().length > 0) {
+      clearOpenIntent();
+      return;
+    }
+    newThreadTargetRef.current = openIntent.newThreadTarget ?? null;
     clearOpenIntent();
     browseNavigation.invalidate();
     setAddProjectCloneFlow(null);
@@ -1355,6 +1389,7 @@ function OpenCommandPaletteDialog(props: {
     openIntent,
     projectThreadItems,
     pushPaletteView,
+    query,
   ]);
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
@@ -1453,6 +1488,10 @@ function OpenCommandPaletteDialog(props: {
       openAddProjectFlow();
     },
   });
+
+  // The primary way in. An engineer who already has projects never sees the
+  // zero-project hero, so the hero button alone would be invisible to exactly
+  // the people who have thirty unlinked repositories.
 
   if (wslAddProjectEnvironmentOption) {
     actionItems.push({

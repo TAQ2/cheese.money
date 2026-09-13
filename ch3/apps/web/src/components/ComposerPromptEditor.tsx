@@ -884,6 +884,13 @@ interface ComposerPromptEditorProps {
   disabled: boolean;
   placeholder: string;
   className?: string;
+  /**
+   * Defaults to the name the e2e suite means by "the composer". Queued-send
+   * rows mount a second, third and fourth editor above it and must not answer
+   * to it: `getByTestId("composer-editor")` is a strict locator, and a
+   * duplicate turns every composer spec into an ambiguity failure.
+   */
+  testId?: string;
   onRemoveTerminalContext: (contextId: string) => void;
   onChange: (
     nextValue: string,
@@ -1533,6 +1540,7 @@ function ComposerPromptEditorInner({
   disabled,
   placeholder,
   className,
+  testId,
   onRemoveTerminalContext,
   onChange,
   onCommandKeyDown,
@@ -1772,7 +1780,7 @@ function ComposerPromptEditorInner({
                 "block max-h-72 min-h-28 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent text-[16px] leading-relaxed text-foreground focus:outline-none sm:text-[14px]",
                 className,
               )}
-              data-testid="composer-editor"
+              data-testid={testId}
               aria-placeholder={placeholder}
               placeholder={<span />}
               onPaste={onPaste}
@@ -1810,6 +1818,7 @@ export function ComposerPromptEditor({
   disabled,
   placeholder,
   className,
+  testId = "composer-editor",
   onRemoveTerminalContext,
   onChange,
   onCommandKeyDown,
@@ -1821,7 +1830,7 @@ export function ComposerPromptEditor({
   const initialSkillMetadataRef = useRef(skillMetadataByName(skills));
   const initialConfig = useMemo<InitialConfigType>(
     () => ({
-      namespace: "ch3tools-composer-editor",
+      namespace: "ch3-composer-editor",
       editable: true,
       nodes: [ComposerMentionNode, ComposerSkillNode, ComposerTerminalContextNode],
       editorState: () => {
@@ -1847,6 +1856,7 @@ export function ComposerPromptEditor({
         skills={skills}
         disabled={disabled}
         placeholder={placeholder}
+        testId={testId}
         onRemoveTerminalContext={onRemoveTerminalContext}
         onChange={onChange}
         onPaste={onPaste}

@@ -38,6 +38,23 @@ export interface OrchestrationEngineShape {
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError, never>;
 
   /**
+   * Replay ONE thread's events after the cursor.
+   *
+   * @param threadId - The thread whose events to read.
+   * @param fromSequenceExclusive - Sequence cursor (exclusive).
+   * @returns Stream containing ordered events for that thread only.
+   *
+   * Indexed per stream, so a resuming subscription pays for what THAT thread
+   * wrote rather than for everything the environment wrote since. A thread's
+   * cursor is the sequence of the last event of that thread, while the head
+   * advances with every event in the environment, so the two diverge by design.
+   */
+  readonly readThreadEvents: (
+    threadId: string,
+    fromSequenceExclusive: number,
+  ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError, never>;
+
+  /**
    * Dispatch a validated orchestration command.
    *
    * @param command - Valid orchestration command.

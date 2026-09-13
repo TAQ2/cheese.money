@@ -37,9 +37,22 @@ Examples: `mod+j`, `mod+shift+d`, `ctrl+l`, `cmd+k`.
 Commands are IDs like `terminal.toggle`, `commandPalette.toggle`, `preview.refresh`, and
 `chat.new`. Project scripts are addressable as `script.{id}.run`, for example `script.test.run`.
 
+On macOS, `mod+w` closes the focused terminal pane and `mod+r` refreshes the focused preview tab —
+the application menu no longer claims ⌘W and ⌘R for itself, so those shortcuts reach the page. ⌘Q
+still quits, and asks first when an agent is still working.
+
 `filePicker.toggle` opens file search for the active project and defaults to `mod+p`.
 `projectSearch.toggle` searches inside the active project's files and defaults to `mod+shift+f`.
 Repeating either shortcut closes that search, and switching shortcuts replaces the open search.
+
+`chat.findInThread` finds text inside the conversation you are reading and defaults to `mod+f`.
+Every match is highlighted, `Enter` and `Shift+Enter` step forward and back, and the timeline
+scrolls to each one — unfolding a collapsed turn, a clipped message, or a collapsed plan when the
+match is hidden inside it. `Escape` closes the bar and clears the highlighting; anything it
+unfolded to show you stays open. The shortcut does nothing while a terminal has focus, so the
+terminal keeps its own find. This searches your messages, the agent's replies, and proposed plans —
+not tool calls, command output, or reasoning, because those are loaded a window at a time and
+counting them would report a total that is missing older matches.
 
 The command palette searches active thread titles, projects, branches, user messages, and final
 agent responses across connected environments. Message matches show one labeled excerpt while

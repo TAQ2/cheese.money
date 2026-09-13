@@ -31,8 +31,14 @@ const SERVER_ONLY_NODE_OPTION = "--use-system-ca";
  * replacing it, so an unrelated flag (`--max-old-space-size`, say) is sharing
  * the variable and must survive. An emptied variable is deleted rather than
  * left blank, so a child sees "unset" exactly as it would have without CH3.
+ *
+ * Exported because the provider drivers are not the only thing that spawns a
+ * Claude CLI: text generation, the account sign-in, the status line and the
+ * MCP catalogue all do, and each one that forgot this strip was broken in the
+ * packaged app and only there. `makeClaudeEnvironment` now applies it for
+ * every Claude spawn, so the rule lives in one place instead of five.
  */
-function withoutServerOnlyNodeOptions(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function withoutServerOnlyNodeOptions(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const nodeOptions = env["NODE_OPTIONS"];
   if (nodeOptions === undefined || !nodeOptions.includes(SERVER_ONLY_NODE_OPTION)) {
     return env;

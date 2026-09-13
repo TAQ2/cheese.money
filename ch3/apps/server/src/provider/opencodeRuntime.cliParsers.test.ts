@@ -1,8 +1,14 @@
 import * as NodeAssert from "node:assert/strict";
 
-import { describe, it } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 
-import { parseModelsCliOutput, parseAgentListCliOutput } from "./opencodeRuntime.ts";
+import type { RuntimeMode } from "@ch3tools/contracts";
+
+import {
+  buildOpenCodePermissionRules,
+  parseModelsCliOutput,
+  parseAgentListCliOutput,
+} from "./opencodeRuntime.ts";
 
 describe("parseModelsCliOutput", () => {
   it("parses a single model from a single provider", () => {
@@ -225,5 +231,28 @@ describe("parseAgentListCliOutput", () => {
     const result = parseAgentListCliOutput(stdout);
     NodeAssert.equal(result[0]!.hidden, true);
     NodeAssert.equal(result[1]!.hidden, false);
+  });
+});
+
+describe("buildOpenCodePermissionRules", () => {
+  it("gives OpenCode no auto-approval: every mode but Full access asks", () => {
+    // A stated per-driver decision, pinned here so it cannot drift silently.
+    // New threads now start in `auto`, and OpenCode has no auto-approval of its
+    // own — so on OpenCode, Auto and Supervised behave identically and only Full
+    // access runs unattended. Deliberate: a starting posture that asks is the
+    // safe one, and granting OpenCode Full access by default would hand it more
+    // than the default gives Claude or Codex. `docs/user/permission-modes.md`
+    // says so to the user.
+    const asks = (mode: RuntimeMode) =>
+      buildOpenCodePermissionRules(mode).some(
+        (rule) => rule.permission === "bash" && rule.action === "ask",
+      );
+
+    expect(asks("auto")).toBe(true);
+    expect(asks("approval-required")).toBe(true);
+    expect(asks("auto-accept-edits")).toBe(true);
+    expect(buildOpenCodePermissionRules("full-access")).toEqual([
+      { permission: "*", pattern: "*", action: "allow" },
+    ]);
   });
 });

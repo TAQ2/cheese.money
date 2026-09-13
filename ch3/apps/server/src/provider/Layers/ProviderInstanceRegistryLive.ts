@@ -41,10 +41,13 @@ import {
   type ServerProvider,
 } from "@ch3tools/contracts";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
+import * as Latch from "effect/Latch";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -81,7 +84,28 @@ interface RegistryState {
   readonly entries: Ref.Ref<ReadonlyMap<ProviderInstanceId, LiveEntry>>;
   readonly unavailable: Ref.Ref<ReadonlyMap<ProviderInstanceId, ServerProvider>>;
   readonly changes: PubSub.PubSub<void>;
+  /**
+   * Instance ids `reconcile` is part-way through retiring, each holding a
+   * closed latch that the same `reconcile` opens once the new map is
+   * published. A lookup that lands on one of these waits for the
+   * replacement instead of being handed the instance that is on its way
+   * out — see `makeReconcile` for why the corpse is dangerous rather than
+   * merely stale.
+   */
+  readonly rebuilding: Ref.Ref<ReadonlyMap<ProviderInstanceId, Latch.Latch>>;
 }
+
+/**
+ * How long `getInstance` waits for an instance that is mid-rebuild before
+ * reporting it absent.
+ *
+ * A rebuild is one `driver.create` — a probe of a CLI on this machine, not a
+ * network round trip — so the budget is generous. It exists at all because a
+ * lookup that never returns would wedge the single fiber that drains every
+ * provider intent for the environment; an instance that reads as missing
+ * fails one turn loudly with `ProviderUnsupportedError` instead.
+ */
+const REBUILD_LOOKUP_TIMEOUT = Duration.seconds(30);
 
 /**
  * Structural equality on `ProviderInstanceConfig` envelopes. Used by
@@ -223,9 +247,8 @@ const makeReconcile = <R>(input: {
         nextRaw.map(([raw]) => ProviderInstanceId.make(raw)),
       );
 
-      // 1. Close scopes for instances that disappeared or whose config
-      //    changed. Do this BEFORE creating replacements so ids map 1-to-1
-      //    to live scopes at all times.
+      // 1. Work out which live instances this reconcile retires: gone from
+      //    the map, or still present under a changed config.
       const removedIds: Array<ProviderInstanceId> = [];
       const replacedIds = new Set<ProviderInstanceId>();
       for (const [instanceId, live] of previousEntries) {
@@ -238,76 +261,141 @@ const makeReconcile = <R>(input: {
           replacedIds.add(instanceId);
         }
       }
+
+      // 2. Gate every retired id BEFORE the first scope closes, and hold the
+      //    gate until the new map is published, so the swap is atomic as seen
+      //    from `getInstance`.
+      //
+      //    Closing a scope does not disarm the instance that lived in it. The
+      //    adapter, its session map and the environment it spawns processes
+      //    with are plain closures held by whoever still has the object, so a
+      //    lookup that lands between the close and the swap gets something
+      //    that still works: it starts a real CLI process, under the settings
+      //    the user has just changed away from, on an adapter whose shutdown
+      //    finalizer has already run — so nothing ever stops it. That is how
+      //    a Claude account switch left a live turn answering from the old
+      //    account with the old `CLAUDE_CONFIG_DIR`.
+      const gates = new Map<ProviderInstanceId, Latch.Latch>();
       for (const id of [...removedIds, ...replacedIds]) {
-        const live = previousEntries.get(id);
-        if (live) {
-          yield* Scope.close(live.scope, Exit.void).pipe(Effect.ignore);
-        }
+        gates.set(id, yield* Latch.make(false));
+      }
+      if (gates.size > 0) {
+        yield* Ref.update(state.rebuilding, (current) => new Map([...current, ...gates]));
       }
 
-      // 2. Build additions and replacements. Walk `nextRaw` so the final
-      //    entry order follows settings-author order.
-      const builtEntries = new Map<ProviderInstanceId, LiveEntry>();
-      const builtUnavailable = new Map<ProviderInstanceId, ServerProvider>();
-      let orderChanged = false;
-      const previousOrder = [...previousEntries.keys()];
-      const nextOrder: Array<ProviderInstanceId> = [];
-
-      for (const [rawInstanceId, entry] of nextRaw) {
-        const instanceId = ProviderInstanceId.make(rawInstanceId);
-        nextOrder.push(instanceId);
-
-        const existing = previousEntries.get(instanceId);
-        if (existing !== undefined && !replacedIds.has(instanceId)) {
-          // No-op update: keep the existing live entry and scope.
-          builtEntries.set(instanceId, existing);
-          continue;
+      // Every exit path releases the waiters: a rebuild that died or was
+      // interrupted by the registry scope closing must never leave a lookup
+      // parked on a latch nobody is left to open.
+      const releaseGates = Ref.update(state.rebuilding, (current) => {
+        if (gates.size === 0) return current;
+        const next = new Map(current);
+        for (const [id, gate] of gates) {
+          if (next.get(id) === gate) next.delete(id);
         }
+        return next;
+      }).pipe(
+        Effect.andThen(Effect.forEach([...gates.values()], (gate) => gate.open, { discard: true })),
+      );
 
-        const result = yield* buildEntry({
-          driversById,
-          parentScope,
-          instanceId,
-          rawInstanceId,
-          entry,
+      // An exit that never reached the swap has already closed those scopes,
+      // so the map is left naming instances that can still spawn processes
+      // and can no longer be shut down. Drop them: an id that reads as "not
+      // configured" fails one turn loudly, where a corpse fails silently by
+      // doing the wrong work.
+      const retiredIds = [...removedIds, ...replacedIds];
+      const retireClosedEntries = Effect.gen(function* () {
+        if (retiredIds.length === 0) return;
+        yield* Ref.update(state.entries, (current) => {
+          const next = new Map(current);
+          for (const id of retiredIds) next.delete(id);
+          return next;
         });
-        if (result.kind === "live") {
-          builtEntries.set(instanceId, result.live);
-        } else {
-          builtUnavailable.set(instanceId, result.snapshot);
-        }
-      }
+        yield* PubSub.publish(state.changes, undefined);
+      });
 
-      if (previousOrder.length === nextOrder.length) {
-        for (let i = 0; i < previousOrder.length; i++) {
-          if (previousOrder[i] !== nextOrder[i]) {
-            orderChanged = true;
-            break;
+      return yield* Effect.gen(function* () {
+        // 3. Close the retired scopes. Behind the gate, so no lookup can see
+        //    the window where an id maps to a closed scope.
+        for (const id of [...removedIds, ...replacedIds]) {
+          const live = previousEntries.get(id);
+          if (live) {
+            yield* Scope.close(live.scope, Exit.void).pipe(Effect.ignore);
           }
         }
-      } else {
-        orderChanged = true;
-      }
 
-      const entriesChanged =
-        orderChanged ||
-        removedIds.length > 0 ||
-        replacedIds.size > 0 ||
-        builtEntries.size !== previousEntries.size;
-      const unavailableChanged =
-        builtUnavailable.size !== previousUnavailable.size ||
-        [...builtUnavailable].some(([id, snapshot]) => {
-          const prev = previousUnavailable.get(id);
-          return prev === undefined || !Equal.equals(prev, snapshot);
-        }) ||
-        [...previousUnavailable].some(([id]) => !builtUnavailable.has(id));
+        // 4. Build additions and replacements. Walk `nextRaw` so the final
+        //    entry order follows settings-author order.
+        const builtEntries = new Map<ProviderInstanceId, LiveEntry>();
+        const builtUnavailable = new Map<ProviderInstanceId, ServerProvider>();
+        let orderChanged = false;
+        const previousOrder = [...previousEntries.keys()];
+        const nextOrder: Array<ProviderInstanceId> = [];
 
-      yield* Ref.set(state.entries, builtEntries);
-      yield* Ref.set(state.unavailable, builtUnavailable);
+        for (const [rawInstanceId, entry] of nextRaw) {
+          const instanceId = ProviderInstanceId.make(rawInstanceId);
+          nextOrder.push(instanceId);
 
-      if (entriesChanged || unavailableChanged) {
-        yield* PubSub.publish(state.changes, undefined);
-      }
+          const existing = previousEntries.get(instanceId);
+          if (existing !== undefined && !replacedIds.has(instanceId)) {
+            // No-op update: keep the existing live entry and scope.
+            builtEntries.set(instanceId, existing);
+            continue;
+          }
+
+          const result = yield* buildEntry({
+            driversById,
+            parentScope,
+            instanceId,
+            rawInstanceId,
+            entry,
+          });
+          if (result.kind === "live") {
+            builtEntries.set(instanceId, result.live);
+          } else {
+            builtUnavailable.set(instanceId, result.snapshot);
+          }
+        }
+
+        if (previousOrder.length === nextOrder.length) {
+          for (let i = 0; i < previousOrder.length; i++) {
+            if (previousOrder[i] !== nextOrder[i]) {
+              orderChanged = true;
+              break;
+            }
+          }
+        } else {
+          orderChanged = true;
+        }
+
+        const entriesChanged =
+          orderChanged ||
+          removedIds.length > 0 ||
+          replacedIds.size > 0 ||
+          builtEntries.size !== previousEntries.size;
+        const unavailableChanged =
+          builtUnavailable.size !== previousUnavailable.size ||
+          [...builtUnavailable].some(([id, snapshot]) => {
+            const prev = previousUnavailable.get(id);
+            return prev === undefined || !Equal.equals(prev, snapshot);
+          }) ||
+          [...previousUnavailable].some(([id]) => !builtUnavailable.has(id));
+
+        yield* Ref.set(state.entries, builtEntries);
+        yield* Ref.set(state.unavailable, builtUnavailable);
+
+        if (entriesChanged || unavailableChanged) {
+          yield* PubSub.publish(state.changes, undefined);
+        }
+      }).pipe(
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit)
+            ? releaseGates
+            : Effect.logError(
+                "Provider instance reconcile did not finish; retiring the instances it had already closed",
+                { instanceIds: retiredIds, cause: exit.cause },
+              ).pipe(Effect.andThen(retireClosedEntries), Effect.andThen(releaseGates)),
+        ),
+      );
     });
 };
 
@@ -358,9 +446,10 @@ export const makeProviderInstanceRegistry = <R>(input: {
     const entries = yield* Ref.make<ReadonlyMap<ProviderInstanceId, LiveEntry>>(new Map());
     const unavailable = yield* Ref.make<ReadonlyMap<ProviderInstanceId, ServerProvider>>(new Map());
     const changes = yield* PubSub.unbounded<void>();
+    const rebuilding = yield* Ref.make<ReadonlyMap<ProviderInstanceId, Latch.Latch>>(new Map());
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
 
-    const state: RegistryState = { entries, unavailable, changes };
+    const state: RegistryState = { entries, unavailable, changes, rebuilding };
     const reconcileWithR = makeReconcile({ state, driversById, parentScope });
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
       reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
@@ -370,7 +459,30 @@ export const makeProviderInstanceRegistry = <R>(input: {
     yield* reconcile(input.configMap);
 
     const registry: ProviderInstanceRegistryShape = {
-      getInstance: (id) => Ref.get(entries).pipe(Effect.map((map) => map.get(id)?.instance)),
+      // A lookup for an id that `reconcile` is retiring waits for the new
+      // map rather than being handed the entry on its way out: the retired
+      // object still spawns processes, under settings the user has already
+      // moved off, and nothing is left to stop them. Removal is covered by
+      // the same wait — the latch opens either way, and the id is simply
+      // absent from the map afterwards.
+      getInstance: (id) =>
+        Effect.gen(function* () {
+          const gate = (yield* Ref.get(rebuilding)).get(id);
+          if (gate !== undefined) {
+            const released = yield* gate.await.pipe(
+              Effect.timeoutOption(REBUILD_LOOKUP_TIMEOUT),
+              Effect.map(Option.isSome),
+            );
+            if (!released) {
+              yield* Effect.logError(
+                "Timed out waiting for a provider instance to be rebuilt; reporting it as absent",
+                { instanceId: id, timeoutMillis: Duration.toMillis(REBUILD_LOOKUP_TIMEOUT) },
+              );
+              return undefined;
+            }
+          }
+          return (yield* Ref.get(entries)).get(id)?.instance;
+        }),
       listInstances: Ref.get(entries).pipe(
         Effect.map(
           (map) =>

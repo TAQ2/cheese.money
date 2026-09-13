@@ -1422,6 +1422,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   `mcp_servers.ch3.url=${mcpSession.endpoint}`,
                   "-c",
                   'mcp_servers.ch3.bearer_token_env_var="CH3_MCP_BEARER_TOKEN"',
+                  // The same half-hour Claude gets, in the unit Codex's config
+                  // takes. `spawn_model_agent` waits on a child model by
+                  // design, and a default that cuts it off throws the answer
+                  // away rather than the wait. See
+                  // `McpProviderSession.CH3CODE_MCP_TOOL_TIMEOUT_MS`, which this tracks.
+                  "-c",
+                  `mcp_servers.ch3.tool_timeout_sec=${McpProviderSession.CH3CODE_MCP_TOOL_TIMEOUT_MS / 1000}`,
                 ],
               }
             : {}),

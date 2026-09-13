@@ -6,6 +6,8 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
+import { displayVersion } from "@ch3tools/shared/releaseVersion";
+
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -114,7 +116,7 @@ export const make = Effect.gen(function* () {
     yield* electronApp.setName(environment.displayName);
     yield* electronApp.setAboutPanelOptions({
       applicationName: environment.displayName,
-      applicationVersion: environment.appVersion,
+      applicationVersion: displayVersion(environment.appVersion),
       version: Option.getOrElse(commitHash, () => "unknown"),
     });
 

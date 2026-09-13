@@ -248,6 +248,69 @@ function formatTraceExit(exit: Exit.Exit<unknown, unknown>): EffectTraceRecord["
   };
 }
 
+/**
+ * How slow a statement has to be before the trace file keeps it.
+ *
+ * Measured on a real machine's trace: `sql.execute` was 54.7% of all bytes
+ * written, and 1,238 of its 1,335 spans finished inside two milliseconds. The
+ * file exists to explain slow work; a statement that took no time explains
+ * nothing and crowds out what does. The surrounding `sql.transaction` spans are
+ * kept whatever their duration, so a fast statement is still visible as part of
+ * the transaction that ran it.
+ */
+const SLOW_STATEMENT_MS = 2;
+
+/** The attribute the SQL client puts a whole statement into. */
+const QUERY_TEXT_ATTRIBUTE = "db.query.text";
+
+/**
+ * How much of a statement is kept before it is replaced by its fingerprint.
+ *
+ * Enough to see which query it is; the same file measured 32.1% of its total
+ * bytes as verbatim SQL, most of it the same few statements repeated.
+ */
+const QUERY_TEXT_KEPT_CHARS = 200;
+
+/**
+ * A short, stable fingerprint of a string — FNV-1a, hex.
+ *
+ * Not a security hash and not `node:crypto`: this module runs in the browser
+ * bundle too. Its only job is to let two truncated statements be recognised as
+ * the same statement.
+ */
+export function traceTextFingerprint(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/**
+ * What a record looks like on its way to the trace file, or nothing at all.
+ *
+ * Only the file sink goes through here — the OTLP exporter builds its own
+ * records — so nothing dropped or shortened here is lost to a backend that
+ * asked for the full stream.
+ */
+export function slimTraceRecord(record: EffectTraceRecord): EffectTraceRecord | null {
+  if (record.name === "sql.execute" && record.durationMs < SLOW_STATEMENT_MS) {
+    return null;
+  }
+  const queryText = record.attributes[QUERY_TEXT_ATTRIBUTE];
+  if (typeof queryText !== "string" || queryText.length <= QUERY_TEXT_KEPT_CHARS) {
+    return record;
+  }
+  return {
+    ...record,
+    attributes: {
+      ...record.attributes,
+      [QUERY_TEXT_ATTRIBUTE]: `${queryText.slice(0, QUERY_TEXT_KEPT_CHARS)}… fnv1a:${traceTextFingerprint(queryText)}`,
+    },
+  };
+}
+
 export function spanToTraceRecord(span: SerializableSpan): EffectTraceRecord {
   const status = span.status as Extract<Tracer.SpanStatus, { _tag: "Ended" }>;
   const parentSpanId = Option.getOrUndefined(span.parent)?.spanId;
@@ -423,7 +486,10 @@ class LocalFileSpan implements Tracer.Span {
     this.delegate.end(endTime, exit);
 
     if (this.sampled) {
-      this.push(spanToTraceRecord(this));
+      const record = slimTraceRecord(spanToTraceRecord(this));
+      if (record !== null) {
+        this.push(record);
+      }
     }
   }
 

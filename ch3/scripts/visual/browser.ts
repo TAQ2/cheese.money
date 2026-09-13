@@ -308,16 +308,43 @@ export async function ensureAuthenticated(input: {
   }
 
   const credential = await input.mintCredential();
-  const exchange = await input.browser.context.request.post(
-    `${input.webUrl}/api/auth/browser-session`,
-    { data: { credential }, failOnStatusCode: false },
-  );
+  await exchangePairingCredential({
+    request: input.browser.context.request,
+    webUrl: input.webUrl,
+    credential,
+  });
+  const confirmed = await input.browser.context.request.get(sessionUrl);
+  const body = await confirmed.text();
+  return { authenticated: body.includes('"authenticated":true'), paired: true };
+}
+
+/**
+ * Trade a one-time pairing credential for the browser-session cookie, on
+ * whatever request context is handed in. Structurally typed so both this
+ * harness's path-loaded Playwright and `@playwright/test`'s `APIRequestContext`
+ * fit: the e2e suite's global setup performs the same exchange to mint the
+ * storage state every test runs with.
+ */
+export async function exchangePairingCredential(input: {
+  readonly request: {
+    post(
+      url: string,
+      options: {
+        readonly data: { readonly credential: string };
+        readonly failOnStatusCode: boolean;
+      },
+    ): Promise<{ status(): number; text(): Promise<string> }>;
+  };
+  readonly webUrl: string;
+  readonly credential: string;
+}): Promise<void> {
+  const exchange = await input.request.post(`${input.webUrl}/api/auth/browser-session`, {
+    data: { credential: input.credential },
+    failOnStatusCode: false,
+  });
   if (exchange.status() !== 200) {
     throw new Error(
       `Pairing exchange failed with HTTP ${String(exchange.status())}: ${await exchange.text()}`,
     );
   }
-  const confirmed = await input.browser.context.request.get(sessionUrl);
-  const body = await confirmed.text();
-  return { authenticated: body.includes('"authenticated":true'), paired: true };
 }

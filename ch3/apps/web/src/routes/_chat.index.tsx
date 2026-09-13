@@ -1,6 +1,10 @@
-import { scopeProjectRef } from "@ch3tools/client-runtime/environment";
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { LinkIcon, PlusIcon, RotateCcwIcon } from "lucide-react";
+import {
+  scopeProjectRef,
+  scopeThreadRef,
+  scopedThreadKey,
+} from "@ch3tools/client-runtime/environment";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { FolderSearchIcon, LinkIcon, PlusIcon, RotateCcwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { openCommandPalette } from "../commandPaletteBus";
@@ -15,6 +19,7 @@ import {
   useThreadShells,
 } from "../state/entities";
 import { useEnvironments } from "../state/environments";
+import { useUiStateStore } from "../uiStateStore";
 import { APP_DISPLAY_NAME } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { cn } from "~/lib/utils";
@@ -32,17 +37,68 @@ function ChatIndexRouteView() {
 }
 
 /**
- * Landing on the index route drops straight into a draft thread for the most
- * recently active project, so the first screen is a prompt instead of a dead
- * end. Falls back to an add-project hero when no project exists yet.
+ * Landing on the index route returns to the conversation you were in, so
+ * restarting the app puts you back where you were rather than in a new one.
+ *
+ * Two answers, in order. The thread this device recorded as open last is the
+ * exact one. Failing that — a client that has never recorded one, a thread
+ * since deleted, an environment no longer paired — the most recently updated
+ * unarchived thread is the honest approximation, and it is what makes this work
+ * on the first restart after installing rather than the second.
+ *
+ * With no threads at all it still opens a draft in the most recently active
+ * project, so a fresh install lands on a prompt rather than a dead end, and
+ * with no projects either it is the add-project hero.
  */
 function IndexDraftLanding() {
   const projects = useProjects();
   const threads = useThreadShells();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const handleNewThread = useNewThreadHandler();
+  const navigate = useNavigate();
   const startingRef = useRef(false);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
+
+  // Resolved against the threads this client actually has: a remembered thread
+  // that was deleted, or that belongs to an environment this device is no
+  // longer paired with, is not somewhere to send anybody.
+  const lastOpenedThreadKey = useUiStateStore((store) => store.lastOpenedThreadKey);
+  const lastOpenedThread = useMemo(() => {
+    if (!bootstrapped) return null;
+    const recorded =
+      lastOpenedThreadKey === null
+        ? null
+        : (threads.find(
+            (thread) =>
+              scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
+              lastOpenedThreadKey,
+          ) ?? null);
+    if (recorded !== null) return recorded;
+    // Archived threads are ones the reader has deliberately put away; coming
+    // back into one would be the app arguing with that.
+    return threads
+      .filter((thread) => thread.archivedAt === null)
+      .reduce<(typeof threads)[number] | null>(
+        (newest, thread) =>
+          newest === null || thread.updatedAt > newest.updatedAt ? thread : newest,
+        null,
+      );
+  }, [bootstrapped, lastOpenedThreadKey, threads]);
+
+  useEffect(() => {
+    if (lastOpenedThread === null || startingRef.current) {
+      return;
+    }
+    startingRef.current = true;
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: {
+        environmentId: lastOpenedThread.environmentId,
+        threadId: lastOpenedThread.id,
+      },
+      replace: true,
+    });
+  }, [lastOpenedThread, navigate]);
 
   const mostRecentProject = useMemo(
     () =>
@@ -53,7 +109,7 @@ function IndexDraftLanding() {
   );
 
   useEffect(() => {
-    if (mostRecentProject === null || startingRef.current) {
+    if (mostRecentProject === null || lastOpenedThread !== null || startingRef.current) {
       return;
     }
     startingRef.current = true;
@@ -63,9 +119,12 @@ function IndexDraftLanding() {
       startingRef.current = false;
       setStartState((state) => ({ ...state, failed: true }));
     });
-  }, [handleNewThread, mostRecentProject, startState.retryRequest]);
+  }, [handleNewThread, lastOpenedThread, mostRecentProject, startState.retryRequest]);
 
   if (!bootstrapped) {
+    return null;
+  }
+  if (lastOpenedThread !== null) {
     return null;
   }
   if (mostRecentProject !== null) {
@@ -106,6 +165,10 @@ function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
 
 function NoProjectsHero() {
   const openAddProject = useCallback(() => openCommandPalette({ open: "add-project" }), []);
+  const openDiscoverProjects = useCallback(
+    () => openCommandPalette({ open: "discover-projects" }),
+    [],
+  );
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
@@ -119,10 +182,14 @@ function NoProjectsHero() {
               <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
                 Add a project to start your first thread.
               </EmptyDescription>
-              <div className="mt-6 flex justify-center">
+              <div className="mt-6 flex justify-center gap-2">
                 <Button size="sm" onClick={openAddProject}>
                   <PlusIcon className="size-4" />
                   Add project
+                </Button>
+                <Button size="sm" variant="outline" onClick={openDiscoverProjects}>
+                  <FolderSearchIcon className="size-4" />
+                  Discover CH3 projects
                 </Button>
               </div>
             </EmptyHeader>

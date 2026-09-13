@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -230,6 +231,12 @@ describe("AssetAccess", () => {
       ).toEqual({ kind: "file", path: canonicalFaviconPath });
 
       yield* fileSystem.remove(faviconPath);
+      // The resolver holds what it found for a minute — the scan is a dozen
+      // filesystem probes and every issued asset URL runs it. So a favicon
+      // that has just been deleted is still remembered, and the fallback is
+      // only reachable once that minute is up. Moved on the test clock rather
+      // than waited out.
+      yield* TestClock.adjust("2 minutes");
       const fallbackResult = yield* issueAssetUrl({
         resource: { _tag: "project-favicon", cwd: root },
       });

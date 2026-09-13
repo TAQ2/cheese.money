@@ -118,13 +118,14 @@ describe("branding logic", () => {
 });
 
 describe("resolveSidebarV2Default", () => {
-  it.each(["Nightly", "Dev", "nightly", " dev "])("enables the beta for %s builds", (stage) => {
-    expect(resolveSidebarV2Default(stage)).toBe(true);
-  });
-
-  it.each(["Alpha", "Latest", ""])("leaves the beta off for %s builds", (stage) => {
-    expect(resolveSidebarV2Default(stage)).toBe(false);
-  });
+  it.each(["Nightly", "Dev", "nightly", " dev ", "Alpha", "Latest", ""])(
+    "opens on the inbox for %s builds",
+    (stage) => {
+      // Every stage, not just the pre-release ones: the first thing a new
+      // install shows should be the work waiting, not a folder list.
+      expect(resolveSidebarV2Default(stage)).toBe(true);
+    },
+  );
 });
 
 describe("resolveSidebarV2Enabled", () => {
@@ -146,23 +147,32 @@ describe("resolveSidebarV2Enabled", () => {
     },
   );
 
-  it("applies the stage default when the beta was never enabled or configured", () => {
+  it.each(["Nightly", "Latest", "Alpha"])(
+    "opens on the inbox for %s when nothing was ever chosen",
+    (stageLabel) => {
+      expect(
+        resolveSidebarV2Enabled({
+          ...hydrated,
+          enabled: false,
+          configuredByUser: false,
+          stageLabel,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it("holds the inbox while settings are still loading, so the common path never swaps", () => {
+    // Pre-hydration is the schema defaults, not the user's answer. Holding the
+    // project tree here mounted one sidebar and replaced it a tick later for
+    // everyone who ends up on the inbox — which is now nearly everyone.
     expect(
       resolveSidebarV2Enabled({
-        ...hydrated,
-        enabled: false,
-        configuredByUser: false,
-        stageLabel: "Nightly",
-      }),
-    ).toBe(true);
-    expect(
-      resolveSidebarV2Enabled({
-        ...hydrated,
+        settingsHydrated: false,
         enabled: false,
         configuredByUser: false,
         stageLabel: "Latest",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("honors an explicit opt-out over the stage default", () => {
@@ -176,7 +186,10 @@ describe("resolveSidebarV2Enabled", () => {
     ).toBe(false);
   });
 
-  it("holds v1 until settings hydrate so the sidebar does not remount", () => {
+  it("ignores a stored answer until settings hydrate, holding the default", () => {
+    // Pre-hydration the "stored" values are just schema defaults, so they are
+    // not an answer to hold on to — the sidebar that mounts is the default one,
+    // and the stored choice takes effect the moment it is really known.
     expect(
       resolveSidebarV2Enabled({
         enabled: true,
@@ -184,6 +197,6 @@ describe("resolveSidebarV2Enabled", () => {
         settingsHydrated: false,
         stageLabel: "Nightly",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });

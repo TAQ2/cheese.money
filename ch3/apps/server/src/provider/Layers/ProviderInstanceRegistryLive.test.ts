@@ -26,28 +26,35 @@ import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   type ClaudeSettings,
-  type CodexSettings,
   type CursorSettings,
   type GrokSettings,
+  type CodexSettings,
   type OpenCodeSettings,
   ProviderDriverKind,
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
 } from "@ch3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Latch from "effect/Latch";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
-import { CodexDriver } from "../Drivers/CodexDriver.ts";
 import { CursorDriver } from "../Drivers/CursorDriver.ts";
 import { GrokDriver } from "../Drivers/GrokDriver.ts";
+import { CodexDriver } from "../Drivers/CodexDriver.ts";
 import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
+import { ProviderDriverError } from "../Errors.ts";
+import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
@@ -106,9 +113,13 @@ const makeClaudeConfig = (overrides: Partial<ClaudeSettings>): ClaudeSettings =>
   homePath: "",
   accountFailoverEnabled: false,
   accountRotationEnabled: true,
+  accountRiddleKeepWarmEnabled: true,
   accountFailoverThresholdPercent: 95,
   customModels: [],
   launchArgs: "",
+  artifactToolEnabled: false,
+  chromeIntegrationEnabled: false,
+  claudeAiConnectorsEnabled: false,
   ...overrides,
 });
 
@@ -281,7 +292,11 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
   // provides `OpenCodeRuntimeLive`'s deps while keeping its own outputs
   // surfaced; that merged layer then provides `ServerConfig.layerTest`'s
   // `FileSystem` dep while keeping everything else surfaced to the test.
-  const infraLayer = OpenCodeRuntimeLive.pipe(Layer.provideMerge(NodeServices.layer));
+  const infraLayer = OpenCodeRuntimeLive.pipe(
+    // The vault the runtime spends from and the driver reports failures to.
+    // Locked here, as it is at boot before anyone has signed in.
+    Layer.provideMerge(NodeServices.layer),
+  );
   const testLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "provider-instance-registry-all-drivers-test",
   }).pipe(
@@ -296,15 +311,15 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Effect.gen(function* () {
       const codexId = ProviderInstanceId.make("codex_default");
       const claudeId = ProviderInstanceId.make("claude_default");
+      const openCodeId = ProviderInstanceId.make("opencode_default");
       const cursorId = ProviderInstanceId.make("cursor_default");
       const grokId = ProviderInstanceId.make("grok_default");
-      const openCodeId = ProviderInstanceId.make("opencode_default");
 
       const codexDriverKind = ProviderDriverKind.make("codex");
       const claudeDriverKind = ProviderDriverKind.make("claudeAgent");
+      const openCodeDriverKind = ProviderDriverKind.make("opencode");
       const cursorDriverKind = ProviderDriverKind.make("cursor");
       const grokDriverKind = ProviderDriverKind.make("grok");
-      const openCodeDriverKind = ProviderDriverKind.make("opencode");
 
       const configMap: ProviderInstanceConfigMap = {
         [codexId]: {
@@ -322,6 +337,12 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
             launchArgs: "--verbose",
           }),
         },
+        [openCodeId]: {
+          driver: openCodeDriverKind,
+          displayName: "OpenCode",
+          enabled: false,
+          config: makeOpenCodeConfig({}),
+        },
         [cursorId]: {
           driver: cursorDriverKind,
           displayName: "Cursor",
@@ -333,12 +354,6 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
           displayName: "Grok",
           enabled: false,
           config: makeGrokConfig({}),
-        },
-        [openCodeId]: {
-          driver: openCodeDriverKind,
-          displayName: "OpenCode",
-          enabled: false,
-          config: makeOpenCodeConfig({}),
         },
       };
 
@@ -363,47 +378,47 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       // model. Each driver's bundle carries its advertised `driverKind`.
       const codex = yield* registry.getInstance(codexId);
       const claude = yield* registry.getInstance(claudeId);
+      const openCode = yield* registry.getInstance(openCodeId);
       const cursor = yield* registry.getInstance(cursorId);
       const grok = yield* registry.getInstance(grokId);
-      const openCode = yield* registry.getInstance(openCodeId);
       expect(codex?.driverKind).toBe(codexDriverKind);
       expect(claude?.driverKind).toBe(claudeDriverKind);
+      expect(openCode?.driverKind).toBe(openCodeDriverKind);
       expect(cursor?.driverKind).toBe(cursorDriverKind);
       expect(grok?.driverKind).toBe(grokDriverKind);
-      expect(openCode?.driverKind).toBe(openCodeDriverKind);
       expect(codex?.displayName).toBe("Codex");
       expect(claude?.displayName).toBe("Claude");
+      expect(openCode?.displayName).toBe("OpenCode");
       expect(cursor?.displayName).toBe("Cursor");
       expect(grok?.displayName).toBe("Grok");
-      expect(openCode?.displayName).toBe("OpenCode");
 
       // Every instance owns its own set of closures — no sharing across
       // drivers. `adapter` / `textGeneration` / `snapshot` are all
       // distinct references even when two instances happen to share a
-      // trait (e.g. Cursor + others all use a stub-or-real
+      // trait (e.g. they all use a stub-or-real
       // `textGeneration`; they must still be different object values).
       const adapters = [
         codex!.adapter,
         claude!.adapter,
+        openCode!.adapter,
         cursor!.adapter,
         grok!.adapter,
-        openCode!.adapter,
       ];
       expect(new Set(adapters).size).toBe(adapters.length);
       const textGenerations = [
         codex!.textGeneration,
         claude!.textGeneration,
+        openCode!.textGeneration,
         cursor!.textGeneration,
         grok!.textGeneration,
-        openCode!.textGeneration,
       ];
       expect(new Set(textGenerations).size).toBe(textGenerations.length);
       const snapshots = [
         codex!.snapshot,
         claude!.snapshot,
+        openCode!.snapshot,
         cursor!.snapshot,
         grok!.snapshot,
-        openCode!.snapshot,
       ];
       expect(new Set(snapshots).size).toBe(snapshots.length);
 
@@ -447,5 +462,228 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         `${openCodeDriverKind}:instance:${openCodeId}`,
       );
     }).pipe(Effect.provide(testLayer)),
+  );
+});
+
+/**
+ * The instance swap is atomic, or an account switch reaches the wrong process.
+ *
+ * `reconcile` closes an outgoing instance's scope before it publishes the
+ * replacement. Closing a scope does not disarm the instance: its adapter, its
+ * session map and the environment it spawns CLI processes with are plain
+ * closures. A lookup landing in that window used to be handed the retired
+ * object, which happily started a real process under the settings the user had
+ * just changed away from — and, because the adapter's shutdown finalizer had
+ * already run, nothing was ever left to stop it.
+ *
+ * These tests drive that window deliberately: a fake driver whose `create`
+ * parks on a latch holds a rebuild open at exactly the wrong moment.
+ */
+describe("ProviderInstanceRegistryLive — atomic instance swap", () => {
+  const mainId = ProviderInstanceId.make("fake_main");
+  const otherId = ProviderInstanceId.make("fake_other");
+  const fakeDriverKind = ProviderDriverKind.make("fakeDriver");
+
+  interface FakeConfig {
+    readonly homePath: string;
+  }
+
+  // The instance is identified in assertions by the home path it was built
+  // from, which is what a Claude account switch actually moves.
+  const makeFakeInstance = (instanceId: ProviderInstanceId, homePath: string): ProviderInstance =>
+    ({
+      instanceId,
+      driverKind: fakeDriverKind,
+      continuationIdentity: {
+        driverKind: fakeDriverKind,
+        continuationKey: `fake:home:${homePath}`,
+      },
+      displayName: homePath,
+      enabled: true,
+      snapshot: {} as ProviderInstance["snapshot"],
+      adapter: {} as ProviderInstance["adapter"],
+      textGeneration: {} as ProviderInstance["textGeneration"],
+    }) satisfies ProviderInstance;
+
+  /**
+   * A driver whose `create` runs a test-supplied hook first, so a test can
+   * hold the rebuild open between "outgoing scope closed" and "new map
+   * published".
+   */
+  const makeFakeDriver = (
+    onCreate: (input: {
+      readonly instanceId: ProviderInstanceId;
+      readonly homePath: string;
+    }) => Effect.Effect<void, ProviderDriverError>,
+  ): ProviderDriver<FakeConfig> => ({
+    driverKind: fakeDriverKind,
+    metadata: { displayName: "Fake" },
+    configSchema: Schema.Struct({ homePath: Schema.String }),
+    defaultConfig: () => ({ homePath: "" }),
+    create: (input) =>
+      Effect.gen(function* () {
+        yield* onCreate({ instanceId: input.instanceId, homePath: input.config.homePath });
+        return makeFakeInstance(input.instanceId, input.config.homePath);
+      }),
+  });
+
+  const configMapOf = (
+    entries: ReadonlyArray<readonly [ProviderInstanceId, string]>,
+  ): ProviderInstanceConfigMap =>
+    Object.fromEntries(
+      entries.map(([instanceId, homePath]) => [
+        instanceId,
+        { driver: fakeDriverKind, enabled: true, config: { homePath } },
+      ]),
+    );
+
+  /**
+   * Boot with one instance, then hold the rebuild of it open. Returns the
+   * registry plus the fibre running the blocked `reconcile`, parked inside
+   * `create` — the exact window the race lived in.
+   */
+  const holdRebuildOpen = (input: {
+    readonly next: ProviderInstanceConfigMap;
+    readonly release: Latch.Latch;
+    readonly failRebuild?: boolean;
+  }) =>
+    Effect.gen(function* () {
+      const createStarted = yield* Latch.make(false);
+      let creates = 0;
+      const driver = makeFakeDriver((created) =>
+        Effect.gen(function* () {
+          creates += 1;
+          // The boot build must not block; only the rebuild is held open.
+          if (creates === 1) return;
+          yield* createStarted.open;
+          yield* input.release.await;
+          if (input.failRebuild === true) {
+            return yield* new ProviderDriverError({
+              driver: fakeDriverKind,
+              instanceId: created.instanceId,
+              detail: "rebuild refused by the test",
+            });
+          }
+        }),
+      );
+
+      const { registry, mutator } = yield* makeProviderInstanceRegistry({
+        drivers: [driver],
+        configMap: configMapOf([[mainId, "/home/a"]]),
+      });
+      expect((yield* registry.getInstance(mainId))?.displayName).toBe("/home/a");
+
+      const reconciling = yield* Effect.forkChild(mutator.reconcile(input.next), {
+        startImmediately: true,
+      });
+      // Past this point the outgoing scope is closed and the new map has not
+      // been published: the window.
+      yield* createStarted.await;
+      return { registry, reconciling } as const;
+    });
+
+  it.effect("hands a lookup during a rebuild the new instance, never the retired one", () =>
+    Effect.gen(function* () {
+      const release = yield* Latch.make(false);
+      const { registry, reconciling } = yield* holdRebuildOpen({
+        next: configMapOf([[mainId, "/home/b"]]),
+        release,
+      });
+
+      const lookup = yield* Effect.forkChild(registry.getInstance(mainId), {
+        startImmediately: true,
+      });
+      yield* release.open;
+      yield* Fiber.join(reconciling);
+
+      const found = yield* Fiber.join(lookup);
+      expect(found?.displayName).toBe("/home/b");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("releases a waiter when the rebuild fails, and never falls back to the corpse", () =>
+    Effect.gen(function* () {
+      const release = yield* Latch.make(false);
+      const { registry, reconciling } = yield* holdRebuildOpen({
+        next: configMapOf([[mainId, "/home/b"]]),
+        release,
+        failRebuild: true,
+      });
+
+      const lookup = yield* Effect.forkChild(registry.getInstance(mainId), {
+        startImmediately: true,
+      });
+      yield* release.open;
+      yield* Fiber.join(reconciling);
+
+      // A driver that refuses to build becomes an unavailable shadow, so the
+      // id resolves to nothing at all — the retired instance is not a
+      // fallback.
+      expect(yield* Fiber.join(lookup)).toBeUndefined();
+      expect((yield* registry.listUnavailable).map((shadow) => shadow.instanceId)).toEqual([
+        mainId,
+      ]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("releases a waiter when the rebuild is interrupted", () =>
+    Effect.gen(function* () {
+      const never = yield* Latch.make(false);
+      const { registry, reconciling } = yield* holdRebuildOpen({
+        next: configMapOf([[mainId, "/home/b"]]),
+        release: never,
+      });
+
+      const lookup = yield* Effect.forkChild(registry.getInstance(mainId), {
+        startImmediately: true,
+      });
+      yield* Fiber.interrupt(reconciling);
+
+      // The interrupted reconcile had already closed the outgoing scope, so
+      // the id is retired rather than restored: a loud "not configured" beats
+      // a live handle on a process nobody owns.
+      expect(yield* Fiber.join(lookup)).toBeUndefined();
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("does not hang a lookup for an instance that is being removed", () =>
+    Effect.gen(function* () {
+      const release = yield* Latch.make(false);
+      const { registry, reconciling } = yield* holdRebuildOpen({
+        // `fake_main` disappears; `fake_other` is the build that blocks, so
+        // the removal is genuinely still in flight when the lookup lands.
+        next: configMapOf([[otherId, "/home/c"]]),
+        release,
+      });
+
+      const lookup = yield* Effect.forkChild(registry.getInstance(mainId), {
+        startImmediately: true,
+      });
+      yield* release.open;
+      yield* Fiber.join(reconciling);
+
+      expect(yield* Fiber.join(lookup)).toBeUndefined();
+      expect((yield* registry.getInstance(otherId))?.displayName).toBe("/home/c");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("gives up on a rebuild that never finishes rather than parking forever", () =>
+    Effect.gen(function* () {
+      const never = yield* Latch.make(false);
+      const { registry, reconciling } = yield* holdRebuildOpen({
+        next: configMapOf([[mainId, "/home/b"]]),
+        release: never,
+      });
+
+      const lookup = yield* Effect.forkChild(registry.getInstance(mainId), {
+        startImmediately: true,
+      });
+      // The wait is bounded: a lookup that never returned would wedge the
+      // single fibre draining every provider intent for the environment.
+      yield* TestClock.adjust(Duration.seconds(30));
+      expect(yield* Fiber.join(lookup)).toBeUndefined();
+
+      yield* Fiber.interrupt(reconciling);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 });

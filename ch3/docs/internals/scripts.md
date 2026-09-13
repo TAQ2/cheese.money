@@ -57,9 +57,15 @@ authenticated.
   options, so workspace type checking runs separately.
 - `vp run typecheck`: Strict TypeScript checks for all packages.
 - `vp run test`: Runs workspace tests.
-- `vp run lint:mobile`: Mobile native static analysis (`scripts/mobile-native-static-check.ts`).
+- `vp run hygiene`: Checks every tracked file for the things that should never be committed — a
+  file over 4 MiB, a private key, a `.env`, a `console.log` in shipped server code. The
+  pre-commit hook runs the same script against staged files only, and the `checks` CI stage runs
+  it with `--all`. See [CI gates](./ci.md).
 - `node apps/server/scripts/ch3-sqlite-state.ts <query|exec> --base-dir <path> ...`: Inspects or seeds
   an isolated CH3 SQLite database; writes create a private backup first.
+
+`fmt:check`, `hygiene`, `lint`, `typecheck` and `test` are exactly the five scripts CI runs, so
+running one locally reproduces that stage rather than approximating it.
 
 ## Desktop artifacts
 

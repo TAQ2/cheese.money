@@ -31,7 +31,33 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         const resolved = path.resolve(NodeOS.homedir());
 
         expect(yield* resolveClaudeHomePath({ homePath: "" })).toBe(resolved);
-        expect(yield* makeClaudeEnvironment({ homePath: "" })).toBe(process.env);
+        // No override means no CLAUDE_CONFIG_DIR of our own. Asserted on the
+        // one key rather than on object identity: the environment is also
+        // where the session-tool switches live, so it is a copy now.
+        expect((yield* makeClaudeEnvironment({ homePath: "" })).CLAUDE_CONFIG_DIR).toBe(
+          process.env.CLAUDE_CONFIG_DIR,
+        );
+      }),
+    );
+
+    it.effect("keeps the claude.ai connectors out of a session that did not ask for them", () =>
+      Effect.gen(function* () {
+        // The base environment is stated rather than inherited: CH3 itself
+        // sets ENABLE_CLAUDEAI_MCP_SERVERS on the agents it spawns, so an
+        // agent running this suite hands `process.env` the very variable
+        // under test and "switched on" reads as "switched off".
+        const baseEnv = { PATH: "/usr/bin" };
+
+        // Off unless the account switched them on. They load into every
+        // session otherwise, and an authorized one brings its whole surface
+        // with it — paid for in the context window before anybody calls it.
+        expect(
+          (yield* makeClaudeEnvironment({ homePath: "" }, baseEnv)).ENABLE_CLAUDEAI_MCP_SERVERS,
+        ).toBe("false");
+        expect(
+          (yield* makeClaudeEnvironment({ homePath: "", claudeAiConnectorsEnabled: true }, baseEnv))
+            .ENABLE_CLAUDEAI_MCP_SERVERS,
+        ).toBeUndefined();
       }),
     );
 
@@ -62,7 +88,6 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
 
         expect(yield* effectiveClaudeHomePathSetting({ homePath })).toBe("");
         expect(yield* effectiveClaudeHomePathSetting({ homePath: "~/.claude" })).toBe("");
-        expect(yield* makeClaudeEnvironment({ homePath })).toBe(process.env);
         expect((yield* makeClaudeEnvironment({ homePath })).CLAUDE_CONFIG_DIR).toBe(
           process.env.CLAUDE_CONFIG_DIR,
         );
@@ -75,6 +100,39 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         expect(yield* effectiveClaudeHomePathSetting({ homePath: "~/.claude-work" })).toBe(
           "~/.claude-work",
         );
+      }),
+    );
+
+    // The desktop shell puts `--use-system-ca` in NODE_OPTIONS for the
+    // server's own Node. The Claude CLI is a Bun binary that answers that flag
+    // by failing every HTTPS call with UNABLE_TO_GET_ISSUER_CERT_LOCALLY, so
+    // no Claude spawn may carry it — including the ones that use the default
+    // config directory and take the early return.
+    it.effect("strips the server's own Node flag from every Claude environment", () =>
+      Effect.gen(function* () {
+        const baseEnv = {
+          NODE_OPTIONS: "--use-system-ca --max-old-space-size=3072",
+          PATH: "/usr/bin",
+        };
+
+        const withDefaultHome = yield* makeClaudeEnvironment({ homePath: "" }, baseEnv);
+        expect(withDefaultHome.NODE_OPTIONS).toBe("--max-old-space-size=3072");
+        expect(withDefaultHome.PATH).toBe("/usr/bin");
+
+        const withCustomHome = yield* makeClaudeEnvironment(
+          { homePath: "~/.claude-work" },
+          baseEnv,
+        );
+        expect(withCustomHome.NODE_OPTIONS).toBe("--max-old-space-size=3072");
+        expect(withCustomHome.CLAUDE_CONFIG_DIR).toBeDefined();
+
+        // Nothing else in NODE_OPTIONS means the variable is unset rather than
+        // empty, so the child sees exactly what it would without CH3.
+        const onlyFlag = yield* makeClaudeEnvironment(
+          { homePath: "" },
+          { NODE_OPTIONS: "--use-system-ca" },
+        );
+        expect(onlyFlag.NODE_OPTIONS).toBeUndefined();
       }),
     );
 

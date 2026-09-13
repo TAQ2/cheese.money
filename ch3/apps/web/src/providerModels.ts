@@ -2,6 +2,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
+  PROVIDER_DISPLAY_NAMES,
   ProviderDriverKind,
   type ModelCapabilities,
   type ProviderInstanceId,
@@ -21,6 +22,19 @@ export function formatProviderDriverKindLabel(provider: ProviderDriverKind): str
     .replace(/[_-]+/g, " ")
     .trim()
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+/**
+ * The name a user reads for a driver kind.
+ *
+ * Every client surface that prints a provider name — settings cards, the model
+ * picker, the composer, notifications — resolves through here, so renaming a
+ * provider is one edit to `PROVIDER_DISPLAY_NAMES` in the contracts package.
+ * Kinds with no entry (a fork's driver, one from a newer build) fall back to a
+ * title-cased slug rather than rendering nothing.
+ */
+export function getProviderDriverKindLabel(provider: ProviderDriverKind): string {
+  return PROVIDER_DISPLAY_NAMES[provider] ?? formatProviderDriverKindLabel(provider);
 }
 
 export function getProviderModels(

@@ -1,9 +1,9 @@
 export type LoopbackAuthorizationStage = "dev" | "nightly" | "latest";
 
-declare const __CH3CODE_BUILD_CHANNEL__: "nightly" | "latest" | undefined;
+declare const __CH3_BUILD_CHANNEL__: "nightly" | "latest" | undefined;
 
 export function resolveLoopbackAuthorizationStage(): LoopbackAuthorizationStage {
-  return typeof __CH3CODE_BUILD_CHANNEL__ === "undefined" ? "dev" : __CH3CODE_BUILD_CHANNEL__;
+  return typeof __CH3_BUILD_CHANNEL__ === "undefined" ? "dev" : __CH3_BUILD_CHANNEL__;
 }
 
 const stageBrands = {

@@ -1,5 +1,3 @@
-import { DEFAULT_HOSTED_APP_URL } from "@ch3tools/shared/connectAuth";
-
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "./pairingUrl";
 
 export interface HostedPairingRequest {
@@ -10,8 +8,14 @@ export interface HostedPairingRequest {
 
 export type HostedAppChannel = "latest" | "nightly";
 
-export function configuredHostedAppUrl(): string {
-  return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_URL;
+/**
+ * The hosted origin this bundle was built for, or null when none was
+ * configured. Null is the shipped state: there is no default, because a
+ * default naming an unregistered domain hands the pairing endpoint to whoever
+ * registers it. Callers must handle null rather than fall back.
+ */
+export function configuredHostedAppUrl(): string | null {
+  return import.meta.env.VITE_HOSTED_APP_URL?.trim() || null;
 }
 
 function configuredBackendUrl(): string {
@@ -40,7 +44,9 @@ export function isHostedStaticApp(url: URL = new URL(window.location.href)): boo
     return true;
   }
 
-  const hostedOrigin = originFromUrl(configuredHostedAppUrl());
+  const hostedUrl = configuredHostedAppUrl();
+  if (hostedUrl === null) return false;
+  const hostedOrigin = originFromUrl(hostedUrl);
   return hostedOrigin !== null && url.origin === hostedOrigin;
 }
 
@@ -68,8 +74,12 @@ export function buildHostedPairingUrl(input: {
   readonly host: string;
   readonly token: string;
   readonly label?: string | null;
-}): string {
-  const url = new URL("/pair", configuredHostedAppUrl());
+}): string | null {
+  const hostedUrl = configuredHostedAppUrl();
+  // No hosted origin configured: there is no link to build. Returning null
+  // makes the caller show that, rather than a link to a domain nobody owns.
+  if (hostedUrl === null) return null;
+  const url = new URL("/pair", hostedUrl);
   url.searchParams.set("host", input.host);
 
   const label = input.label?.trim();
@@ -82,8 +92,10 @@ export function buildHostedPairingUrl(input: {
 
 export function buildHostedChannelSelectionUrl(input: {
   readonly channel: HostedAppChannel;
-}): string {
-  const url = new URL("/__ch3/channel", configuredHostedAppUrl());
+}): string | null {
+  const hostedUrl = configuredHostedAppUrl();
+  if (hostedUrl === null) return null;
+  const url = new URL("/__ch3/channel", hostedUrl);
   url.searchParams.set("channel", input.channel);
   return url.toString();
 }

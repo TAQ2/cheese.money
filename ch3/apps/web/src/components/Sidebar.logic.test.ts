@@ -10,6 +10,7 @@ import {
   getFallbackThreadIdAfterDelete,
   getVisibleThreadsForProject,
   getProjectSortTimestamp,
+  sidebarDraftTitle,
   hasUnseenCompletion,
   isContextMenuPointerDown,
   isTrailingDoubleClick,
@@ -21,6 +22,7 @@ import {
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
   formatWorkingDurationLabel,
+  statusShowsWorkingDuration,
   selectThreadsToAutoArchive,
   selectThreadsToFloatOnCompletion,
   shouldNavigateAfterProjectRemoval,
@@ -635,10 +637,20 @@ describe("resolveSidebarV2Status", () => {
     runtimeMode: DEFAULT_RUNTIME_MODE,
     activeTurnId: "turn-1" as never,
     lastError: null,
+    lastErrorClass: null,
     updatedAt: "2026-03-09T10:00:00.000Z",
   };
 
-  const idle = { hasPendingApprovals: false, hasPendingUserInput: false };
+  const idle = { hasPendingApprovals: false, hasPendingUserInput: false, latestTurn: null };
+
+  const runningTurn = {
+    turnId: "turn-1" as never,
+    state: "running" as const,
+    requestedAt: "2026-03-09T10:00:00.000Z",
+    startedAt: "2026-03-09T10:00:00.000Z",
+    completedAt: null,
+    assistantMessageId: null,
+  };
 
   it("prioritizes approval over a running session", () => {
     expect(resolveSidebarV2Status({ ...idle, hasPendingApprovals: true, session })).toBe(
@@ -691,6 +703,115 @@ describe("resolveSidebarV2Status", () => {
 
   it("defaults to ready with no session", () => {
     expect(resolveSidebarV2Status({ ...idle, session: null })).toBe("ready");
+  });
+
+  const leased = (agentWorkingUntil: string) => ({
+    stage: null,
+    cardType: null,
+    deadline: null,
+    pinned: false,
+    description: null,
+    keywords: [],
+    classifiedAt: null,
+    agentWorkingUntil,
+  });
+
+  it("reports working on an agent-working lease with no session at all", () => {
+    // An orchestrator run works through a bash engine, not a provider session;
+    // the lease is the only thing on the thread that says an agent has it.
+    const until = new Date(Date.now() + 30_000).toISOString();
+    expect(resolveSidebarV2Status({ ...idle, session: null, kanban: leased(until) })).toBe(
+      "working",
+    );
+  });
+
+  it("lets a lapsed lease fall back to ready", () => {
+    const until = new Date(Date.now() - 30_000).toISOString();
+    expect(resolveSidebarV2Status({ ...idle, session: null, kanban: leased(until) })).toBe("ready");
+  });
+
+  it("reports delegating when the turn outlives the session going idle", () => {
+    // The sub-agent case: the parent turn blocks on the sub-agent's tool call,
+    // so the session stops reporting itself as running. Reading the session
+    // alone showed this thread as finished.
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        session: { ...session, status: "ready" as const },
+        latestTurn: runningTurn,
+      }),
+    ).toBe("delegating");
+    expect(resolveSidebarV2Status({ ...idle, session: null, latestTurn: runningTurn })).toBe(
+      "delegating",
+    );
+  });
+
+  it("reports delegating while subagents work under a session that still says running", () => {
+    // The case the rail missed entirely: Claude keeps the session on
+    // "running" for the whole delegation, so reading the session first
+    // painted five subagents as ordinary typing.
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        session,
+        latestTurn: runningTurn,
+        liveDelegationCount: 2,
+      }),
+    ).toBe("delegating");
+  });
+
+  it("leaves a running session with no subagents as plain working", () => {
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        session,
+        latestTurn: runningTurn,
+        liveDelegationCount: 0,
+      }),
+    ).toBe("working");
+  });
+
+  it("drops the subagent cue once the turn stops running", () => {
+    // Turn-scoped on purpose: a delegation whose completion never arrived
+    // must not pulse forever on a thread that has finished.
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        session: { ...session, status: "ready" as const },
+        latestTurn: { ...runningTurn, state: "completed" as const },
+        liveDelegationCount: 3,
+      }),
+    ).toBe("ready");
+  });
+
+  it("keeps a waiting thread on the user, whatever the turn says", () => {
+    // Blocked-on-you outranks the agent being busy: an approval request must
+    // never hide behind the sub-agent indicator.
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        hasPendingApprovals: true,
+        session: null,
+        latestTurn: runningTurn,
+      }),
+    ).toBe("approval");
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        session: { ...session, status: "error" as const, lastError: "boom" },
+        latestTurn: runningTurn,
+      }),
+    ).toBe("failed");
+  });
+
+  it("stays ready once the turn is no longer running", () => {
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        session: null,
+        latestTurn: { ...runningTurn, state: "completed" as const },
+      }),
+    ).toBe("ready");
   });
 });
 
@@ -923,6 +1044,7 @@ describe("resolveWorkingStartedAt", () => {
     runtimeMode: DEFAULT_RUNTIME_MODE,
     activeTurnId: "turn-1" as never,
     lastError: null,
+    lastErrorClass: null,
     updatedAt: "2026-03-09T10:02:00.000Z",
   };
 
@@ -965,6 +1087,45 @@ describe("resolveWorkingStartedAt", () => {
   it("returns null with neither a running turn nor a session", () => {
     expect(resolveWorkingStartedAt({ latestTurn: null, session: null })).toBeNull();
   });
+
+  it("counts an orchestrator row from its lease, having no turn or session at all", () => {
+    // The reported bug. Work held by an agent lease runs through a bash engine
+    // with no provider session and no turn — thread 9bc60968 had zero rows in
+    // both projections — so every earlier candidate is null and the row
+    // rendered a bare "Working" while session-backed rows beside it counted up.
+    expect(
+      resolveWorkingStartedAt({
+        latestTurn: null,
+        session: null,
+        kanban: { agentWorkingSince: "2026-03-09T09:40:00.000Z" } as never,
+      }),
+    ).toBe("2026-03-09T09:40:00.000Z");
+  });
+
+  it("prefers the session transition over the lease when both are there", () => {
+    // The lease is the weakest claim: it says only that somebody still owns
+    // the thread, where a session transition is the runtime actually speaking.
+    expect(
+      resolveWorkingStartedAt({
+        latestTurn: null,
+        session,
+        kanban: { agentWorkingSince: "2026-03-09T09:40:00.000Z" } as never,
+      }),
+    ).toBe("2026-03-09T10:02:00.000Z");
+  });
+
+  it("still returns null for a lease that has no start stamped on it", () => {
+    // Rows written before the field existed decode with it absent, and a row
+    // that cannot say when it started must show no number rather than a wrong
+    // one counting from the epoch.
+    expect(
+      resolveWorkingStartedAt({
+        latestTurn: null,
+        session: null,
+        kanban: { agentWorkingUntil: "2099-01-01T00:00:00.000Z" } as never,
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("formatWorkingDurationLabel", () => {
@@ -997,6 +1158,7 @@ describe("resolveThreadStatusPill", () => {
       runtimeMode: DEFAULT_RUNTIME_MODE,
       activeTurnId: "turn-1" as never,
       lastError: null,
+      lastErrorClass: null,
       updatedAt: "2026-03-09T10:00:00.000Z",
     },
   };
@@ -1708,5 +1870,56 @@ describe("selectThreadsToFloatOnCompletion", () => {
       ["running", null],
       ["corrupt", null],
     ]);
+  });
+});
+
+describe("sidebarDraftTitle", () => {
+  it("says nothing until more than five characters are typed", () => {
+    // The rule the row hangs on: five is a stray keystroke, six is work.
+    expect(sidebarDraftTitle("hello")).toBeNull();
+    expect(sidebarDraftTitle("hello!")).toBe("hello!");
+  });
+
+  it("counts what was typed, not the whitespace around it", () => {
+    // Ten newlines in an empty composer is not a draft worth a row.
+    expect(sidebarDraftTitle("\n\n\n   \n\n")).toBeNull();
+    expect(sidebarDraftTitle("   fix it   ")).toBe("fix it");
+  });
+
+  it("shows the first line, not the whole prompt", () => {
+    expect(sidebarDraftTitle("Refactor the pricing table\n\nContext: the CCR says…")).toBe(
+      "Refactor the pricing table",
+    );
+  });
+
+  it("skips leading blank lines rather than titling a draft with nothing", () => {
+    expect(sidebarDraftTitle("\n\nRefactor the pricing table")).toBe("Refactor the pricing table");
+  });
+
+  it("truncates long first lines with an ellipsis", () => {
+    const title = sidebarDraftTitle("a".repeat(200));
+    expect(title).toBe(`${"a".repeat(59)}…`);
+    expect(title?.length).toBe(60);
+  });
+
+  it("returns null for a prompt that is not a string", () => {
+    expect(sidebarDraftTitle(null)).toBeNull();
+    expect(sidebarDraftTitle(undefined)).toBeNull();
+  });
+});
+
+describe("statusShowsWorkingDuration", () => {
+  it("ticks for a delegating row, the same as a working one", () => {
+    // The row said "Agents" with no elapsed time, which is the one row where
+    // nothing else on it is moving.
+    expect(statusShowsWorkingDuration("delegating")).toBe(true);
+    expect(statusShowsWorkingDuration("working")).toBe(true);
+  });
+
+  it("stays off the statuses that are waiting on the person", () => {
+    expect(statusShowsWorkingDuration("approval")).toBe(false);
+    expect(statusShowsWorkingDuration("input")).toBe(false);
+    expect(statusShowsWorkingDuration("failed")).toBe(false);
+    expect(statusShowsWorkingDuration("ready")).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import {
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   EventId,
+  type MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -11,7 +12,6 @@ import {
   type OrchestrationSession,
   ThreadId,
   type ProviderSession,
-  type RuntimeMode,
   type TurnId,
 } from "@ch3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@ch3tools/shared/git";
@@ -22,6 +22,7 @@ import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -60,7 +61,8 @@ type ProviderIntentEvent = Extract<
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
-      | "thread.session-stop-requested";
+      | "thread.session-stop-requested"
+      | "thread.session-start-requested";
   }
 >;
 
@@ -92,7 +94,6 @@ const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
-const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
 const MAX_REGENERATION_ATTACHMENTS = 4;
 const MAX_THREAD_TITLE_CONTEXT_CHARS = 8_000;
@@ -102,7 +103,7 @@ const THREAD_TITLE_CONTEXT_TRUNCATION_MARKER = "[Earlier content truncated]\n\n"
  * on, and a stale title is worse than a generic one because it is confidently
  * wrong. Refresh it from the whole conversation every N user messages.
  */
-const THREAD_TITLE_REFRESH_EVERY_N_USER_MESSAGES = 3;
+const THREAD_TITLE_REFRESH_EVERY_N_USER_MESSAGES = 5;
 
 function shouldRefreshThreadTitle(userMessageCount: number): boolean {
   return (
@@ -168,6 +169,54 @@ function formatThreadTitleContext(
     message: truncated ? `${THREAD_TITLE_CONTEXT_TRUNCATION_MARKER}${context}` : context,
     attachments: retainedAttachments.slice(-MAX_REGENERATION_ATTACHMENTS),
   };
+}
+
+/**
+ * How long the working-directory check may take before it is treated as no
+ * answer. It runs on the fiber that drains every provider intent, so a hung
+ * network mount here would stall interrupts and stops for other threads too.
+ */
+const WORKSPACE_PRESENCE_TIMEOUT = Duration.millis(250);
+
+const TITLE_DRIFT_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "this",
+  "that",
+  "from",
+  "about",
+]);
+
+function significantWords(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((word) => word.length > 2 && !TITLE_DRIFT_STOPWORDS.has(word)),
+  );
+}
+
+/**
+ * A regenerated title sharing no keyword with the conversation it was
+ * generated from is more likely a model miss than an accurate summary (e.g.
+ * a truncated context or an ambiguous transcript producing an unrelated
+ * guess). Keep the current title rather than replace it with something
+ * unmoored from what the thread is actually about.
+ */
+export function titleMatchesContext(title: string, context: string): boolean {
+  const contextWords = significantWords(context);
+  const titleWords = significantWords(title);
+  if (contextWords.size === 0 || titleWords.size === 0) {
+    return true;
+  }
+  for (const word of titleWords) {
+    if (contextWords.has(word)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function providerErrorLabel(value: string | undefined): string {
@@ -278,6 +327,9 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  // Only ever asked whether a working directory is still there, on the way
+  // into a provider session.
+  const fileSystem = yield* FileSystem.FileSystem;
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -310,12 +362,14 @@ const make = Effect.gen(function* () {
       | "provider.turn.interrupt.failed"
       | "provider.approval.respond.failed"
       | "provider.user-input.respond.failed"
-      | "provider.session.stop.failed";
+      | "provider.session.stop.failed"
+      | "provider.session.start.failed";
     readonly summary: string;
     readonly detail: string;
     readonly turnId: TurnId | null;
     readonly createdAt: string;
     readonly requestId?: string;
+    readonly messageId?: MessageId;
   }) =>
     Effect.all({
       commandId: serverCommandId("provider-failure-activity"),
@@ -334,6 +388,9 @@ const make = Effect.gen(function* () {
             payload: {
               detail: input.detail,
               ...(input.requestId ? { requestId: input.requestId } : {}),
+              // Lets a "provider.turn.start.failed" row offer Retry without the
+              // client inferring which message it was for from row position.
+              ...(input.messageId ? { messageId: input.messageId } : {}),
             },
             turnId: input.turnId,
             createdAt: input.createdAt,
@@ -393,6 +450,9 @@ const make = Effect.gen(function* () {
         status: session?.status === "stopped" ? "stopped" : "error",
         activeTurnId: null,
         lastError: input.detail,
+        // Not classified via a `runtime.error` event; a turn-start failure
+        // predates any provider-driver classification.
+        lastErrorClass: null,
         updatedAt: input.createdAt,
       },
       createdAt: input.createdAt,
@@ -448,7 +508,20 @@ const make = Effect.gen(function* () {
     createdAt: string,
     options?: {
       readonly modelSelection?: ModelSelection;
-      readonly pendingTurnStart?: boolean;
+      /**
+       * Why the session is being started deliberately, when it is.
+       *
+       * Both intents paint `starting` before the provider is asked, so the
+       * screen shows the wait rather than a stale `stopped`. They part on what
+       * happens once the provider reports `ready`: a `"turn"` start is held at
+       * `starting`, because the turn that follows is what moves it on, and
+       * publishing `ready` first would flash an idle session for a thread that
+       * is about to be busy. A `"session"` start has no turn behind it — the
+       * MCP dialog's "Start session" is the whole request — so holding would
+       * strand the projection at `starting` for good, and the caller waiting
+       * for it to go live would wait forever.
+       */
+      readonly startIntent?: "turn" | "session";
     },
   ) {
     const thread = yield* resolveThread(threadId);
@@ -523,7 +596,7 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
-    if (options?.pendingTurnStart === true && thread.session?.status !== "running") {
+    if (options?.startIntent !== undefined && thread.session?.status !== "running") {
       yield* setThreadSession({
         threadId,
         session: {
@@ -534,6 +607,7 @@ const make = Effect.gen(function* () {
           runtimeMode: desiredRuntimeMode,
           activeTurnId: null,
           lastError: null,
+          lastErrorClass: null,
           updatedAt: createdAt,
         },
         createdAt,
@@ -581,20 +655,64 @@ const make = Effect.gen(function* () {
       thread,
       projects: project ? [project] : [],
     });
+    /**
+     * A directory that is gone is worth saying out loud, before the provider
+     * tries to start in it.
+     *
+     * Every provider CLI is spawned with this as its working directory, and a
+     * spawn into a directory that no longer exists fails inside the runtime —
+     * where all the thread can say is that its stream failed. An engineer who
+     * renamed a folder on their Desktop then hit that on every turn of every
+     * thread in that project, with nothing on screen connecting the two.
+     *
+     * Two things this deliberately is not:
+     *
+     * - **It is not run on every turn.** It sits inside the start, so a thread
+     *   whose session is already alive and about to be reused is not stopped by
+     *   a directory that blinked — a `mv` and back, a worktree operation, a
+     *   volume that reconnects — and told its folder was deleted.
+     * - **It is not allowed to hang.** This runs on the single fiber that
+     *   drains every provider intent for the environment, so an unanswerable
+     *   `access(2)` on a dead network mount would freeze not just this turn but
+     *   every interrupt and stop queued behind it. No answer inside the budget
+     *   is treated exactly like an error: as no evidence, and the provider is
+     *   allowed to try.
+     */
+    const refuseWhenWorkspaceIsGone = Effect.gen(function* () {
+      if (effectiveCwd === undefined) return;
+      const present = yield* fileSystem.exists(effectiveCwd).pipe(
+        Effect.timeoutOption(WORKSPACE_PRESENCE_TIMEOUT),
+        Effect.map((answer) => Option.getOrElse(answer, () => true)),
+        Effect.catch(() => Effect.succeed(true)),
+      );
+      if (present) return;
+      return yield* new ProviderAdapterRequestError({
+        provider: providerErrorLabel(String(preferredProvider)),
+        method: "thread.turn.start",
+        detail:
+          thread.worktreePath === null
+            ? `This thread's project folder is gone: ${effectiveCwd}. It was moved, renamed or deleted outside CH3 — restore it, or point the project at where it lives now.`
+            : `This thread's worktree is gone: ${effectiveCwd}. It was removed outside CH3 — restore it, or start a new thread on the project.`,
+      });
+    });
 
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
     }) =>
-      providerService.startSession(threadId, {
-        threadId,
-        ...(preferredProvider ? { provider: preferredProvider } : {}),
-        providerInstanceId: desiredInstanceId,
-        ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-        modelSelection: desiredModelSelection,
-        ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-        runtimeMode: desiredRuntimeMode,
-      });
+      refuseWhenWorkspaceIsGone.pipe(
+        Effect.andThen(() =>
+          providerService.startSession(threadId, {
+            threadId,
+            ...(preferredProvider ? { provider: preferredProvider } : {}),
+            providerInstanceId: desiredInstanceId,
+            ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+            modelSelection: desiredModelSelection,
+            ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+            runtimeMode: desiredRuntimeMode,
+          }),
+        ),
+      );
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -610,7 +728,7 @@ const make = Effect.gen(function* () {
           session: {
             threadId,
             status:
-              options?.pendingTurnStart === true && session.status === "ready"
+              options?.startIntent === "turn" && session.status === "ready"
                 ? "starting"
                 : mapProviderSessionStatusToOrchestrationStatus(session.status),
             providerName: session.provider,
@@ -619,6 +737,9 @@ const make = Effect.gen(function* () {
             // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,
             lastError: session.lastError ?? null,
+            // `ProviderSession` (the driver-facing session shape) carries no
+            // classification of its own; only a `runtime.error` event does.
+            lastErrorClass: null,
             updatedAt: session.updatedAt,
           },
           createdAt,
@@ -638,17 +759,53 @@ const make = Effect.gen(function* () {
       const instanceChanged =
         requestedModelSelection !== undefined &&
         activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
+      /**
+       * The instance id survives a settings change; the process the instance
+       * spawns does not. Switching a Claude account repoints the SAME instance
+       * at another `CLAUDE_CONFIG_DIR`, so a check on ids alone reused a
+       * process started under the previous account — the composer's usage band
+       * read the account the user had just selected while the turn was
+       * answered by the one they had just left, with nothing on screen
+       * connecting the two.
+       *
+       * What is compared instead is the instance's continuation identity: the
+       * key of the instance BUILD serving the live session (stamped by
+       * `ProviderService.listSessions` from the adapter it was listed on)
+       * against the key of the build that would serve this turn. Claude
+       * derives that key from its home directory (`claude:home:<dir>`) and
+       * Codex from its own, so a `homePath` move — the change that alters the
+       * spawned process's environment — forces a fresh session, while an
+       * unrelated edit that leaves the home alone reuses the live one.
+       *
+       * This sits inside the same start-of-turn check as everything around it,
+       * so an in-flight turn is never cut: the decision is taken before a turn
+       * begins, and automatic account failover keeps its own separate promise
+       * to wait for a running turn before writing anything at all.
+       */
+      const instanceBuildChanged =
+        activeSession?.instanceContinuationKey !== undefined &&
+        activeSession.instanceContinuationKey !== desiredInfo.continuationIdentity.continuationKey;
       const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
+      // The map is process-local and empty after a restart, so on the first
+      // turn of a reattached session there is no recorded previous selection.
+      // Without this guard that reads as a change and restarts the session —
+      // retiring the keeper the boot just reattached and killing any subagents
+      // it preserved, the exact loss reattach exists to prevent. A real model
+      // change is still caught by `modelChanged` against the live session's
+      // model, so this guard only defers an options-only change (effort) to the
+      // next turn, once a selection has been recorded.
       const previousModelSelection = threadModelSelections.get(threadId);
       const shouldRestartForModelSelectionChange =
         preferredProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
+        previousModelSelection !== undefined &&
         !Equal.equals(previousModelSelection, requestedModelSelection);
 
       if (
         !runtimeModeChanged &&
         !cwdChanged &&
         !instanceChanged &&
+        !instanceBuildChanged &&
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange
       ) {
@@ -673,6 +830,9 @@ const make = Effect.gen(function* () {
         cwdChanged,
         modelChanged,
         instanceChanged,
+        instanceBuildChanged,
+        sessionInstanceContinuationKey: activeSession?.instanceContinuationKey,
+        desiredInstanceContinuationKey: desiredInfo.continuationIdentity.continuationKey,
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,
@@ -713,7 +873,7 @@ const make = Effect.gen(function* () {
     }
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-      pendingTurnStart: true,
+      startIntent: "turn",
     });
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -926,6 +1086,16 @@ const make = Effect.gen(function* () {
           ...(attachments.length > 0 ? { attachments } : {}),
         });
         if (!generated) return;
+        if (!titleMatchesContext(generated.title, input.messageText)) {
+          yield* Effect.logDebug(
+            "discarding first-turn thread title unrelated to its source message",
+            {
+              threadId: input.threadId,
+              title: generated.title,
+            },
+          );
+          return;
+        }
 
         const thread = yield* resolveThread(input.threadId);
         if (!thread) return;
@@ -964,7 +1134,9 @@ const make = Effect.gen(function* () {
       return { _tag: "Superseded" } as const;
     }
 
-    const { message, attachments } = formatThreadTitleContext(thread.messages);
+    const context = formatThreadTitleContext(thread.messages);
+    const attachments = context.attachments;
+    let message = context.message;
     if (message.length === 0) {
       return { _tag: "Completed", title: undefined } as const;
     }
@@ -987,6 +1159,16 @@ const make = Effect.gen(function* () {
       ...(attachments.length > 0 ? { attachments } : {}),
     });
     if (generated.title === DEFAULT_THREAD_TITLE || generated.title === previousTitle) {
+      return { _tag: "Completed", title: undefined } as const;
+    }
+    if (!titleMatchesContext(generated.title, message)) {
+      yield* Effect.logDebug(
+        "discarding regenerated thread title unrelated to its source context",
+        {
+          threadId: thread.id,
+          title: generated.title,
+        },
+      );
       return { _tag: "Completed", title: undefined } as const;
     }
 
@@ -1217,6 +1399,7 @@ const make = Effect.gen(function* () {
             detail,
             turnId: null,
             createdAt: event.payload.createdAt,
+            messageId: event.payload.messageId,
           }),
         ),
         Effect.asVoid,
@@ -1391,13 +1574,57 @@ const make = Effect.gen(function* () {
         ...(thread.session?.providerInstanceId !== undefined
           ? { providerInstanceId: thread.session.providerInstanceId }
           : {}),
-        runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+        runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
         activeTurnId: null,
         lastError: thread.session?.lastError ?? null,
+        lastErrorClass: thread.session?.lastErrorClass ?? null,
         updatedAt: now,
       },
       createdAt: now,
     });
+  });
+
+  // Client-requested revival of a stopped session (e.g. the "Start session"
+  // button on a no-session `/mcp` dialog). Unlike `thread.runtime-mode-set`,
+  // this must NOT skip a stopped session — reviving one is the entire point.
+  // `ensureSessionForThread` already derives runtimeMode/provider/cwd/model
+  // from thread state, is idempotent against an already-live session, and
+  // syncs the projection on success — so on success there is nothing left to
+  // do here. On failure, mirror `processTurnStartRequested`'s failure path.
+  const processSessionStartRequested = Effect.fn("processSessionStartRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.session-start-requested" }>,
+  ) {
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread) {
+      return;
+    }
+    yield* ensureSessionForThread(event.payload.threadId, event.payload.createdAt, {
+      startIntent: "session",
+    }).pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) {
+          return Effect.failCause(cause);
+        }
+        const detail = formatFailureDetail(cause);
+        return setThreadSessionErrorOnTurnStartFailure({
+          threadId: event.payload.threadId,
+          detail,
+          createdAt: event.payload.createdAt,
+        }).pipe(
+          Effect.flatMap(() =>
+            appendProviderFailureActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.session.start.failed",
+              summary: "Provider session start failed",
+              detail,
+              turnId: null,
+              createdAt: event.payload.createdAt,
+            }),
+          ),
+          Effect.asVoid,
+        );
+      }),
+    );
   });
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (
@@ -1443,6 +1670,9 @@ const make = Effect.gen(function* () {
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
         return;
+      case "thread.session-start-requested":
+        yield* processSessionStartRequested(event);
+        return;
     }
   });
 
@@ -1480,7 +1710,8 @@ const make = Effect.gen(function* () {
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
+        event.type === "thread.session-stop-requested" ||
+        event.type === "thread.session-start-requested"
       ) {
         return yield* worker.enqueue(event);
       }

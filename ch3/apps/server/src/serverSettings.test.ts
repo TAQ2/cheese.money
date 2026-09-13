@@ -188,10 +188,14 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         enabled: true,
         binaryPath: "/usr/local/bin/claude",
         homePath: "",
-        accountFailoverEnabled: false,
+        accountFailoverEnabled: true,
         // Rotation is opt-in: absent from the stored config decodes to false.
         accountRotationEnabled: false,
+        accountRiddleKeepWarmEnabled: true,
         accountFailoverThresholdPercent: 98,
+        artifactToolEnabled: false,
+        chromeIntegrationEnabled: false,
+        claudeAiConnectorsEnabled: false,
         customModels: ["claude-custom"],
         launchArgs: "",
       });
@@ -524,10 +528,14 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         enabled: true,
         binaryPath: "/opt/homebrew/bin/claude",
         homePath: "",
-        accountFailoverEnabled: false,
+        accountFailoverEnabled: true,
         // Rotation is opt-in: absent from the stored config decodes to false.
         accountRotationEnabled: false,
+        accountRiddleKeepWarmEnabled: true,
         accountFailoverThresholdPercent: 98,
+        artifactToolEnabled: false,
+        chromeIntegrationEnabled: false,
+        claudeAiConnectorsEnabled: false,
         customModels: [],
         launchArgs: "",
       });
@@ -582,6 +590,56 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("turns assistant streaming on for an install that had it off", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      // The state the flip exists for: an explicit `false` written back when
+      // off was the default. Changing the default alone never reaches it.
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        '{"enableAssistantStreaming":false}',
+      );
+
+      const settings = yield* serverSettings.getSettings;
+
+      assert.strictEqual(settings.enableAssistantStreaming, true);
+      assert.strictEqual(settings.assistantStreamingDefaultedOn, true);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("leaves streaming off once the turn-on has already run", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      // Somebody who was given streaming, did not want it, and turned it off.
+      // The marker is what makes that the last word.
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        '{"enableAssistantStreaming":false,"assistantStreamingDefaultedOn":true}',
+      );
+
+      const settings = yield* serverSettings.getSettings;
+
+      assert.strictEqual(settings.enableAssistantStreaming, false);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("streams by default on an install that never mentioned the key", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fileSystem.writeFileString(serverConfig.settingsPath, "{}");
+
+      const settings = yield* serverSettings.getSettings;
+
+      assert.strictEqual(settings.enableAssistantStreaming, true);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("writes only non-default server settings to disk", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
@@ -610,6 +668,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
       // @effect-diagnostics-next-line preferSchemaOverJson:off
       assert.deepEqual(JSON.parse(raw), {
+        // The one-time streaming turn-on rides out on the first ordinary
+        // write. That is what makes it one-time: with the marker on disk the
+        // loader stops applying it, so somebody who turns streaming back off
+        // keeps it off.
+        assistantStreamingDefaultedOn: true,
         addProjectBaseDirectory: "~/Development",
         observability: {
           otlpTracesUrl: "http://localhost:4318/v1/traces",

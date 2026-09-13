@@ -1,9 +1,12 @@
 import {
   type EnvironmentId,
   isProviderDriverKind,
+  type MessageId,
   ProjectId,
   type ModelSelection,
   type ProviderDriverKind,
+  type ProviderInteractionMode,
+  type RuntimeMode,
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -45,6 +48,30 @@ export function startNewThreadForProject(
   return true;
 }
 
+/**
+ * Composer text pre-filled into the separate thread opened by "Report" on a
+ * `provider.turn.start.failed` row. Asks the receiving agent to investigate
+ * and, if it is a real bug, file it with `contribution_open_issue` (reusing
+ * that existing path rather than building a second report pipeline).
+ */
+export function buildTurnStartFailureReportPrompt(input: {
+  threadId: ThreadId | null;
+  messageId: MessageId | null;
+  detail: string;
+  createdAt: string;
+}): string {
+  return [
+    "A turn failed to start on another thread and needs investigating.",
+    "",
+    `- Thread: ${input.threadId ?? "unknown"}`,
+    `- Message: ${input.messageId ?? "unknown"}`,
+    `- When: ${input.createdAt}`,
+    `- Detail: ${input.detail.trim().length > 0 ? input.detail : "no detail captured"}`,
+    "",
+    "Look into the orchestration logs around this timestamp, find the root cause, and file a GitHub issue with contribution_open_issue if it's a real bug.",
+  ].join("\n");
+}
+
 export function resolveThreadMetadataUpdateForNextTurn(input: {
   currentModelSelection: ModelSelection;
   nextModelSelection?: ModelSelection;
@@ -72,10 +99,23 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
   };
 }
 
+/**
+ * The thread a draft renders as before the server has one.
+ *
+ * `newThreadModes` are the configured Settings → General defaults, applied to
+ * a draft that carries no modes of its own — which is every draft nobody has
+ * touched the composer controls on. They are resolved here, at render, rather
+ * than recorded on the draft when it was created, so the setting still decides
+ * even for a draft made before the server's settings had loaded.
+ */
 export function buildLocalDraftThread(
   threadId: ThreadId,
   draftThread: DraftThreadState,
   fallbackModelSelection: ModelSelection,
+  newThreadModes: {
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+  },
 ): Thread {
   return {
     id: threadId,
@@ -83,8 +123,8 @@ export function buildLocalDraftThread(
     projectId: draftThread.projectId,
     title: "New thread",
     modelSelection: fallbackModelSelection,
-    runtimeMode: draftThread.runtimeMode,
-    interactionMode: draftThread.interactionMode,
+    runtimeMode: draftThread.runtimeMode ?? newThreadModes.runtimeMode,
+    interactionMode: draftThread.interactionMode ?? newThreadModes.interactionMode,
     session: null,
     messages: [],
     createdAt: draftThread.createdAt,

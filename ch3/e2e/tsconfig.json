@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // Host-side test code: the Effect diagnostics that govern app code (no
+    // node: imports, no bare fetch) do not apply here, the same way the visual
+    // harness opts out file by file.
+    "plugins": []
+  },
+  "include": ["./**/*.ts", "../playwright.config.ts"]
+}

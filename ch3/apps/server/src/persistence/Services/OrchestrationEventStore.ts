@@ -47,6 +47,26 @@ export interface OrchestrationEventStoreShape {
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
 
   /**
+   * Replay ONE aggregate's events after the provided sequence.
+   *
+   * @param stream - The aggregate kind and stream id to read.
+   * @param sequenceExclusive - Sequence cursor (exclusive).
+   * @param limit - Maximum number of events to emit.
+   * @returns Stream containing ordered events for that aggregate only.
+   *
+   * Served by `idx_orch_events_stream_sequence`, so the cost is the number of
+   * events THAT aggregate wrote after the cursor — not the number the whole
+   * environment wrote. {@link readFromSequence} makes the caller read and
+   * decode the global tail before it can filter, which on a busy install is
+   * six orders of magnitude more payload for the same answer.
+   */
+  readonly readStreamFromSequence: (
+    stream: { readonly aggregateKind: string; readonly streamId: string },
+    sequenceExclusive: number,
+    limit?: number,
+  ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
+
+  /**
    * Read all events from the beginning of the stream.
    *
    * @returns Stream containing all stored events.

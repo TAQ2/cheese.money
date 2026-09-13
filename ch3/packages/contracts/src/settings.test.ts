@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+import { DEFAULT_PROVIDER_INTERACTION_MODE, DEFAULT_RUNTIME_MODE } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
   ClientSettingsPatch,
+  DEFAULT_OUTPUT_STYLE_PREFERENCE,
   DEFAULT_SERVER_SETTINGS,
   ServerSettings,
   ServerSettingsPatch,
@@ -64,6 +66,26 @@ describe("ClientSettings environment identification", () => {
   it("rejects unsupported presentation modes", () => {
     expect(() => decodeClientSettings({ environmentIdentificationMode: "badge" })).toThrow();
     expect(() => decodeClientSettingsPatch({ environmentIdentificationMode: "badge" })).toThrow();
+  });
+});
+
+describe("ClientSettings default output style", () => {
+  it("defaults to Caveman", () => {
+    expect(decodeClientSettings({}).defaultOutputStyle).toBe(DEFAULT_OUTPUT_STYLE_PREFERENCE);
+  });
+
+  it("accepts None (the CLI's own no-style sentinel) as the preference", () => {
+    expect(decodeClientSettings({ defaultOutputStyle: "default" }).defaultOutputStyle).toBe(
+      "default",
+    );
+    expect(decodeClientSettingsPatch({ defaultOutputStyle: "default" }).defaultOutputStyle).toBe(
+      "default",
+    );
+  });
+
+  it("rejects an empty preference", () => {
+    expect(() => decodeClientSettings({ defaultOutputStyle: "" })).toThrow();
+    expect(() => decodeClientSettingsPatch({ defaultOutputStyle: "" })).toThrow();
   });
 });
 
@@ -176,6 +198,34 @@ describe("ServerSettings worktree defaults", () => {
     expect(
       decodeServerSettingsPatch({ newWorktreesStartFromOrigin: false }).newWorktreesStartFromOrigin,
     ).toBe(false);
+  });
+});
+
+describe("ServerSettings new-thread mode defaults", () => {
+  it("starts new threads in auto access, building, when nothing is configured", () => {
+    const settings = decodeServerSettings({});
+
+    expect(settings.defaultRuntimeMode).toBe(DEFAULT_RUNTIME_MODE);
+    expect(settings.defaultInteractionMode).toBe(DEFAULT_PROVIDER_INTERACTION_MODE);
+    expect(settings.defaultRuntimeMode).toBe("auto");
+    expect(settings.defaultInteractionMode).toBe("default");
+  });
+
+  it("takes a configured default for someone who always wants full access", () => {
+    const patch = decodeServerSettingsPatch({
+      defaultRuntimeMode: "full-access",
+      defaultInteractionMode: "plan",
+    });
+
+    expect(patch.defaultRuntimeMode).toBe("full-access");
+    expect(patch.defaultInteractionMode).toBe("plan");
+    expect(decodeServerSettings({ defaultRuntimeMode: "full-access" }).defaultRuntimeMode).toBe(
+      "full-access",
+    );
+  });
+
+  it("rejects a mode that is not one of the four", () => {
+    expect(() => decodeServerSettings({ defaultRuntimeMode: "yolo" })).toThrow();
   });
 });
 

@@ -208,6 +208,11 @@ function useMergedSettings<T>(
 ): T {
   const clientSettings = useClientSettingsValue();
 
+  // Deliberately NOT narrowed for the model-access tier. The Settings UI
+  // spreads this object into persisted patches, so editing it here would write
+  // the policy's redactions back to `settings.json`. Custom models are narrowed
+  // where they are read into a model list instead — see
+  // `readInstanceCustomModels` in `modelSelection.ts`.
   const merged = useMemo<UnifiedSettings>(
     () => mergeEnvironmentSettings(serverSettings, clientSettings),
     [clientSettings, serverSettings],

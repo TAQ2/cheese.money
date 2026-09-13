@@ -22,6 +22,7 @@ import { flushSync } from "react-dom";
 import {
   CheckIcon,
   ChevronDownIcon,
+  CloudDownloadIcon,
   CloudUploadIcon,
   ExternalLinkIcon,
   GitBranchPlusIcon,
@@ -90,6 +91,7 @@ import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { readLocalApi } from "~/localApi";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { openPullRequestLink } from "~/lib/openPullRequestLink";
+import { subscribeToSecondTicker } from "~/lib/secondTicker";
 
 interface GitActionsControlProps {
   gitCwd: string | null;
@@ -338,7 +340,8 @@ function GitActionItemIcon({
   SourceControlIcon: ReturnType<typeof getSourceControlPresentation>["Icon"];
 }) {
   if (icon === "commit") return <GitCommitIcon />;
-  if (icon === "push") return <CloudUploadIcon />;
+  if (icon === "push" || icon === "publish") return <CloudUploadIcon />;
+  if (icon === "pull") return <CloudDownloadIcon />;
   return <SourceControlIcon />;
 }
 
@@ -1005,6 +1008,9 @@ export default function GitActionsControl({
   const [pendingDefaultBranchAction, setPendingDefaultBranchAction] =
     useState<PendingDefaultBranchAction | null>(null);
   const activeGitActionProgressRef = useRef<ActiveGitActionProgress | null>(null);
+  // Mirrors whether the ref above holds a live action, so the per-second
+  // toast refresh only runs while one does instead of ticking forever.
+  const [hasActiveGitActionProgress, setHasActiveGitActionProgress] = useState(false);
   const sourceControlScope = useMemo(
     () => ({ environmentId: activeEnvironmentId, cwd: gitCwd }),
     [activeEnvironmentId, gitCwd],
@@ -1167,17 +1173,16 @@ export default function GitActionsControl({
     : null;
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
+    if (!hasActiveGitActionProgress) {
+      return;
+    }
+    return subscribeToSecondTicker(() => {
       if (!activeGitActionProgressRef.current) {
         return;
       }
       updateActiveProgressToast();
-    }, 1000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [updateActiveProgressToast]);
+    });
+  }, [hasActiveGitActionProgress, updateActiveProgressToast]);
 
   useEffect(() => {
     if (gitCwd === null) {
@@ -1321,6 +1326,7 @@ export default function GitActionsControl({
         lastOutputLine: null,
         currentPhaseLabel: progressStages[0] ?? "Running git action...",
       };
+      setHasActiveGitActionProgress(true);
 
       if (progressToastId) {
         toastManager.update(progressToastId, {
@@ -1398,6 +1404,7 @@ export default function GitActionsControl({
       });
 
       activeGitActionProgressRef.current = null;
+      setHasActiveGitActionProgress(false);
       if (result._tag === "Failure") {
         if (isAtomCommandInterrupted(result)) {
           toastManager.close(resolvedProgressToastId);
@@ -1534,43 +1541,7 @@ export default function GitActionsControl({
       return;
     }
     if (quickAction.kind === "run_pull") {
-      const toastId = toastManager.add({
-        type: "loading",
-        title: "Pulling...",
-        timeout: 0,
-        data: threadToastData,
-      });
-      void (async () => {
-        const result = await pullAction.run();
-        if (result._tag === "Failure") {
-          if (isAtomCommandInterrupted(result)) {
-            toastManager.close(toastId);
-            return;
-          }
-          const error = squashAtomCommandFailure(result);
-          toastManager.update(
-            toastId,
-            stackedThreadToast({
-              type: "error",
-              title: "Pull failed",
-              description: error instanceof Error ? error.message : "An error occurred.",
-              ...(threadToastData !== undefined ? { data: threadToastData } : {}),
-            }),
-          );
-          return;
-        }
-
-        const pullResult = result.value;
-        toastManager.update(toastId, {
-          type: "success",
-          title: pullResult.status === "pulled" ? "Pulled" : "Already up to date",
-          description:
-            pullResult.status === "pulled"
-              ? `Updated ${pullResult.refName} from ${pullResult.upstreamRef ?? "upstream"}`
-              : `${pullResult.refName} is already synchronized.`,
-          data: threadToastData,
-        });
-      })();
+      runPullWithToast();
       return;
     }
     if (quickAction.kind === "show_hint") {
@@ -1587,10 +1558,62 @@ export default function GitActionsControl({
     }
   };
 
+  // Pull is reachable from the menu as well as the quick action, so it has one
+  // implementation rather than a copy per entry point.
+  const runPullWithToast = () => {
+    const toastId = toastManager.add({
+      type: "loading",
+      title: "Pulling...",
+      timeout: 0,
+      data: threadToastData,
+    });
+    void (async () => {
+      const result = await pullAction.run();
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) {
+          toastManager.close(toastId);
+          return;
+        }
+        const error = squashAtomCommandFailure(result);
+        toastManager.update(
+          toastId,
+          stackedThreadToast({
+            type: "error",
+            title: "Pull failed",
+            description: error instanceof Error ? error.message : "An error occurred.",
+            ...(threadToastData !== undefined ? { data: threadToastData } : {}),
+          }),
+        );
+        return;
+      }
+
+      const pullResult = result.value;
+      toastManager.update(toastId, {
+        type: "success",
+        title: pullResult.status === "pulled" ? "Pulled" : "Already up to date",
+        description:
+          pullResult.status === "pulled"
+            ? `Updated ${pullResult.refName} from ${pullResult.upstreamRef ?? "upstream"}`
+            : `${pullResult.refName} is already synchronized.`,
+        data: threadToastData,
+      });
+    })();
+  };
+
   const openDialogForMenuItem = (item: GitActionMenuItem) => {
     if (item.disabled) return;
     if (item.kind === "open_pr") {
       void openExistingPr();
+      return;
+    }
+    // Pull and publish used to be quick actions only. They run the same way
+    // from the menu — the entry moved, the behaviour did not.
+    if (item.kind === "run_pull") {
+      runPullWithToast();
+      return;
+    }
+    if (item.kind === "open_publish") {
+      setIsPublishDialogOpen(true);
       return;
     }
     if (item.dialogAction === "push") {

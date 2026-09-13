@@ -11,6 +11,13 @@ import "@fontsource/jetbrains-mono/500.css";
 import "@xterm/xterm/css/xterm.css";
 import "./index.css";
 
+import { migrateLegacyStorageKeys } from "./migrateLegacyStorageKeys";
+
+// Before anything reads persisted state: the storage prefix changed with the
+// rename, and a key read under the new name before the carry-forward runs
+// looks like a first launch.
+migrateLegacyStorageKeys();
+
 import { isElectron } from "./env";
 import { ManagedRelayAuthProvider } from "./cloud/managedAuth";
 import { hasCloudPublicConfig } from "./cloud/publicConfig";

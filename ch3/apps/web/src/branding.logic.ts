@@ -12,16 +12,21 @@ export function formatAppDisplayName(input: {
 }
 
 /**
- * Whether the sidebar v2 beta is on by default for a build stage.
+ * The sidebar everyone opens on: the inbox.
  *
- * Nightly and local dev opt in; Alpha and Latest stay on v1. This is resolved
- * from the client's own stage label rather than the connected server's version:
- * v2 only exists in the client, so a stable client on a nightly server has
- * nothing to turn on.
+ * It was a beta that nightly and dev opted into while Alpha and Latest stayed
+ * on the project tree, which meant the first thing a new install showed was a
+ * folder list rather than the work waiting. The inbox answers the question
+ * somebody actually has on opening the app — what is still open — so it is the
+ * default now, on every stage.
+ *
+ * The stage label is still taken so the call sites and their tests keep their
+ * shape while this is a one-liner; it is deliberately unused rather than
+ * removed, because the argument for a stage-varying default may come back and
+ * the plumbing is worth more than the line it costs.
  */
-export function resolveSidebarV2Default(stageLabel: string): boolean {
-  const stage = stageLabel.trim().toLowerCase();
-  return stage === "nightly" || stage === "dev";
+export function resolveSidebarV2Default(_stageLabel: string): boolean {
+  return true;
 }
 
 /**
@@ -38,8 +43,10 @@ export function resolveSidebarV2Default(stageLabel: string): boolean {
  * `settingsHydrated` guards the startup window: client settings load
  * asynchronously and the pre-hydration snapshot is just the schema defaults, so
  * resolving against it would mount one sidebar and swap it out a tick later,
- * remounting the tree. While hydrating, hold v1 — where both paths already
- * start.
+ * remounting the tree. While hydrating, hold the DEFAULT — which is where the
+ * great majority of sessions end up, so the common path never swaps. Somebody
+ * who has explicitly chosen the project tree pays one swap on load, which is
+ * the cost the inbox used to pay.
  */
 export function resolveSidebarV2Enabled(input: {
   readonly enabled: boolean;
@@ -48,7 +55,7 @@ export function resolveSidebarV2Enabled(input: {
   readonly stageLabel: string;
 }): boolean {
   if (!input.settingsHydrated) {
-    return false;
+    return resolveSidebarV2Default(input.stageLabel);
   }
 
   return input.configuredByUser || input.enabled

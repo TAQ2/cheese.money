@@ -17,8 +17,8 @@ const devBundleIdSuffix = NodePath.basename(repoRoot)
   .replaceAll(/[^a-z0-9]+/g, "");
 export const APP_DISPLAY_NAME = isDevelopment ? "CH3 (Dev)" : "CH3 (Alpha)";
 export const APP_BUNDLE_ID = isDevelopment
-  ? `com.ch3tools.ch3.dev.${devBundleIdSuffix || "local"}`
-  : "com.ch3tools.ch3";
+  ? `com.ch3.ch3.dev.${devBundleIdSuffix || "local"}`
+  : "com.ch3.ch3";
 const APP_PROTOCOL_SCHEMES = isDevelopment ? ["ch3-dev"] : ["ch3"];
 const LAUNCHER_VERSION = 14;
 const defaultIconPath = NodePath.join(desktopDir, "resources", "icon.icns");
@@ -278,6 +278,73 @@ function readJson(path) {
   }
 }
 
+function signChecked(target, identity) {
+  try {
+    runChecked("codesign", ["--force", "--sign", identity, target]);
+    return;
+  } catch (error) {
+    if (identity === "-") {
+      // Same broken-seal state the launcher used to produce on every run;
+      // launching still works, so warn instead of blocking development.
+      console.warn(`[desktop-launcher] Ad-hoc codesign failed for ${target}.`, error);
+      return;
+    }
+    console.warn(
+      `[desktop-launcher] codesign with identity "${identity}" failed for ${target}; falling back to ad-hoc.`,
+      error,
+    );
+    signChecked(target, "-");
+  }
+}
+
+export function resolveLocalSignIdentity(environment = process.env) {
+  // A stable local identity (see docs/operations/desktop-build-install.md)
+  // keeps macOS keychain ACLs valid across rebuilds; without one, ad-hoc at
+  // least leaves the bundle with a valid seal instead of a broken one.
+  const identity = environment.CH3CODE_DESKTOP_LOCAL_SIGN_IDENTITY?.trim();
+  return identity && identity.length > 0 ? identity : "-";
+}
+
+/**
+ * What to re-sign, inside-out: patched helper bundles first, the outer
+ * bundle last. Helpers are skipped when only the outer seal was broken
+ * (the per-launch dev launcher-script refresh).
+ */
+export function collectMacLauncherSignTargets(
+  appBundlePath,
+  { helpers, listHelperBundleNames = defaultListHelperBundleNames },
+) {
+  const targets = [];
+  if (helpers) {
+    for (const bundleName of listHelperBundleNames(appBundlePath)) {
+      targets.push(NodePath.join(appBundlePath, "Contents", "Frameworks", bundleName));
+    }
+  }
+  targets.push(appBundlePath);
+  return targets;
+}
+
+function defaultListHelperBundleNames(appBundlePath) {
+  const frameworksDir = NodePath.join(appBundlePath, "Contents", "Frameworks");
+  if (!NodeFS.existsSync(frameworksDir)) {
+    return [];
+  }
+  return NodeFS.readdirSync(frameworksDir).filter((entry) => entry.endsWith(".app"));
+}
+
+/**
+ * Re-seal the copied bundle after the Info.plist patches (and, in dev, the
+ * launcher-script write) broke its signature. Registering an invalidated
+ * bundle with Launch Services is what used to produce mysterious
+ * TCC/Gatekeeper differences between dev and packaged runs.
+ */
+function signMacLauncherBundle(appBundlePath, { helpers }) {
+  const identity = resolveLocalSignIdentity();
+  for (const target of collectMacLauncherSignTargets(appBundlePath, { helpers })) {
+    signChecked(target, identity);
+  }
+}
+
 export function resolveMacLauncherPaths(appBundlePath, displayName = APP_DISPLAY_NAME) {
   const executableDir = NodePath.join(appBundlePath, "Contents", "MacOS");
   const launcherExecutableName = `${displayName} Launcher`;
@@ -323,6 +390,9 @@ function buildMacLauncher(electronBinaryPath) {
       // so refresh its fallback environment on every launch. Never let a value
       // captured by an older parent app override the live dev-runner environment.
       writeDevelopmentLauncherScript(launcherBinaryPath, runtimeElectronBinaryPath);
+      // The script write above just broke the outer seal; helpers are
+      // untouched on this path, so only the bundle needs re-signing.
+      signMacLauncherBundle(targetAppBundlePath, { helpers: false });
     }
     registerMacLauncherBundle(targetAppBundlePath);
     return launcherBinaryPath;
@@ -351,6 +421,7 @@ function buildMacLauncher(electronBinaryPath) {
     // in development mode instead of making app.isPackaged report true.
     writeDevelopmentLauncherScript(launcherBinaryPath, runtimeElectronBinaryPath);
   }
+  signMacLauncherBundle(targetAppBundlePath, { helpers: true });
   NodeFS.writeFileSync(metadataPath, `${JSON.stringify(expectedMetadata, null, 2)}\n`);
   registerMacLauncherBundle(targetAppBundlePath);
 

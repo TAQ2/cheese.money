@@ -32,8 +32,14 @@ import { DeepMutable } from "effect/Types";
 import { createModelSelection, normalizeModelSlug } from "@ch3tools/shared/model";
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
-import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
-import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type ChatImageAttachment } from "./types";
+import {
+  resolveAppModelSelection,
+  resolveAppModelSelectionForInstance,
+  NEW_THREAD_DEFAULT_MODEL,
+  withNewThreadDefaultModel,
+  withoutInheritedOutputStyle,
+} from "./modelSelection";
+import { type ChatImageAttachment } from "./types";
 import {
   type TerminalContextDraft,
   ensureInlineTerminalContextPlaceholders,
@@ -52,7 +58,7 @@ import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
 import { UnifiedSettings } from "@ch3tools/contracts/settings";
 import { ReviewCommentContextSchema, type ReviewCommentContext } from "./reviewCommentContext";
-const isRuntimeMode = Schema.is(RuntimeMode);
+import { isProviderInteractionMode, isRuntimeMode } from "./components/chat/threadModes";
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
 
@@ -210,8 +216,8 @@ const PersistedDraftThreadState = Schema.Struct({
   projectId: ProjectId,
   logicalProjectKey: Schema.optionalKey(Schema.String),
   createdAt: Schema.String,
-  runtimeMode: RuntimeMode,
-  interactionMode: ProviderInteractionMode,
+  runtimeMode: Schema.NullOr(RuntimeMode),
+  interactionMode: Schema.NullOr(ProviderInteractionMode),
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   envMode: DraftThreadEnvModeSchema,
@@ -289,8 +295,20 @@ export interface DraftSessionState {
   projectId: ProjectId;
   logicalProjectKey: string;
   createdAt: string;
-  runtimeMode: RuntimeMode;
-  interactionMode: ProviderInteractionMode;
+  /**
+   * The access and agent modes this draft was opened with, and `null` when it
+   * was opened with none.
+   *
+   * Null is the common case and it is not a missing value: a draft that nobody
+   * has chosen modes for follows Settings -> General -> New thread access,
+   * read where the composer renders it. Seeding the configured default in here
+   * instead put whatever the client believed the setting was at the moment the
+   * draft was created — the shipped `auto` when the primary server's config had
+   * not arrived yet — beyond the reach of the setting for the life of the
+   * draft, and then into the thread it started.
+   */
+  runtimeMode: RuntimeMode | null;
+  interactionMode: ProviderInteractionMode | null;
   branch: string | null;
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
@@ -357,8 +375,8 @@ interface ComposerDraftStoreState {
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
       startFromOrigin?: boolean;
-      runtimeMode?: RuntimeMode;
-      interactionMode?: ProviderInteractionMode;
+      runtimeMode?: RuntimeMode | null;
+      interactionMode?: ProviderInteractionMode | null;
     },
   ) => void;
   /** Creates or updates the draft session tracked for a concrete project ref. */
@@ -372,8 +390,8 @@ interface ComposerDraftStoreState {
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
       startFromOrigin?: boolean;
-      runtimeMode?: RuntimeMode;
-      interactionMode?: ProviderInteractionMode;
+      runtimeMode?: RuntimeMode | null;
+      interactionMode?: ProviderInteractionMode | null;
     },
   ) => void;
   /** Updates mutable draft-session metadata without touching composer content. */
@@ -386,8 +404,8 @@ interface ComposerDraftStoreState {
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
       startFromOrigin?: boolean;
-      runtimeMode?: RuntimeMode;
-      interactionMode?: ProviderInteractionMode;
+      runtimeMode?: RuntimeMode | null;
+      interactionMode?: ProviderInteractionMode | null;
     },
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
@@ -972,9 +990,36 @@ export function deriveEffectiveComposerModelState(input: {
   threadModelSelection: ModelSelection | null | undefined;
   projectModelSelection: ModelSelection | null | undefined;
   settings: UnifiedSettings;
+  /**
+   * Whether this thread has already run a turn. A started thread's model is a
+   * record of what ran, not a default inherited at creation, so a metered model
+   * on one is honoured rather than rewritten.
+   */
+  threadHasStarted?: boolean;
 }): EffectiveComposerModelState {
-  const baseModelCandidate =
-    input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null;
+  // A model may be *chosen* in a conversation, never *inherited* into one — see
+  // `withNewThreadDefaultModel`. CH3 seeds a new draft's selection from the
+  // project's default, so a project last used on Opus would otherwise open
+  // every later conversation on it.
+  //
+  // A thread that has already *started* is the exception: its selection is a
+  // record of a real run, not an inherited default, so it is honoured. That
+  // also keeps a running thread on its model when it is reopened on another
+  // client, where the local draft store knows nothing about it.
+  //
+  // For an unstarted thread the draft's own `modelSelectionByProvider` still
+  // carries a deliberate pick — it is read as `activeSelection` below and
+  // outranks this candidate.
+  //
+  // The default only answers for the provider it belongs to. A composer
+  // sitting on Codex or OpenCode must not be handed a Claude slug it has never
+  // heard of — null sends it to that provider's own default instead.
+  const newThreadDefault = NEW_THREAD_DEFAULT_MODEL;
+  const baseModelCandidate = input.threadHasStarted
+    ? (input.threadModelSelection?.model ?? null)
+    : newThreadDefault.driverKind === input.selectedProvider
+      ? newThreadDefault.slug
+      : null;
   const baseModel =
     (input.selectedInstanceId
       ? resolveAppModelSelectionForInstance(
@@ -1333,8 +1378,8 @@ function createDraftThreadState(
     createdAt?: string;
     envMode?: DraftThreadEnvMode;
     startFromOrigin?: boolean;
-    runtimeMode?: RuntimeMode;
-    interactionMode?: ProviderInteractionMode;
+    runtimeMode?: RuntimeMode | null;
+    interactionMode?: ProviderInteractionMode | null;
   },
 ): DraftThreadState {
   // A project change (including switching environments within a logical
@@ -1367,9 +1412,17 @@ function createDraftThreadState(
     projectId: projectRef.projectId,
     logicalProjectKey,
     createdAt: options?.createdAt ?? existingThread?.createdAt ?? new Date().toISOString(),
-    runtimeMode: options?.runtimeMode ?? existingThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+    // `undefined` is "say nothing about the modes"; an explicit `null` clears
+    // them back to following the configured default, which is how a resurrected
+    // draft stops carrying the mode it was seeded with.
+    runtimeMode:
+      options?.runtimeMode === undefined
+        ? (existingThread?.runtimeMode ?? null)
+        : options.runtimeMode,
     interactionMode:
-      options?.interactionMode ?? existingThread?.interactionMode ?? DEFAULT_INTERACTION_MODE,
+      options?.interactionMode === undefined
+        ? (existingThread?.interactionMode ?? null)
+        : options.interactionMode,
     branch: nextBranch,
     worktreePath: nextWorktreePath,
     envMode:
@@ -1540,12 +1593,10 @@ function normalizePersistedDraftThreads(
             : new Date().toISOString(),
         runtimeMode: isRuntimeMode(candidateDraftThread.runtimeMode)
           ? candidateDraftThread.runtimeMode
-          : DEFAULT_RUNTIME_MODE,
-        interactionMode:
-          candidateDraftThread.interactionMode === "plan" ||
-          candidateDraftThread.interactionMode === "default"
-            ? candidateDraftThread.interactionMode
-            : DEFAULT_INTERACTION_MODE,
+          : null,
+        interactionMode: isProviderInteractionMode(candidateDraftThread.interactionMode)
+          ? candidateDraftThread.interactionMode
+          : null,
         branch: typeof branch === "string" ? branch : null,
         worktreePath: normalizedWorktreePath,
         envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
@@ -1590,8 +1641,8 @@ function normalizePersistedDraftThreads(
           projectId: projectRef.projectId,
           logicalProjectKey,
           createdAt: new Date().toISOString(),
-          runtimeMode: DEFAULT_RUNTIME_MODE,
-          interactionMode: DEFAULT_INTERACTION_MODE,
+          runtimeMode: null,
+          interactionMode: null,
           branch: null,
           worktreePath: null,
           envMode: "local",
@@ -1673,10 +1724,9 @@ function normalizePersistedDraftsByThreadId(
     const runtimeMode = isRuntimeMode(draftCandidate.runtimeMode)
       ? draftCandidate.runtimeMode
       : null;
-    const interactionMode =
-      draftCandidate.interactionMode === "plan" || draftCandidate.interactionMode === "default"
-        ? draftCandidate.interactionMode
-        : null;
+    const interactionMode = isProviderInteractionMode(draftCandidate.interactionMode)
+      ? draftCandidate.interactionMode
+      : null;
     const prompt = ensureInlineTerminalContextPlaceholders(
       promptCandidate,
       terminalContexts.length,
@@ -2161,8 +2211,8 @@ function toHydratedDraftThreadState(
         ),
       ),
     createdAt: persistedDraftThread.createdAt,
-    runtimeMode: persistedDraftThread.runtimeMode,
-    interactionMode: persistedDraftThread.interactionMode,
+    runtimeMode: persistedDraftThread.runtimeMode ?? null,
+    interactionMode: persistedDraftThread.interactionMode ?? null,
     branch: persistedDraftThread.branch,
     worktreePath: persistedDraftThread.worktreePath,
     envMode: persistedDraftThread.envMode,
@@ -2368,8 +2418,12 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 options.createdAt === undefined
                   ? existing.createdAt
                   : options.createdAt || existing.createdAt,
-              runtimeMode: options.runtimeMode ?? existing.runtimeMode,
-              interactionMode: options.interactionMode ?? existing.interactionMode,
+              runtimeMode:
+                options.runtimeMode === undefined ? existing.runtimeMode : options.runtimeMode,
+              interactionMode:
+                options.interactionMode === undefined
+                  ? existing.interactionMode
+                  : options.interactionMode,
               branch: nextBranch,
               worktreePath: nextWorktreePath,
               envMode:
@@ -2512,38 +2566,57 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           if (threadKey.length === 0) {
             return;
           }
+          // Sticky state is what the composer remembers *between* threads, and
+          // this action runs only when a new one is created. The model must
+          // never arrive that way: every new thread opens on the default
+          // model, whatever the last one ran on.
+          //
+          // The map is persisted, so an install that recorded a stronger model
+          // before this rule existed still has one. Correcting on the way out
+          // covers that without touching the write sites — the sticky entry
+          // stays as the options the person works with, and only its slug is
+          // answered by the default.
           set((state) => {
             const stickyMap = state.stickyModelSelectionByProvider;
-            const stickyActiveProvider = state.stickyActiveProvider;
-            if (Object.keys(stickyMap).length === 0 && stickyActiveProvider === null) {
-              return state;
-            }
+            // No early return on an empty sticky map. This action seeds the
+            // tier default as well as replaying sticky state, and a machine
+            // with no history is exactly where that matters: nothing else
+            // writes the default, so the composer would fall through to the
+            // project's saved selection and open a new thread on whatever that
+            // names.
             const existing = state.draftsByThreadKey[threadKey];
             const base = existing ?? createEmptyThreadDraft();
-            const nextMap = { ...base.modelSelectionByProvider };
-            for (const [provider, selection] of Object.entries(stickyMap)) {
-              if (selection) {
-                // Iteration key comes from the instance-keyed sticky map,
-                // so coerce the string back to `ProviderInstanceId` for
-                // the typed lookup.
-                const instanceKey = provider as ProviderInstanceId;
-                const current = nextMap[instanceKey];
-                nextMap[instanceKey] = {
-                  ...selection,
-                  model: current?.model ?? selection.model,
-                };
-              }
-            }
+            const defaultInstanceId = defaultInstanceIdForDriver(
+              NEW_THREAD_DEFAULT_MODEL.driverKind,
+            );
+            // Only the instance the default belongs to is seeded, and it
+            // is seeded with the default model. A sticky selection on any other
+            // instance is a model chosen in an earlier conversation, and this
+            // was the one route by which one could open a new thread.
+            // Switching providers inside the thread resolves to that instance's
+            // own flagged default instead.
+            //
+            // The response style is deliberately NOT inherited — see
+            // `withoutInheritedOutputStyle` for why. Stripped here, on the way
+            // out, rather than only at the write sites, so an install that
+            // already persisted one is corrected too. Effort and context window
+            // ride along: they describe how somebody works, not which model.
+            const nextMap = {
+              ...base.modelSelectionByProvider,
+              [defaultInstanceId]: withoutInheritedOutputStyle(
+                withNewThreadDefaultModel(stickyMap[defaultInstanceId]),
+              ),
+            };
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
-              base.activeProvider === stickyActiveProvider
+              base.activeProvider === defaultInstanceId
             ) {
               return state;
             }
             const nextDraft: ComposerThreadDraftState = {
               ...base,
               modelSelectionByProvider: nextMap,
-              activeProvider: stickyActiveProvider,
+              activeProvider: defaultInstanceId,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -3501,6 +3574,7 @@ export function useEffectiveComposerModelState(input: {
   threadModelSelection: ModelSelection | null | undefined;
   projectModelSelection: ModelSelection | null | undefined;
   settings: UnifiedSettings;
+  threadHasStarted?: boolean;
 }): EffectiveComposerModelState {
   const draft = useComposerDraftModelState(input.threadRef ?? input.draftId ?? DraftId.make(""));
 
@@ -3514,9 +3588,11 @@ export function useEffectiveComposerModelState(input: {
         threadModelSelection: input.threadModelSelection,
         projectModelSelection: input.projectModelSelection,
         settings: input.settings,
+        threadHasStarted: input.threadHasStarted ?? false,
       }),
     [
       draft,
+      input.threadHasStarted,
       input.providers,
       input.settings,
       input.projectModelSelection,

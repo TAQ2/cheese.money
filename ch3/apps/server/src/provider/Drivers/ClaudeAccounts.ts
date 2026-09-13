@@ -16,9 +16,11 @@ import * as NodeOS from "node:os";
 
 import { ClaudeAccountError } from "@ch3tools/contracts";
 import type { ClaudeAccountProfile, ClaudeSettings } from "@ch3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
@@ -34,6 +36,7 @@ import * as ProcessRunner from "../../processRunner.ts";
 import {
   claudeCredentialServices,
   clearClaudeUsageCacheForAccount,
+  forgetClaudeAccountToken,
   type ClaudeAccountUsageFetch,
   fetchClaudeAccountUsage,
 } from "./ClaudeAccountUsage.ts";
@@ -42,7 +45,7 @@ import {
  * The usage endpoint buckets requests by User-Agent; a wrong or absent version
  * lands in a 429 bucket. Only the shape matters, not the exact number.
  */
-const CLAUDE_USAGE_USER_AGENT_VERSION = "2.1.221";
+export const CLAUDE_USAGE_USER_AGENT_VERSION = "2.1.221";
 
 const homeRelativeDisplayPath = (absolutePath: string): string => {
   const home = NodeOS.homedir();
@@ -102,7 +105,24 @@ export const discoverClaudeProfilePaths = Effect.fn("discoverClaudeProfilePaths"
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const home = NodeOS.homedir();
-    const found: string[] = [yield* defaultClaudeConfigDirPath()];
+    const configuredPath = input.configuredHomePath.trim();
+    const defaultDir = yield* defaultClaudeConfigDirPath();
+
+    // `~/.claude` is listed only when it is actually there, or when it is the
+    // profile this instance is set to use.
+    //
+    // Offered unconditionally, it put a row reading "~/.claude — Not signed in"
+    // in front of everyone who has never run Claude Code: a path where an
+    // account should be, for a directory that does not exist, which cannot be
+    // signed into until the CLI is installed. It read as a broken account
+    // rather than as an absence.
+    const found: string[] = [];
+    const defaultExists = yield* fs.exists(defaultDir).pipe(Effect.orElseSucceed(() => false));
+    const defaultIsConfigured =
+      configuredPath.length === 0 || path.resolve(expandHomePath(configuredPath)) === defaultDir;
+    if (defaultExists || (defaultIsConfigured && configuredPath.length > 0)) {
+      found.push(defaultDir);
+    }
 
     const entries = yield* fs.readDirectory(home).pipe(Effect.orElseSucceed(() => []));
     for (const entry of entries) {
@@ -116,9 +136,8 @@ export const discoverClaudeProfilePaths = Effect.fn("discoverClaudeProfilePaths"
       }
     }
 
-    const configured = input.configuredHomePath.trim();
-    if (configured.length > 0) {
-      found.push(path.resolve(expandHomePath(configured)));
+    if (configuredPath.length > 0) {
+      found.push(path.resolve(expandHomePath(configuredPath)));
     }
     return [...new Set(found)];
   },
@@ -234,6 +253,13 @@ export const probeClaudeProfile = Effect.fn("probeClaudeProfile")(function* (inp
   readonly isCurrent: boolean;
   /** Costs one HTTPS call per account, so callers opt in. */
   readonly includeUsage?: boolean;
+  /**
+   * Read now, ignoring the freshness window and this account's pause.
+   * User-initiated only — see `fetchClaudeAccountUsage`.
+   */
+  readonly forceUsage?: boolean;
+  /** Return cached usage only, no network read — see `fetchClaudeAccountUsage`. */
+  readonly cachedUsageOnly?: boolean;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -258,6 +284,8 @@ export const probeClaudeProfile = Effect.fn("probeClaudeProfile")(function* (inp
           configDir: input.homePath,
           cliVersion: CLAUDE_USAGE_USER_AGENT_VERSION,
           accountKey: claudeAccountKey(identity),
+          ...(input.forceUsage === true ? { force: true } : {}),
+          ...(input.cachedUsageOnly === true ? { cachedOnly: true } : {}),
         }).pipe(Effect.orElseSucceed(() => ({}) as ClaudeAccountUsageFetch))
       : ({} as ClaudeAccountUsageFetch);
   // The CLI keeps ONE credential per signed-in ACCOUNT, not one per config
@@ -301,25 +329,85 @@ export const probeClaudeProfile = Effect.fn("probeClaudeProfile")(function* (inp
         // read belongs in the same cache slot — asking twice for one quota is
         // what the rate limiter punishes.
         accountKey: claudeAccountKey(defaultIdentity),
+        ...(input.cachedUsageOnly === true ? { cachedOnly: true } : {}),
+        // The force has to come with it. This profile's own directory holds no
+        // usable credential — that is why the read is borrowed at all — so the
+        // attempt above spent the throttle without a request leaving the
+        // machine. Dropping the flag here makes "Read now" a button that
+        // reports success, changes nothing, and refuses to try again for a
+        // minute.
+        ...(input.forceUsage === true ? { force: true } : {}),
       }).pipe(Effect.orElseSucceed(() => ({}) as ClaudeAccountUsageFetch));
       if (borrowed.usage) {
         fetched = borrowed;
       }
     }
   }
+  // When the directory was made, which is when this account was added: signing
+  // in is what creates it. Best-effort — a folder nobody has signed into has
+  // no directory, and not every filesystem reports a birth time — so the
+  // ordering that reads this treats absence as "unknown" rather than as zero.
+  const createdAt = yield* fs.stat(input.homePath).pipe(
+    Effect.map((stats) => Option.getOrUndefined(stats.birthtime)?.toISOString()),
+    Effect.orElseSucceed(() => undefined),
+  );
+  const displayPath = homeRelativeDisplayPath(input.homePath);
   return {
     homePath: input.homePath,
-    displayPath: homeRelativeDisplayPath(input.homePath),
+    displayPath,
+    ...(createdAt === undefined ? {} : { createdAt }),
     ...identity,
     ...(fetched.usage ? { usage: fetched.usage } : {}),
     ...(fetched.unauthorized ? { usageUnauthorized: true } : {}),
     ...(!fetched.usage && fetched.credentialMissing ? { usageCredentialMissing: true } : {}),
     ...(fetched.rateLimited ? { usageRateLimited: true } : {}),
+    ...(fetched.retryAtMs === undefined
+      ? {}
+      : { usageRetryAt: DateTime.formatIso(DateTime.makeUnsafe(fetched.retryAtMs)) }),
     ...(fetched.stale ? { usageStale: true } : {}),
+    ...(fetched.unrecognized ? { usageShapeUnrecognized: true } : {}),
+    ...(fetched.forceRetryAtMs === undefined
+      ? {}
+      : { usageForceRetryAt: DateTime.formatIso(DateTime.makeUnsafe(fetched.forceRetryAtMs)) }),
     isCurrent: input.isCurrent,
     isDefaultHome,
   } satisfies ClaudeAccountProfile;
 });
+
+/**
+ * What the usage band may say about the account it is metering.
+ *
+ * The band probes ONE account directly rather than through
+ * {@link listClaudeAccountProfiles} — one endpoint read a minute for the whole
+ * app, instead of one per account — so the Mexico rule has to be asked here as
+ * well. A hidden account keeps its meters: it is the account in use, it works,
+ * and a band with no numbers on a working account is a worse lie than a band
+ * with no name. What it loses is the name and the address, which is the whole
+ * of "never appears".
+ *
+ * `accountEmailKnowable` is the caller's separate question — with two Claude
+ * instances on two accounts, a blind answer would meter the wrong one.
+ */
+export function claudeUsageBandIdentity(input: {
+  readonly profile:
+    | {
+        readonly email?: string | null;
+        readonly organizationName?: string | null;
+        readonly displayPath: string;
+      }
+    | undefined;
+  readonly accountEmailKnowable: boolean;
+}): { readonly accountLabel: string; readonly accountEmail: string } {
+  const profile = input.profile;
+  if (profile === undefined) {
+    return { accountLabel: "", accountEmail: "" };
+  }
+  const organizationName = (profile.organizationName ?? "").trim();
+  return {
+    accountLabel: organizationName.length > 0 ? profile.organizationName! : (profile.email ?? ""),
+    accountEmail: input.accountEmailKnowable ? (profile.email ?? "").trim() : "",
+  };
+}
 
 /**
  * Every discovered profile with its sign-in state. Probes run concurrently —
@@ -328,6 +416,8 @@ export const probeClaudeProfile = Effect.fn("probeClaudeProfile")(function* (inp
 export const listClaudeAccountProfiles = Effect.fn("listClaudeAccountProfiles")(function* (input: {
   readonly configuredHomePath: string;
   readonly includeUsage?: boolean;
+  /** Return cached usage only, no network read — the panel's first paint. */
+  readonly cachedUsageOnly?: boolean;
 }) {
   const path = yield* Path.Path;
   const configured = input.configuredHomePath.trim();
@@ -338,16 +428,38 @@ export const listClaudeAccountProfiles = Effect.fn("listClaudeAccountProfiles")(
       ? path.resolve(expandHomePath(configured))
       : yield* defaultClaudeConfigDirPath();
   const candidates = yield* discoverClaudeProfilePaths({ configuredHomePath: configured });
-  return yield* Effect.forEach(
+  const profiles = yield* Effect.forEach(
     candidates,
     (homePath) =>
       probeClaudeProfile({
         homePath,
         isCurrent: homePath === currentPath,
         ...(input.includeUsage === true ? { includeUsage: true } : {}),
+        ...(input.cachedUsageOnly === true ? { cachedUsageOnly: true } : {}),
       }),
     { concurrency: "unbounded" },
   );
+  // Repairs accounts signed in BEFORE the sign-in flow started stamping the
+  // onboarding flag: without it a terminal running `claude` against them opens
+  // the first-run setup instead of the session. A no-op once stamped, and it
+  // writes nothing for a slot with no config file at all.
+  //
+  // The rename is atomic against a TORN read, not against a lost update: a CLI
+  // write landing between our read and our rename is discarded. That window is
+  // one write per profile ever — the flag check above makes every later call a
+  // pure read — which is why this sits here rather than behind migration state.
+  const home = NodeOS.homedir();
+  const defaultDir = yield* defaultClaudeConfigDirPath();
+  yield* Effect.forEach(
+    candidates,
+    (homePath) =>
+      markClaudeProfileOnboarded(
+        claudeProfileConfigPath({ homePath, home, defaultDir, join: (a, b) => path.join(a, b) }),
+      ),
+    { concurrency: "unbounded", discard: true },
+  );
+
+  return profiles;
 });
 
 /** How long the Keychain delete may take before it is a stuck prompt, not a lookup. */
@@ -363,16 +475,34 @@ const KEYCHAIN_DELETE_TIMEOUT = Duration.seconds(3);
  * parse is left untouched: corrupting the user's CLI config is worse than a
  * row that still shows an email.
  */
-const removeOauthAccountFromConfig = Effect.fn("removeOauthAccountFromConfig")(function* (
+const removeOauthAccountFromConfig = (configPath: string) =>
+  editClaudeConfigFile(configPath, (config) => {
+    if (!("oauthAccount" in config)) return false;
+    delete config.oauthAccount;
+    return true;
+  });
+
+/**
+ * Reads a CLI config file, hands it to `mutate`, and writes it back only when
+ * `mutate` reports a change.
+ *
+ * One protocol for every edit CH3 makes to these files. There were two
+ * copies of it and they had already drifted — the second computed the config
+ * path by hand and got the default profile wrong, where the CLI keeps the
+ * config BESIDE the directory. One copy, one temp-file name to recognise after
+ * a crash, one place to be right.
+ */
+const editClaudeConfigFile = Effect.fn("editClaudeConfigFile")(function* (
   configPath: string,
+  mutate: (config: Record<string, unknown>) => boolean,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const raw = yield* fs.readFileString(configPath).pipe(Effect.orElseSucceed(() => ""));
   if (raw.trim().length === 0) return;
   // Plain JSON, deliberately: a Schema struct decode would DROP every key it
   // does not name, but this must preserve all of the CLI's other state and
-  // remove exactly one key. Unparseable JSON is left untouched rather than
-  // risking corruption of the user's config.
+  // change exactly what `mutate` touches. Unparseable JSON is left untouched
+  // rather than risking corruption of the user's config.
   let parsed: unknown;
   try {
     // @effect-diagnostics-next-line preferSchemaOverJson:off
@@ -382,8 +512,7 @@ const removeOauthAccountFromConfig = Effect.fn("removeOauthAccountFromConfig")(f
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
   const config = parsed as Record<string, unknown>;
-  if (!("oauthAccount" in config)) return;
-  delete config.oauthAccount;
+  if (!mutate(config)) return;
   // @effect-diagnostics-next-line preferSchemaOverJson:off
   const serialized = JSON.stringify(config, null, 2);
   // Atomic replace: `~/.claude.json` (the default home's config) is the large
@@ -395,29 +524,43 @@ const removeOauthAccountFromConfig = Effect.fn("removeOauthAccountFromConfig")(f
   const path = yield* Path.Path;
   // The config basename already starts with a dot (`.claude.json`), so the
   // temp sibling stays hidden without another leading dot.
-  const tempPath = path.join(
-    path.dirname(configPath),
-    `${path.basename(configPath)}.ch3-signout-tmp`,
+  const tempPath = path.join(path.dirname(configPath), `${path.basename(configPath)}.ch3-tmp`);
+  const wrote = yield* fs.writeFileString(tempPath, `${serialized}\n`).pipe(
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
   );
-  const wrote = yield* fs
-    .writeFileString(tempPath, `${serialized}\n`)
-    .pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    );
   if (!wrote) return;
-  const renamed = yield* fs
-    .rename(tempPath, configPath)
-    .pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    );
+  const renamed = yield* fs.rename(tempPath, configPath).pipe(
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
   if (!renamed) {
     // Rename failed: drop the temp file rather than leave a stray sibling,
     // and leave the original config untouched.
     yield* fs.remove(tempPath).pipe(Effect.orElseSucceed(() => {}));
   }
 });
+
+/**
+ * Marks a profile's config as past the CLI's first-run setup.
+ *
+ * Signing in through CH3 writes the account into a fresh config directory
+ * but never runs the CLI's interactive onboarding, so `hasCompletedOnboarding`
+ * is absent. Nothing in the app notices — it drives the CLI programmatically.
+ * A TERMINAL does: `claude` against that directory sees an un-onboarded config
+ * and walks the new-user path — theme picker, then a sign-in prompt — while
+ * the working credential sits right there unused. Orchestration runs launched
+ * from a terminal died on that prompt.
+ *
+ * Only ever ADDS the flag. A config that already carries it, or that will not
+ * parse, is left exactly as it was.
+ */
+const markClaudeProfileOnboarded = (configPath: string) =>
+  editClaudeConfigFile(configPath, (config) => {
+    if (config.hasCompletedOnboarding === true) return false;
+    config.hasCompletedOnboarding = true;
+    return true;
+  });
 
 /** The account config path for a profile home: beside the default, inside a custom dir. */
 const claudeProfileConfigPath = (input: {
@@ -446,7 +589,10 @@ const claudeIdentitiesMatch = (a: ClaudeAccountIdentity, b: ClaudeAccountIdentit
  * needed. File reads only — no network, no subprocess.
  */
 export const anotherProfileSharesClaudeIdentity = Effect.fn("anotherProfileSharesClaudeIdentity")(
-  function* (input: { readonly excludeHomePath: string; readonly identity: ClaudeAccountIdentity }) {
+  function* (input: {
+    readonly excludeHomePath: string;
+    readonly identity: ClaudeAccountIdentity;
+  }) {
     if ((input.identity.email ?? "").length === 0) return false;
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -507,12 +653,17 @@ export const signOutClaudeAccount = Effect.fn("signOutClaudeAccount")(function* 
   const identity = readClaudeAccountIdentity(
     yield* fs.readFileString(configPath).pipe(Effect.orElseSucceed(() => "")),
   );
-  // On the safe side of an unreadable sibling: default to SPARING the shared
-  // credential, never deleting one another directory might still borrow.
-  const sharedByAnother = yield* anotherProfileSharesClaudeIdentity({
-    excludeHomePath: homePath,
-    identity,
-  }).pipe(Effect.orElseSucceed(() => true));
+  // On the safe side of an unreadable sibling OR an unreadable identity of
+  // our own: default to SPARING the shared credential, never deleting one
+  // another directory might still borrow. An empty identity cannot prove
+  // "nobody else shares this", so treat it the same as the probe failing.
+  const sharedByAnother =
+    (identity.email ?? "").length === 0
+      ? true
+      : yield* anotherProfileSharesClaudeIdentity({
+          excludeHomePath: homePath,
+          identity,
+        }).pipe(Effect.orElseSucceed(() => true));
 
   // Keychain first: the credential is what actually authorizes turns, so a
   // sign-out that left it behind would not be one. The legacy shared entry is
@@ -529,9 +680,7 @@ export const signOutClaudeAccount = Effect.fn("signOutClaudeAccount")(function* 
       .pipe(Effect.orElseSucceed(() => ({ stdout: "" }) as { stdout: string }));
   }
 
-  yield* fs
-    .remove(path.join(homePath, ".credentials.json"))
-    .pipe(Effect.orElseSucceed(() => {}));
+  yield* fs.remove(path.join(homePath, ".credentials.json")).pipe(Effect.orElseSucceed(() => {}));
 
   yield* removeOauthAccountFromConfig(configPath);
 
@@ -575,7 +724,88 @@ export interface PendingClaudeLogin {
   readonly abort: AbortController;
   /** The login mkdir'd a fresh folder — remove it again if sign-in fails. */
   readonly createdDirectory: boolean;
+  /** Who this folder is for, decided when the attempt started. See below. */
+  readonly expectedEmail?: string;
+  /**
+   * Who this folder already held when the attempt started, if anyone.
+   *
+   * The folder's own account and nothing else. It separates a
+   * re-authentication from a first sign-in, which is what the duplicate guard
+   * turns on.
+   */
+  readonly previousEmail?: string;
 }
+
+/**
+ * Which address a sign-in into this folder was STARTED for.
+ *
+ * Resolved once, when the attempt begins, because the source is about to be
+ * overwritten by the sign-in itself: the address already in the folder, which
+ * makes this a re-authentication. `~/.claude-3` is that person's directory
+ * because that person is signed into it, and a different person coming back
+ * from the flow is unambiguously wrong.
+ *
+ * An empty folder — someone adding a brand-new account — yields undefined, and
+ * no check is made. There is genuinely no expectation to hold that sign-in to.
+ */
+export const claudeSignInExpectedEmail = (input: {
+  readonly currentEmail?: string | undefined;
+  readonly displayPath: string;
+}): string | undefined => {
+  const current = (input.currentEmail ?? "").trim();
+  return current.length > 0 ? current : undefined;
+};
+
+/** What a completed sign-in turned out to be, against what it was started for. */
+export type ClaudeSignInIdentityVerdict =
+  | { readonly _tag: "Match" }
+  | { readonly _tag: "Unverifiable"; readonly reason: "no-expectation" | "no-identity" }
+  | { readonly _tag: "Mismatch"; readonly expected: string; readonly actual: string };
+
+/**
+ * Compared case-insensitively: the CLI writes back whatever casing the identity
+ * provider hands it, and `Claudio.Cuatro@example.com` returning for
+ * `claudio.cuatro@example.com` is the same person, not a wrong-account write.
+ *
+ * "Unverifiable" is deliberately distinct from "Match". An unreadable config is
+ * not evidence that the right person signed in, and treating it as such is how
+ * a guard quietly stops guarding.
+ */
+export const classifyClaudeSignInIdentity = (input: {
+  readonly expectedEmail?: string | undefined;
+  readonly actualEmail?: string | undefined;
+}): ClaudeSignInIdentityVerdict => {
+  const expected = (input.expectedEmail ?? "").trim();
+  const actual = (input.actualEmail ?? "").trim();
+  if (expected.length === 0) return { _tag: "Unverifiable", reason: "no-expectation" };
+  if (actual.length === 0) return { _tag: "Unverifiable", reason: "no-identity" };
+  if (expected.toLowerCase() === actual.toLowerCase()) return { _tag: "Match" };
+  return { _tag: "Mismatch", expected, actual };
+};
+
+/**
+ * The account signed into a profile directory right now. Total: a directory
+ * that does not exist, or a config that will not parse, reads as nobody.
+ */
+const readClaudeProfileIdentity = Effect.fn("readClaudeProfileIdentity")(function* (
+  homePath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const defaultDir = yield* defaultClaudeConfigDirPath();
+  return readClaudeAccountIdentity(
+    yield* fs
+      .readFileString(
+        claudeProfileConfigPath({
+          homePath,
+          home: NodeOS.homedir(),
+          defaultDir,
+          join: (a, b) => path.join(a, b),
+        }),
+      )
+      .pipe(Effect.orElseSucceed(() => "")),
+  );
+});
 
 /**
  * The authenticate control answers with BOTH forms (verified against the
@@ -622,6 +852,13 @@ export const startClaudeAccountLogin = Effect.fn("startClaudeAccountLogin")(func
   // leave a dead "Not signed in" folder behind in the accounts list.
   const directoryExisted = yield* fs.exists(homePath).pipe(Effect.orElseSucceed(() => true));
   yield* fs.makeDirectory(homePath, { recursive: true }).pipe(Effect.orElseSucceed(() => {}));
+  // Read BEFORE the CLI writes over it: after the sign-in there is no way left
+  // to tell who this folder belonged to a moment ago.
+  const currentEmail = (yield* readClaudeProfileIdentity(homePath)).email;
+  const expectedEmail = claudeSignInExpectedEmail({
+    ...(currentEmail ? { currentEmail } : {}),
+    displayPath: homeRelativeDisplayPath(homePath),
+  });
   const settings = { ...input.settings, homePath };
   const baseEnvironment = yield* makeClaudeEnvironment(settings);
   // The CLI's automatic OAuth flow opens the system browser ITSELF — a stray
@@ -630,6 +867,7 @@ export const startClaudeAccountLogin = Effect.fn("startClaudeAccountLogin")(func
   // the only sign-in surface left is the one the app controls.
   const environment = { ...baseEnvironment, BROWSER: "true" };
   const executablePath = yield* resolveClaudeSdkExecutablePath(settings.binaryPath, environment);
+  yield* ensureClaudeExecutableRuns({ executablePath, environment });
   const abort = new AbortController();
   const controls = yield* Effect.try(
     () =>
@@ -664,9 +902,15 @@ export const startClaudeAccountLogin = Effect.fn("startClaudeAccountLogin")(func
       }),
     );
   }
-  const response = yield* Effect.tryPromise(() => controls.claudeAuthenticate!(true)).pipe(
-    Effect.tapError(() => Effect.sync(() => abort.abort())),
-  );
+  const response = yield* Effect.tryPromise({
+    try: () => controls.claudeAuthenticate!(true),
+    catch: (cause) =>
+      new ClaudeAccountError({
+        reason: "failed",
+        detail: `The Claude sign-in could not start: ${describeRejection(cause)}`,
+        cause,
+      }),
+  }).pipe(Effect.tapError(() => Effect.sync(() => abort.abort())));
   const url = readLoginUrl(response);
   return {
     pending: {
@@ -674,10 +918,15 @@ export const startClaudeAccountLogin = Effect.fn("startClaudeAccountLogin")(func
       controls,
       abort,
       createdDirectory: !directoryExisted,
+      ...(expectedEmail ? { expectedEmail } : {}),
+      ...(currentEmail ? { previousEmail: currentEmail } : {}),
     } satisfies PendingClaudeLogin,
     ...(url ? { url } : {}),
   };
 });
+
+/** Long enough for a cold CLI on a slow disk, short enough not to look hung. */
+const CLAUDE_EXECUTABLE_PROBE_TIMEOUT = Duration.seconds(20);
 
 /**
  * A sign-in the person walked away from — closed the browser tab, hit a
@@ -687,16 +936,112 @@ export const startClaudeAccountLogin = Effect.fn("startClaudeAccountLogin")(func
  */
 export const CLAUDE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 
+/**
+ * Removes the directory an abandoned sign-in created — and nothing else.
+ *
+ * Two guards, both load-bearing. Only a folder THIS login created is a
+ * candidate: an existing profile directory is never touched. And only while it
+ * still holds no account: an abandoned login lives on here for the full
+ * timeout, and in that time the user can start a second sign-in into the same
+ * folder and complete it. Deleting on the first attempt's clock would then
+ * destroy a live account, credentials and all, minutes after the user watched
+ * it succeed — so the account is re-read at the moment of deletion, not
+ * trusted from when the attempt began.
+ */
+const discardAbandonedLoginDirectory = (pending: PendingClaudeLogin) =>
+  pending.createdDirectory
+    ? Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const raw = yield* fs
+          .readFileString(path.join(pending.homePath, ".claude.json"))
+          .pipe(Effect.orElseSucceed(() => ""));
+        if ((readClaudeAccountIdentity(raw).email ?? "").length > 0) return;
+        yield* fs.remove(pending.homePath, { recursive: true, force: true }).pipe(Effect.ignore);
+      }).pipe(Effect.ignore)
+    : Effect.void;
+
+/**
+ * Abandons a sign-in on purpose: stops the CLI session now rather than leaving
+ * it to expire on its own, and clears up after it under the same rules an
+ * expiry would follow.
+ */
+export const cancelClaudeAccountLogin = Effect.fn("cancelClaudeAccountLogin")(function* (
+  pending: PendingClaudeLogin,
+) {
+  pending.abort.abort();
+  yield* discardAbandonedLoginDirectory(pending);
+});
+
+/**
+ * What a rejected SDK promise actually said.
+ *
+ * `Effect.tryPromise` without a `catch` fails with `UnknownException`, whose
+ * message is the literal string "An error occurred in Effect.tryPromise". That
+ * string reached the account panel and was the only thing a person saw when
+ * sign-in failed — it names no cause, no file and no action. CH3's CFO sat
+ * in front of it and could not use CH3 at all.
+ */
+export function describeRejection(cause: unknown): string {
+  if (cause instanceof Error) {
+    const parts = [cause.message.trim()];
+    // Node puts the useful half of a spawn failure on these.
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === "string" && !cause.message.includes(code)) parts.push(`(${code})`);
+    const joined = parts.filter(Boolean).join(" ");
+    // An Error with a blank message stringifies to "Error:", which says even
+    // less than admitting there was no reason.
+    return joined.length > 0 ? joined : "no reason given";
+  }
+  const text = String(cause).trim();
+  return text.length > 0 && text !== "[object Object]" ? text : "no reason given";
+}
+
+/**
+ * Refuse to start a sign-in the machine cannot finish.
+ *
+ * The sign-in spawns the Claude Code CLI through the Agent SDK. On a machine
+ * without it — which is most machines belonging to people who do not work in a
+ * terminal — the spawn rejects deep inside the SDK and the panel showed a
+ * sentence about Effect. CH3 installs the CLI on first launch, but that
+ * install is deliberately silent and not fatal, so when it cannot run (no
+ * package manager, no network, a locked global prefix) nothing else ever said
+ * so. This is the place that says so, before anything else is attempted.
+ */
+const ensureClaudeExecutableRuns = Effect.fn("ensureClaudeExecutableRuns")(function* (input: {
+  readonly executablePath: string;
+  readonly environment: NodeJS.ProcessEnv;
+}) {
+  const processRunner = yield* ProcessRunner.ProcessRunner;
+  const probe = yield* processRunner
+    .run({
+      command: input.executablePath,
+      args: ["--version"],
+      env: input.environment,
+      timeout: CLAUDE_EXECUTABLE_PROBE_TIMEOUT,
+      timeoutBehavior: "timedOutResult",
+    })
+    .pipe(Effect.option);
+
+  if (probe._tag === "Some" && probe.value.code === 0 && !probe.value.timedOut) return;
+
+  const detail =
+    probe._tag === "None"
+      ? `CH3 could not run the Claude Code CLI (\`${input.executablePath}\`). It is normally installed for you on first launch; if that did not happen, install it with \`npm install -g @anthropic-ai/claude-code\` and try again.`
+      : `The Claude Code CLI (\`${input.executablePath}\`) did not answer \`--version\`${
+          probe.value.stderr.trim().length > 0
+            ? `: ${probe.value.stderr.trim().slice(0, 200)}`
+            : "."
+        } Install or repair it with \`npm install -g @anthropic-ai/claude-code\`.`;
+
+  return yield* Effect.fail(new ClaudeAccountError({ reason: "cli-missing", detail }));
+});
+
 /** Waits for the browser half of the flow to finish, then releases the session. */
 export const awaitClaudeAccountLogin = Effect.fn("awaitClaudeAccountLogin")(function* (
   pending: PendingClaudeLogin,
 ) {
-  const fs = yield* FileSystem.FileSystem;
-  // Only a folder this very login created is removed on failure — an existing
-  // profile directory is never touched, whatever happens to the sign-in.
-  const discardCreatedDirectory = pending.createdDirectory
-    ? fs.remove(pending.homePath, { recursive: true, force: true }).pipe(Effect.ignore)
-    : Effect.void;
+  const discardCreatedDirectory = discardAbandonedLoginDirectory(pending);
   if (!pending.controls.claudeOAuthWaitForCompletion) {
     return yield* Effect.fail(
       new ClaudeAccountError({
@@ -705,9 +1050,15 @@ export const awaitClaudeAccountLogin = Effect.fn("awaitClaudeAccountLogin")(func
       }),
     );
   }
-  const settled = yield* Effect.tryPromise(() =>
-    pending.controls.claudeOAuthWaitForCompletion!(),
-  ).pipe(
+  const settled = yield* Effect.tryPromise({
+    try: () => pending.controls.claudeOAuthWaitForCompletion!(),
+    catch: (cause) =>
+      new ClaudeAccountError({
+        reason: "failed",
+        detail: `The sign-in did not complete: ${describeRejection(cause)}`,
+        cause,
+      }),
+  }).pipe(
     Effect.timeoutOption(CLAUDE_LOGIN_TIMEOUT_MS),
     Effect.ensuring(Effect.sync(() => pending.abort.abort())),
   );
@@ -720,4 +1071,117 @@ export const awaitClaudeAccountLogin = Effect.fn("awaitClaudeAccountLogin")(func
       }),
     );
   }
+  // Who actually came back. Checked BEFORE the directory is stamped as
+  // onboarded, so a wrong-account write is undone rather than tidied up.
+  //
+  // Isolating the sign-in window's cookie jar is what should make this
+  // impossible (see apps/desktop/src/window/claudeSignInWindow.ts). This is the
+  // backstop, and it exists because the failure mode it guards was SILENT: the
+  // wrong credential landed in the folder, the panel said "Signed in as …",
+  // and nobody found out until they read the accounts list days later. A
+  // sign-in that goes wrong now says so and leaves nothing behind.
+  const signedInIdentity = yield* readClaudeProfileIdentity(pending.homePath);
+  const signedInEmail = signedInIdentity.email;
+  const verdict = classifyClaudeSignInIdentity({
+    ...(pending.expectedEmail ? { expectedEmail: pending.expectedEmail } : {}),
+    ...(signedInEmail ? { actualEmail: signedInEmail } : {}),
+  });
+  if (verdict._tag === "Unverifiable" && verdict.reason === "no-identity") {
+    // Knew who to expect and could not read who arrived. Not a failure — the
+    // CLI may simply not have flushed the config yet, and the profile probe
+    // that follows will show the account as signed out, which is visible. But
+    // a guard that could not run must leave a trace, or the next person to
+    // read this code cannot tell "never fired" from "always passed".
+    yield* Effect.logWarning("could not verify which Claude account signed in", {
+      homePath: pending.homePath,
+      expectedEmail: pending.expectedEmail,
+    });
+  }
+  if (verdict._tag === "Mismatch") {
+    yield* Effect.logError("Claude sign-in completed as the wrong account", {
+      homePath: pending.homePath,
+      expectedEmail: verdict.expected,
+      signedInEmail: verdict.actual,
+    });
+    // Best-effort, and ignored on purpose: failing to clean up must not turn
+    // into a DIFFERENT error that hides which account signed in. The
+    // ClaudeAccountError below is the one the user needs to read.
+    yield* signOutClaudeAccount({ homePath: pending.homePath }).pipe(Effect.ignore);
+    // Only removes a folder THIS attempt created, and only once no account is
+    // left in it — which the sign-out above has just arranged.
+    yield* discardCreatedDirectory;
+    return yield* Effect.fail(
+      new ClaudeAccountError({
+        reason: "failed",
+        detail:
+          `Signed in as ${verdict.actual}, but this folder is ${verdict.expected}'s. ` +
+          `The credential was removed rather than left in the wrong account's folder. ` +
+          `Start the sign-in again and authenticate as ${verdict.expected}, or add ` +
+          `${verdict.actual} in a folder of its own.`,
+      }),
+    );
+  }
+
+  // A folder that held nobody must not become a SECOND home for an account
+  // that already lives in another folder.
+  //
+  // That is what filled the accounts list with the same address three times:
+  // every "Add account" opened a sign-in window carrying the previous account's
+  // cookies, came back as that same person, and wrote them into one more fresh
+  // folder. Isolating the cookie jar removes the cause; this removes the
+  // outcome, including when the user genuinely authenticates as an account they
+  // already hold.
+  //
+  // Only for a folder with no prior identity of its own. Re-authenticating a
+  // folder that already IS a duplicate has to keep working, or the folders this
+  // bug has already created could never be signed back in and repaired.
+  if ((pending.previousEmail ?? "").length === 0 && (signedInEmail ?? "").length > 0) {
+    const heldElsewhere = yield* anotherProfileSharesClaudeIdentity({
+      excludeHomePath: pending.homePath,
+      identity: signedInIdentity,
+    });
+    if (heldElsewhere) {
+      yield* Effect.logError("Claude sign-in landed an account that already has a folder", {
+        homePath: pending.homePath,
+        signedInEmail,
+      });
+      // Same order and the same reasoning as the wrong-account branch above.
+      // The shared legacy Keychain entry survives this: `signOutClaudeAccount`
+      // deletes it only when no other profile is signed into the identity, and
+      // the folder that already holds this account still is.
+      yield* signOutClaudeAccount({ homePath: pending.homePath }).pipe(Effect.ignore);
+      yield* discardCreatedDirectory;
+      return yield* Effect.fail(
+        new ClaudeAccountError({
+          reason: "failed",
+          detail:
+            `${signedInEmail} is already signed in to another folder, so this one was ` +
+            `left empty rather than added as a second copy of the same account. ` +
+            `Use the account you already have, or sign in as a different one.`,
+        }),
+      );
+    }
+  }
+
+  // The CLI has just written this directory's config. Stamp it as onboarded so
+  // a terminal running `claude` against this account gets a working session
+  // instead of the first-run theme-and-sign-in flow.
+  const path = yield* Path.Path;
+  const defaultDir = yield* defaultClaudeConfigDirPath();
+  yield* markClaudeProfileOnboarded(
+    claudeProfileConfigPath({
+      homePath: pending.homePath,
+      home: NodeOS.homedir(),
+      defaultDir,
+      join: (a, b) => path.join(a, b),
+    }),
+  );
+
+  // The usage reader remembers "no credential in this directory" for five
+  // minutes so an account-less machine is not spawning `security` every poll.
+  // A sign-in is the one event that makes that memory wrong, and it is our
+  // own event — so forget it here rather than leaving the row reading "sign
+  // in again to see usage" for up to five minutes after the person just did,
+  // which reads as the sign-in having failed and sends them to do it twice.
+  forgetClaudeAccountToken(pending.homePath);
 });

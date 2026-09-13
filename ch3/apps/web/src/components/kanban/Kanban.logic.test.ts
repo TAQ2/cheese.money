@@ -82,6 +82,7 @@ function makeThread(input: {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: NOW,
           },
     latestUserMessageAt: null,
@@ -143,6 +144,56 @@ describe("resolveKanbanLane", () => {
   it("surfaces blocked-on-you work even while a terminal runs", () => {
     const thread = makeThread({ hasPendingUserInput: true });
     expect(resolveKanbanLane(thread, { hasRunningTerminal: true })).toBe("user");
+  });
+
+  it("keeps a card submerged on an unexpired agent-working lease", () => {
+    // Detached work leaves no session, turn or terminal to observe, so the
+    // lease is the only thing holding the card down.
+    const thread = makeThread({
+      sessionStatus: "ready",
+      kanban: { agentWorkingUntil: "2026-08-13T12:10:00.000Z" },
+    });
+    expect(resolveKanbanLane(thread, { nowMs: Date.parse(NOW) })).toBe("agent");
+  });
+
+  it("re-surfaces the card once the lease lapses", () => {
+    // The self-healing property: a run SIGKILLed before it could release its
+    // claim must not strand the card in the agent lane.
+    const thread = makeThread({
+      sessionStatus: "ready",
+      kanban: { agentWorkingUntil: "2026-08-13T11:50:00.000Z" },
+    });
+    expect(resolveKanbanLane(thread, { nowMs: Date.parse(NOW) })).toBe("user");
+  });
+
+  it("ignores a released or unparseable lease", () => {
+    expect(
+      resolveKanbanLane(makeThread({ kanban: { agentWorkingUntil: null } }), {
+        nowMs: Date.parse(NOW),
+      }),
+    ).toBe("user");
+    expect(
+      resolveKanbanLane(makeThread({ kanban: { agentWorkingUntil: "not a date" } }), {
+        nowMs: Date.parse(NOW),
+      }),
+    ).toBe("user");
+    expect(resolveKanbanLane(makeThread({ kanban: {} }), { nowMs: Date.parse(NOW) })).toBe("user");
+  });
+
+  it("surfaces work blocked on a human even while the lease is live", () => {
+    // Ordering is the whole safety property: an approval must never hide
+    // below the waterline because the agent claimed the thread.
+    const held = { agentWorkingUntil: "2026-08-13T12:10:00.000Z" };
+    expect(
+      resolveKanbanLane(makeThread({ kanban: held, hasPendingApprovals: true }), {
+        nowMs: Date.parse(NOW),
+      }),
+    ).toBe("user");
+    expect(
+      resolveKanbanLane(makeThread({ kanban: held, hasPendingUserInput: true }), {
+        nowMs: Date.parse(NOW),
+      }),
+    ).toBe("user");
   });
 });
 
@@ -309,15 +360,15 @@ describe("resolveKanbanLane with a turn in flight", () => {
   it("keeps a thread in the agent lane while its turn is running", () => {
     // A turn driving sub-agents: the session is not reporting itself as
     // running, but the AI is working.
-    expect(
-      resolveKanbanLane(thread({ latestTurn: { turnId: "t1", state: "running" } })),
-    ).toBe("agent");
+    expect(resolveKanbanLane(thread({ latestTurn: { turnId: "t1", state: "running" } }))).toBe(
+      "agent",
+    );
   });
 
   it("returns to the user lane once the turn completes", () => {
-    expect(
-      resolveKanbanLane(thread({ latestTurn: { turnId: "t1", state: "completed" } })),
-    ).toBe("user");
+    expect(resolveKanbanLane(thread({ latestTurn: { turnId: "t1", state: "completed" } }))).toBe(
+      "user",
+    );
   });
 
   it("still surfaces a thread blocked on the user, turn or no turn", () => {
@@ -393,10 +444,16 @@ describe("isAgentWorkingLeaseActive", () => {
     // The chat view holds the richer thread type, not the sidebar shell, and
     // asks the same question to decide whether the terminal control pulses.
     expect(
-      isAgentWorkingLeaseActive({ kanban: { agentWorkingUntil: "2026-08-16T23:50:00.000Z" } } as never, NOW),
+      isAgentWorkingLeaseActive(
+        { kanban: { agentWorkingUntil: "2026-08-16T23:50:00.000Z" } } as never,
+        NOW,
+      ),
     ).toBe(true);
     expect(
-      isAgentWorkingLeaseActive({ kanban: { agentWorkingUntil: "2026-08-16T23:40:00.000Z" } } as never, NOW),
+      isAgentWorkingLeaseActive(
+        { kanban: { agentWorkingUntil: "2026-08-16T23:40:00.000Z" } } as never,
+        NOW,
+      ),
     ).toBe(false);
   });
 

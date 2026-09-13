@@ -288,9 +288,24 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  /**
+   * Turn assistant streaming on once, for an install that had it off.
+   *
+   * A pure transform rather than a write: the marker travels with the settings
+   * in memory, and the next ordinary write persists it along with everything
+   * else. Until that write happens the flip simply runs again on each load,
+   * which sets a value that is already what we want — and the write that
+   * matters, somebody turning streaming back off, carries the marker with it,
+   * so their choice is the last word.
+   */
+  const applyAssistantStreamingDefault = (settings: ServerSettings): ServerSettings =>
+    settings.assistantStreamingDefaultedOn
+      ? settings
+      : { ...settings, enableAssistantStreaming: true, assistantStreamingDefaultedOn: true };
+
   const loadSettingsFromDisk = Effect.gen(function* () {
     if (!(yield* readConfigExists)) {
-      return DEFAULT_SERVER_SETTINGS;
+      return applyAssistantStreamingDefault(DEFAULT_SERVER_SETTINGS);
     }
 
     const raw = yield* readRawConfig;
@@ -301,9 +316,9 @@ const make = Effect.gen(function* () {
         issues: Cause.pretty(decoded.cause),
         cause: decoded.cause,
       });
-      return DEFAULT_SERVER_SETTINGS;
+      return applyAssistantStreamingDefault(DEFAULT_SERVER_SETTINGS);
     }
-    return decoded.value;
+    return applyAssistantStreamingDefault(decoded.value);
   });
 
   const settingsCache = yield* Cache.make<typeof cacheKey, ServerSettings, ServerSettingsError>({

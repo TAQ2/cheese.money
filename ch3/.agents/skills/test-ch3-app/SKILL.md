@@ -5,7 +5,7 @@ description: Launch, retain, and test the CH3 web app in isolated development en
 
 # Test CH3 App
 
-Use this skill for the web client. For iOS Simulator, Android Emulator, or physical-device testing against an isolated CH3 backend, use the sibling [`test-ch3-mobile`](../test-ch3-mobile/SKILL.md) skill.
+Use this skill for the web client. The mobile app was removed from this fork; there is no device target to test.
 
 ## Start an isolated web environment
 
@@ -18,7 +18,7 @@ Use this skill for the web client. For iOS Simulator, Android Emulator, or physi
 
 Treat a base directory as disposable only when it was created or deliberately selected for the current test. Never delete or directly seed the shared `~/.ch3` directory. Prefer starting with a new temporary base directory over clearing state of uncertain ownership.
 
-The worktree-local default deliberately outranks an ambient `CH3CODE_HOME`; do not pass the shared home through to a worktree dev server.
+The worktree-local default deliberately outranks an ambient `CH3_HOME`; do not pass the shared home through to a worktree dev server.
 
 Ports are derived from the worktree path but can shift when occupied. Always read the actual values from the `[dev-runner]` line.
 

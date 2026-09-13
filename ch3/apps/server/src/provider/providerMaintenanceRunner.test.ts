@@ -150,6 +150,11 @@ function mockSpawnerLayer(
 
 function makeRegistry(
   initialProviders: ServerProvider | ReadonlyArray<ServerProvider> = baseProvider,
+  // The real registry re-runs the provider's `--version` on refresh, so a
+  // successful update shows up as a moved version. Modelling that is the whole
+  // point of these tests: an update is judged by what the binary reports
+  // afterwards, never by the command's exit code.
+  options?: { readonly refreshedVersion?: string },
 ) {
   return Effect.gen(function* () {
     const providersRef = yield* Ref.make<ReadonlyArray<ServerProvider>>(
@@ -185,10 +190,21 @@ function makeRegistry(
       );
     });
 
+    const refreshInstance = (instanceId: ProviderInstanceId) =>
+      options?.refreshedVersion === undefined
+        ? Ref.get(providersRef)
+        : Ref.updateAndGet(providersRef, (providers) =>
+            providers.map((candidate) =>
+              candidate.instanceId === instanceId
+                ? { ...candidate, version: options.refreshedVersion ?? null }
+                : candidate,
+            ),
+          );
+
     const registry: ProviderRegistryShape = {
       getProviders: Ref.get(providersRef),
       refresh: () => Ref.get(providersRef),
-      refreshInstance: () => Ref.get(providersRef),
+      refreshInstance,
       getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
         Effect.succeed(lifecycleFor(provider)),
       setProviderMaintenanceActionState,
@@ -220,7 +236,10 @@ describe("providerMaintenanceRunner", () => {
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {
-      const { registry, updateStatesRef } = yield* makeRegistry(baseCursorProvider);
+      const { registry, updateStatesRef } = yield* makeRegistry(
+        { ...baseCursorProvider, version: "1.0.0" },
+        { refreshedVersion: "1.1.0" },
+      );
       const updater = yield* makeTestRunner(registry);
 
       const result = yield* updater.updateProvider(CURSOR_DRIVER);
@@ -304,7 +323,10 @@ describe("providerMaintenanceRunner", () => {
     () => {
       const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
       return Effect.gen(function* () {
-        const { registry } = yield* makeRegistry(baseProvider);
+        const { registry } = yield* makeRegistry(
+          { ...baseProvider, version: "1.0.0" },
+          { refreshedVersion: "1.1.0" },
+        );
         const runner = yield* makeTestRunner(registry);
 
         const result = yield* runner.updateProvider(CODEX_DRIVER);
@@ -337,18 +359,21 @@ describe("providerMaintenanceRunner", () => {
       const personalInstanceId = ProviderInstanceId.make("codex_personal");
       const workInstanceId = ProviderInstanceId.make("codex_work");
       const refreshedInstanceIds: Array<ProviderInstanceId> = [];
-      const { registry } = yield* makeRegistry([
-        {
-          ...baseProvider,
-          instanceId: personalInstanceId,
-          version: "0.124.0-alpha.3",
-        },
-        {
-          ...baseProvider,
-          instanceId: workInstanceId,
-          version: "0.124.0-alpha.3",
-        },
-      ]);
+      const { registry } = yield* makeRegistry(
+        [
+          {
+            ...baseProvider,
+            instanceId: personalInstanceId,
+            version: "0.124.0-alpha.3",
+          },
+          {
+            ...baseProvider,
+            instanceId: workInstanceId,
+            version: "0.124.0-alpha.3",
+          },
+        ],
+        { refreshedVersion: "0.124.0-alpha.4" },
+      );
       const updater = yield* makeTestRunner({
         ...registry,
         getProviderMaintenanceCapabilitiesForInstance: (instanceId, provider) =>
@@ -403,52 +428,135 @@ describe("providerMaintenanceRunner", () => {
     );
   });
 
-  it.effect("records command failure output in provider update state", () =>
+  it.effect("fails with the command's own reason, and records its output", () =>
     Effect.gen(function* () {
       const { registry } = yield* makeRegistry();
       const updater = yield* makeTestRunner(registry);
 
-      const result = yield* updater.updateProvider(CODEX_DRIVER);
-      const updateState = result.providers[0]?.updateState;
+      const exit = yield* updater.updateProvider(CODEX_DRIVER).pipe(Effect.exit);
 
+      assert.strictEqual(Exit.isFailure(exit), true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause);
+        assert.strictEqual(isServerProviderUpdateError(error), true);
+        if (isServerProviderUpdateError(error)) {
+          assert.include(error.reason, "exited with code 1");
+          assert.include(error.reason, "permission denied");
+          assert.include(error.reason, "not allowed to write");
+        }
+      }
+
+      const updateState = (yield* registry.getProviders)[0]?.updateState;
       assert.strictEqual(updateState?.status, "failed");
-      assert.strictEqual(updateState?.message, "Update command exited with code 1.");
       assert.include(updateState?.output ?? "", "permission denied");
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
           NonWindowsPlatform,
           latestVersionHttpClient("0.0.0"),
-          mockSpawnerLayer(() => ({ stderr: "permission denied", code: 1 })),
+          mockSpawnerLayer(() => ({
+            stderr: "npm ERR! code EACCES\nnpm ERR! permission denied",
+            code: 1,
+          })),
         ),
       ),
     ),
   );
 
-  it.effect(
-    "marks successful commands as unchanged when the refreshed provider is still outdated",
-    () =>
-      Effect.gen(function* () {
-        const { registry } = yield* makeRegistry({
-          ...baseProvider,
-          installed: true,
-          version: "0.1.0",
-        });
-        const updater = yield* makeTestRunner(registry);
+  it.effect("fails when the command exits 0 but the version never moves", () =>
+    // The OpenCode defect, exactly: `opencode upgrade` prints GitHub's 403 and
+    // returns 0, so only the re-probed version can tell anyone it did nothing.
+    Effect.gen(function* () {
+      const { registry } = yield* makeRegistry({
+        ...baseOpenCodeProvider,
+        installed: true,
+        version: "1.18.23",
+      });
+      const updater = yield* makeTestRunner(registry);
 
-        const result = yield* updater.updateProvider(CODEX_DRIVER);
+      const exit = yield* updater.updateProvider(OPENCODE_DRIVER).pipe(Effect.exit);
 
-        assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
-        assert.include(result.providers[0]?.updateState?.message ?? "", "still detects");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            NonWindowsPlatform,
-            latestVersionHttpClient("9.9.9"),
-            mockSpawnerLayer(() => ({ stdout: "updated" })),
-          ),
+      assert.strictEqual(Exit.isFailure(exit), true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause);
+        assert.strictEqual(isServerProviderUpdateError(error), true);
+        if (isServerProviderUpdateError(error)) {
+          // What happened, in the updater's own words...
+          assert.include(error.reason, "still on 1.18.23");
+          assert.include(error.reason, "403 GET https://api.github.com");
+          // ...and what to do about it.
+          assert.include(error.reason, "hourly quota");
+        }
+      }
+
+      const updateState = (yield* registry.getProviders)[0]?.updateState;
+      assert.strictEqual(updateState?.status, "failed");
+      assert.include(updateState?.output ?? "", "api.github.com");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NonWindowsPlatform,
+          latestVersionHttpClient("1.18.24"),
+          mockSpawnerLayer(() => ({
+            stdout: "● Using method: curl",
+            stderr:
+              "Error: Unexpected error\nStatusCode: non 2xx status code (403 GET https://api.github.com/repos/anomalyco/opencode/releases/latest)",
+          })),
         ),
       ),
+    ),
+  );
+
+  it.effect("reports the version it moved from and to", () =>
+    Effect.gen(function* () {
+      const { registry } = yield* makeRegistry(
+        { ...baseOpenCodeProvider, installed: true, version: "1.18.23" },
+        { refreshedVersion: "1.18.24" },
+      );
+      const updater = yield* makeTestRunner(registry);
+
+      const result = yield* updater.updateProvider(OPENCODE_DRIVER);
+
+      assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+      assert.strictEqual(
+        result.providers[0]?.updateState?.message,
+        "Updated from 1.18.23 to 1.18.24.",
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NonWindowsPlatform,
+          latestVersionHttpClient("1.18.24"),
+          mockSpawnerLayer(() => ({ stdout: "upgraded" })),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("does not call an already-current provider a failure", () =>
+    // `brew upgrade` and `npm install -g pkg@latest` both exit 0 having done
+    // nothing when there is nothing to do. Nothing moved, nothing was owed.
+    Effect.gen(function* () {
+      const { registry } = yield* makeRegistry({
+        ...baseProvider,
+        installed: true,
+        version: "1.18.24",
+      });
+      const updater = yield* makeTestRunner(registry);
+
+      const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+      assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
+      assert.include(result.providers[0]?.updateState?.message ?? "", "already up to date");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NonWindowsPlatform,
+          latestVersionHttpClient("1.18.24"),
+          mockSpawnerLayer(() => ({ stdout: "changed 0 packages" })),
+        ),
+      ),
+    ),
   );
 
   it.effect("prevents concurrent updates for the same provider", () => {
@@ -582,7 +690,10 @@ describe("providerMaintenanceRunner", () => {
   it.effect("accepts arbitrary driver-provided update lock keys", () => {
     const calls: Array<string> = [];
     return Effect.gen(function* () {
-      const { registry } = yield* makeRegistry(baseProvider);
+      const { registry } = yield* makeRegistry(
+        { ...baseProvider, version: "1.0.0" },
+        { refreshedVersion: "1.1.0" },
+      );
       const updater = yield* makeTestRunner({
         ...registry,
         getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
@@ -618,7 +729,10 @@ describe("providerMaintenanceRunner", () => {
     "releases the running-provider marker when interrupted after queuing but before the lock run starts",
     () =>
       Effect.gen(function* () {
-        const { registry } = yield* makeRegistry(baseProvider);
+        const { registry } = yield* makeRegistry(
+          { ...baseProvider, version: "1.0.0" },
+          { refreshedVersion: "1.1.0" },
+        );
         let blockQueuedState = true;
         const queuedStateWrittenLatch: { resolve: () => void } = { resolve: () => {} };
         const releaseQueuedStateLatch: { resolve: () => void } = { resolve: () => {} };
@@ -673,7 +787,10 @@ describe("providerMaintenanceRunner", () => {
       readonly shell: boolean | string | undefined;
     }> = [];
     return Effect.gen(function* () {
-      const { registry } = yield* makeRegistry(baseProvider);
+      const { registry } = yield* makeRegistry(
+        { ...baseProvider, version: "1.0.0" },
+        { refreshedVersion: "1.1.0" },
+      );
       const runner = yield* makeTestRunner(registry);
 
       const result = yield* runner.updateProvider(CODEX_DRIVER);

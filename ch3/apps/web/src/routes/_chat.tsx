@@ -1,14 +1,11 @@
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
+import { Outlet, createFileRoute, redirect, useRouterState } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
-import { useClientSettings, useSidebarV2Enabled } from "../hooks/useSettings";
+import { useSidebarV2Enabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
-import { useProjects } from "../state/entities";
-import { usePrimaryEnvironmentId } from "../state/environments";
-import { selectProjectGroupingSettings } from "../logicalProject";
-import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
+import { openKanbanNewThread } from "../kanbanNewThreadBus";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -29,19 +26,10 @@ function ChatRouteGlobalShortcuts() {
     useHandleNewThread();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const sidebarV2Enabled = useSidebarV2Enabled();
-  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  const projects = useProjects();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const projectGroupCount = useMemo(
-    () =>
-      buildSidebarProjectSnapshots({
-        projects,
-        settings: projectGroupingSettings,
-        primaryEnvironmentId,
-        resolveEnvironmentLabel: () => null,
-      }).length,
-    [primaryEnvironmentId, projectGroupingSettings, projects],
-  );
+  const onKanbanRoute = useRouterState({
+    select: (state) =>
+      state.location.pathname === "/kanban" || state.location.pathname.startsWith("/kanban/"),
+  });
   const terminalOpen = useTerminalUiStateStore((state) =>
     routeThreadRef
       ? selectThreadTerminalUiState(state.terminalUiStateByThreadKey, routeThreadRef).terminalOpen
@@ -77,6 +65,19 @@ function ChatRouteGlobalShortcuts() {
         return;
       }
 
+      if ((command === "chat.newLocal" || command === "chat.new") && onKanbanRoute) {
+        // On the board the shortcut files a thread onto the board, as the
+        // sidebar button does there.
+        event.preventDefault();
+        event.stopPropagation();
+        if (defaultProjectRef && !sidebarV2Enabled) {
+          openKanbanNewThread(defaultProjectRef);
+          return;
+        }
+        openCommandPalette({ open: "new-thread-in", newThreadTarget: "kanban" });
+        return;
+      }
+
       if (command === "chat.newLocal") {
         event.preventDefault();
         event.stopPropagation();
@@ -92,10 +93,15 @@ function ChatRouteGlobalShortcuts() {
       if (command === "chat.new") {
         event.preventDefault();
         event.stopPropagation();
-        // Sidebar v2 routes creation through the command palette whenever
-        // there is a real choice to make; v1 (and single-project setups)
-        // keep the immediate contextual create.
-        if (sidebarV2Enabled && projectGroupCount > 1) {
+        // The inbox routes creation through the command palette, always.
+        //
+        // It used to require more than one project group, on the reasoning that
+        // a single project leaves no choice to make. There is one: that screen
+        // is also where a Claude session id is pasted to import a conversation,
+        // so a person with one project could not reach it at all — "new
+        // conversation" dropped them straight into a thread. v1 keeps the
+        // immediate contextual create.
+        if (sidebarV2Enabled) {
           openCommandPalette({ open: "new-thread-in" });
           return;
         }
@@ -163,8 +169,8 @@ function ChatRouteGlobalShortcuts() {
     handleNewThread,
     keybindings,
     defaultProjectRef,
+    onKanbanRoute,
     previewOpen,
-    projectGroupCount,
     routeThreadRef,
     selectedThreadKeysSize,
     sidebarV2Enabled,

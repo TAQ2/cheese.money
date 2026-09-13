@@ -1,4 +1,4 @@
-import { CONNECT_OAUTH_SCOPES, DEFAULT_HOSTED_APP_URL } from "@ch3tools/shared/connectAuth";
+import { CONNECT_OAUTH_SCOPES, HOSTED_APP_URL_ENV_VAR } from "@ch3tools/shared/connectAuth";
 import { clerkFrontendApiUrlFromPublishableKey } from "@ch3tools/shared/relayAuth";
 import { normalizeSecureRelayUrl } from "@ch3tools/shared/relayUrl";
 import * as Config from "effect/Config";
@@ -8,12 +8,12 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 
-declare const __CH3CODE_BUILD_RELAY_URL__: string | undefined;
-declare const __CH3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
-declare const __CH3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__: string | undefined;
-declare const __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__: string | undefined;
-declare const __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__: string | undefined;
-declare const __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__: string | undefined;
+declare const __CH3_BUILD_RELAY_URL__: string | undefined;
+declare const __CH3_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
+declare const __CH3_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__: string | undefined;
+declare const __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__: string | undefined;
+declare const __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__: string | undefined;
+declare const __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__: string | undefined;
 
 const CLOUD_CLI_OAUTH_REDIRECT_URI = "http://127.0.0.1:34338/callback";
 const CLOUD_CLI_OAUTH_SCOPES = CONNECT_OAUTH_SCOPES;
@@ -47,34 +47,34 @@ function normalizeSecureUrl(value: string): string | null {
 }
 
 export const buildTimeRelayUrl =
-  typeof __CH3CODE_BUILD_RELAY_URL__ === "undefined"
+  typeof __CH3_BUILD_RELAY_URL__ === "undefined"
     ? ""
-    : (normalizeSecureRelayUrl(__CH3CODE_BUILD_RELAY_URL__) ?? "");
+    : (normalizeSecureRelayUrl(__CH3_BUILD_RELAY_URL__) ?? "");
 export const buildTimeClerkPublishableKey = readBuildTimeValue(
-  typeof __CH3CODE_BUILD_CLERK_PUBLISHABLE_KEY__ === "undefined"
+  typeof __CH3_BUILD_CLERK_PUBLISHABLE_KEY__ === "undefined"
     ? undefined
-    : __CH3CODE_BUILD_CLERK_PUBLISHABLE_KEY__,
+    : __CH3_BUILD_CLERK_PUBLISHABLE_KEY__,
 );
 export const buildTimeClerkCliOAuthClientId = readBuildTimeValue(
-  typeof __CH3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__ === "undefined"
+  typeof __CH3_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__ === "undefined"
     ? undefined
-    : __CH3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__,
+    : __CH3_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__,
 );
 export const buildTimeRelayClientTracing = {
   tracesUrl: readBuildTimeValue(
-    typeof __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__ === "undefined"
+    typeof __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__ === "undefined"
       ? undefined
-      : __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__,
+      : __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_URL__,
   ),
   tracesDataset: readBuildTimeValue(
-    typeof __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__ === "undefined"
+    typeof __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__ === "undefined"
       ? undefined
-      : __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__,
+      : __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_DATASET__,
   ),
   tracesToken: readBuildTimeValue(
-    typeof __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__ === "undefined"
+    typeof __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__ === "undefined"
       ? undefined
-      : __CH3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__,
+      : __CH3_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__,
   ),
 } as const;
 
@@ -102,14 +102,17 @@ export function makeRelayUrlConfig(fallback = buildTimeRelayUrl) {
 export const relayUrlConfig = makeRelayUrlConfig();
 
 /**
- * Hosted app origin used for out-of-band OAuth on headless
- * machines. Overridable so staging/nightly builds can point their CLIs at a
- * matching hosted deployment.
+ * Hosted app origin used for out-of-band OAuth on headless machines.
+ *
+ * Required, with no fallback. It previously defaulted to an origin on a domain
+ * nobody owns, which meant a headless sign-in printed a URL that whoever
+ * registered that domain could answer. Unset, the out-of-band flow now fails
+ * with a missing-configuration error — visible, and refusing to proceed —
+ * rather than sending someone to an address this project does not control.
  */
-export const hostedAppUrlConfig = makePublicValueConfig(
-  "CH3CODE_HOSTED_APP_URL",
-  DEFAULT_HOSTED_APP_URL,
-).pipe(Config.mapOrFail(validateHostedAppUrl));
+export const hostedAppUrlConfig = makePublicValueConfig(HOSTED_APP_URL_ENV_VAR, "").pipe(
+  Config.mapOrFail(validateHostedAppUrl),
+);
 
 function validateHostedAppUrl(value: string) {
   try {

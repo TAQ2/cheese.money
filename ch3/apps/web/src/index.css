@@ -104,6 +104,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(ch3-mobi
     var(--workspace-controls-left) + var(--workspace-titlebar-control-size) +
       var(--workspace-titlebar-control-gap)
   );
+  /* Where the CH3 lockup may start. Tighter than --workspace-titlebar-content-left
+     by design: this is a hard floor the mark only reaches on a narrow sidebar,
+     not the resting place of a row of controls, so it buys the mark room to sit
+     nearer the centre before it runs out. */
+  --workspace-titlebar-brand-inset: calc(
+    var(--workspace-controls-left) + var(--workspace-titlebar-control-size) + 0.375rem
+  );
 }
 
 .wco {
@@ -120,7 +127,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(ch3-mobi
 
 @theme inline {
   --color-zinc-25: oklch(99.2% 0 0);
-  --animate-skeleton: skeleton 2s -1s infinite linear;
+  /* Stepped so the shimmer repaints ~10x/s instead of every vsync. */
+  --animate-skeleton: skeleton 2s -1s infinite steps(20);
   /* Duty-cycled indicator animations: long holds with stepped ramps, so the
      compositor updates discrete frames instead of every vsync. */
   --animate-status-pulse: status-pulse 2s infinite;
@@ -250,14 +258,41 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(ch3-mobi
     display: none;
   }
 
+  /* Leading gutter, lockup, trailing space. A fixed gutter here means no
+     centring at all: with the mark hidden the row holds nothing but the
+     environment pill, and a pill centred in an otherwise empty header floats,
+     so it sits where it always sat. The centred template below is gated on the
+     same query as the mark, so there is one answer to "is the lockup up"
+     rather than two that can drift. */
+  .sidebar-brand-run {
+    display: grid;
+    grid-template-columns: var(--workspace-titlebar-brand-inset) auto 1fr;
+    align-items: center;
+  }
+
   .sidebar-brand-stage {
     display: none;
   }
 
   @media (min-width: 48rem) {
-    @container sidebar-header (min-width: 13.5rem) {
+    /* 15.5rem is where the lockup fits rather than where it merely starts.
+       The mark measures 117px at its 2.5x size, and macOS insets the header
+       content by 130px to clear the traffic lights, so a header narrower than
+       248px can only show a clipped "BauDe". Hidden reads as a deliberately
+       spare sidebar; truncated reads as broken. */
+    @container sidebar-header (min-width: 15.5rem) {
       .sidebar-brand {
         display: flex;
+      }
+
+      /* Both side columns take 1fr, so the mark centres on the sidebar rather
+         than on the run beside the controls. `minmax` gives the gutter a floor:
+         once an equal share would put the mark on top of the toggle, the gutter
+         stops shrinking and the mark parks beside it instead. Centred where
+         there is room, hard-stopped where there is not, with no width of the
+         word written down anywhere. */
+      .sidebar-brand-run {
+        grid-template-columns: minmax(var(--workspace-titlebar-brand-inset), 1fr) auto 1fr;
       }
     }
 
@@ -295,16 +330,135 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(ch3-mobi
     );
   }
 
+  /* CH3 purple, not blueprint blue. The drafting motif — grid, rulers,
+     dimension annotations — is what "blueprint" names here; the ink is the
+     brand's. Every hue in this art sits in a 248-279deg band centred on
+     --ch3-brand (262deg), and each colour keeps the saturation and
+     lightness of the blue it replaced, so contrast against the white
+     wordmark and traffic lights is unchanged. Glow and ink colours live in
+     `SidebarStageBackdrop.tsx` with the stops they belong to. */
   .stage-blueprint {
-    --stage-bp-top: #67c2ff;
-    --stage-bp-mid: #347ff8;
-    --stage-bp-bottom: #1538d0;
+    --stage-bp-top: #9b67ff;
+    --stage-bp-mid: #8c34f8;
+    --stage-bp-bottom: #7b15d0;
   }
 
   .dark .stage-blueprint {
-    --stage-bp-top: #3a7ad1;
-    --stage-bp-mid: #2050ae;
-    --stage-bp-bottom: #101f6e;
+    --stage-bp-top: #7b3ad1;
+    --stage-bp-mid: #6320ae;
+    --stage-bp-bottom: #45106e;
+  }
+
+  /* Header art motion. Ambient drift and breathing animate `transform` and
+     `opacity` only, so the compositor carries them and nothing repaints; the
+     periods are coprime, which keeps the pair from ever looping visibly. The
+     pointer effects read `--stage-pointer-*` / `--stage-parallax-*`, written by
+     `useStageBackdropMotion`, and cost one property write per frame. Each glow
+     layer is drawn a tile wider on both sides so a full-tile translate is a
+     seamless loop; the tile width differs per artwork. */
+  .stage-blueprint {
+    --stage-drift-tile: -768px;
+  }
+
+  .stage-night {
+    --stage-drift-tile: -640px;
+  }
+
+  .sidebar-stage-backdrop {
+    --stage-pointer-x: 50%;
+    --stage-pointer-y: 50%;
+    --stage-parallax-x: 0;
+    --stage-parallax-y: 0;
+  }
+
+  .sidebar-stage-backdrop .stage-glow-layer {
+    /* Stepped so the drift advances once a second instead of every vsync. A
+       continuous translate on this layer keeps the compositor producing a frame per
+       vsync for the whole session. One step is the artwork's tile over 190: ~4px on
+       .stage-blueprint (-768px), ~3.4px on .stage-night (-640px), on a layer that is a
+       blurred glow with no edge to read the jump against. Same technique as
+       ultrathink-rainbow, further down this file. */
+    animation: stage-drift 190s steps(190) infinite;
+    translate: calc(var(--stage-parallax-x) * 14px) calc(var(--stage-parallax-y) * 8px);
+    transition: translate 450ms cubic-bezier(0.2, 0.8, 0.3, 1);
+    will-change: transform;
+  }
+
+  .sidebar-stage-backdrop .stage-grid-layer {
+    translate: calc(var(--stage-parallax-x) * -6px) calc(var(--stage-parallax-y) * -3px);
+    transition: translate 550ms cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+
+  .sidebar-stage-backdrop .stage-breathe {
+    opacity: 0;
+    /* Stepped for the same reason as stage-drift: 48 holds of 0.0125 opacity each,
+       one a second, instead of an eased ramp repainted every vsync. */
+    animation: stage-breathe 48s steps(48) infinite alternate;
+    will-change: opacity;
+  }
+
+  .stage-spotlight {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    opacity: 0;
+    mix-blend-mode: screen;
+    transition: opacity 500ms ease;
+    background: radial-gradient(
+      180px 130px at var(--stage-pointer-x) var(--stage-pointer-y),
+      rgb(228 244 255 / 0.26) 0%,
+      rgb(150 195 255 / 0.11) 42%,
+      transparent 74%
+    );
+  }
+
+  .stage-motion-host:hover .stage-spotlight {
+    opacity: 1;
+  }
+
+  .stage-particles {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    font-family: var(--font-mono, ui-monospace), monospace;
+    color: rgb(232 240 255 / 0.72);
+  }
+
+  .stage-particles > span {
+    position: absolute;
+    display: block;
+    line-height: 1;
+    transform: translate3d(0, 0, 0);
+    will-change: transform;
+  }
+
+  @keyframes stage-drift {
+    to {
+      transform: translateX(var(--stage-drift-tile));
+    }
+  }
+
+  @keyframes stage-breathe {
+    to {
+      opacity: 0.6;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar-stage-backdrop .stage-glow-layer,
+    .sidebar-stage-backdrop .stage-breathe {
+      animation: none;
+    }
+
+    .sidebar-stage-backdrop .stage-glow-layer,
+    .sidebar-stage-backdrop .stage-grid-layer {
+      translate: none;
+    }
+
+    .stage-spotlight,
+    .stage-particles {
+      display: none;
+    }
   }
 
   .workspace-topbar {
@@ -797,7 +951,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(ch3-mobi
     /* header · you · agents — the lane fractions come from the board state
        (default an equal split; the divider drags them live). The agent lane
        is a peer of the human lane, not a footer. */
-    grid-template-rows: auto minmax(0, var(--kanban-user-fr, 1fr)) minmax(0, var(--kanban-agent-fr, 1fr));
+    grid-template-rows: auto minmax(0, var(--kanban-user-fr, 1fr)) minmax(
+        0,
+        var(--kanban-agent-fr, 1fr)
+      );
     display: grid;
     column-gap: 0.5rem;
     row-gap: 0;
@@ -1563,12 +1720,15 @@ label:has(> select#reasoning-effort) select {
 }
 
 .chat-markdown :not(pre) > code {
-  border: 1px solid var(--border);
   border-radius: 0.375rem;
-  background: var(--muted);
-  padding: 0.1rem 0.35rem;
+  background: color-mix(in srgb, var(--foreground) 6%, transparent);
+  padding: 0 0.25rem;
   color: var(--foreground);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.dark .chat-markdown :not(pre) > code {
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
 }
 
 .chat-markdown a.chat-markdown-file-link {
@@ -1849,7 +2009,9 @@ label:has(> select#reasoning-effort) select {
     linear-gradient(#000 0 0) content-box,
     linear-gradient(#000 0 0);
   mask-composite: exclude;
-  animation: ultrathink-rainbow 10s linear infinite;
+  /* Stepped (see the duty-cycled indicator note in @theme): the drift reads
+     the same at 4 discrete frames a second, without a paint per vsync. */
+  animation: ultrathink-rainbow 10s steps(40) infinite;
 }
 
 .ultrathink-frame > * {
@@ -1857,7 +2019,7 @@ label:has(> select#reasoning-effort) select {
 }
 
 .ultrathink-chroma {
-  animation: ultrathink-chroma-shift 10s linear infinite;
+  animation: ultrathink-chroma-shift 10s steps(40) infinite;
 }
 
 .ultrathink-pill {
@@ -1870,7 +2032,7 @@ label:has(> select#reasoning-effort) select {
   background-position:
     0 0,
     0% 50%;
-  animation: ultrathink-rainbow 10s linear infinite;
+  animation: ultrathink-rainbow 10s steps(40) infinite;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--card) 82%, transparent);
 }
 
@@ -1882,7 +2044,21 @@ label:has(> select#reasoning-effort) select {
   background-position: 0% 50%;
   background-clip: text;
   -webkit-background-clip: text;
-  animation: ultrathink-rainbow 10s linear infinite;
+  animation: ultrathink-rainbow 10s steps(40) infinite;
+}
+
+/* Reduced motion parks the decorative loops on their first frame. Unlayered
+   on purpose: it must override the Tailwind utility layer that emits
+   animate-spin and animate-skeleton, covering every spinner site at once. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin,
+  .animate-skeleton,
+  .ultrathink-frame::before,
+  .ultrathink-pill,
+  .ultrathink-word,
+  .ultrathink-chroma {
+    animation: none;
+  }
 }
 
 /* Composer chips are non-editable decorators, so the browser skips them when
@@ -1935,4 +2111,88 @@ label:has(> select#reasoning-effort) select {
 .kanban-scrollport {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--foreground) 25%, transparent) transparent;
+}
+
+/*
+ * CH3 brand mode ("ch3" theme): dark, re-hued around the CH3 purple.
+ * The theme is toggled as a `ch3` class on <html> alongside `dark` (see
+ * useTheme.ts); everything below only re-points existing tokens, so every
+ * component picks the brand up for free.
+ */
+:root.dark.ch3 {
+  --ch3-brand: #7d33ff;
+  --ch3-deep: #6932c8;
+  --ch3-glow: #ceb7f6;
+  --background: oklch(14.7% 0.021 295);
+  --app-chrome-background: var(--background);
+  --card: color-mix(in srgb, var(--background) 96%, var(--ch3-glow));
+  --popover: color-mix(in srgb, var(--background) 92%, var(--ch3-glow));
+  --primary: var(--ch3-brand);
+  --primary-foreground: var(--color-white);
+  --ring: var(--ch3-brand);
+  --secondary: color-mix(in srgb, var(--ch3-glow) 7%, transparent);
+  --muted: color-mix(in srgb, var(--ch3-glow) 6%, transparent);
+  --accent: color-mix(in srgb, var(--ch3-glow) 9%, transparent);
+  --border: color-mix(in srgb, var(--ch3-glow) 13%, transparent);
+  --input: color-mix(in srgb, var(--ch3-glow) 18%, transparent);
+  --muted-foreground: oklch(64% 0.032 292);
+  --app-scrollbar-thumb: color-mix(in srgb, var(--ch3-glow) 14%, transparent);
+  --app-scrollbar-thumb-hover: color-mix(in srgb, var(--ch3-glow) 22%, transparent);
+  --sidebar: var(--card);
+  --sidebar-control-surface: var(--muted);
+  --sidebar-row-hover: var(--accent);
+  --sidebar-row-active: var(--accent);
+  --sidebar-row-selected: var(--muted);
+  --sidebar-border: var(--border);
+  --sidebar-stage-fade: var(--card);
+}
+
+.dark.ch3 [data-sidebar-version="v1"],
+.dark.ch3 [data-sidebar-version="v2"] {
+  --background: oklch(12.8% 0.018 295);
+  --card: oklch(12.8% 0.018 295);
+  --foreground: #f2f0f9;
+  --accent: color-mix(in srgb, var(--ch3-glow) 11%, transparent);
+  --accent-foreground: #f7f4ff;
+  --muted: oklch(15.5% 0.02 295);
+  --muted-foreground: oklch(64% 0.032 292);
+  --border: color-mix(in srgb, var(--ch3-glow) 12%, transparent);
+  --input: color-mix(in srgb, var(--ch3-glow) 20%, transparent);
+  --sidebar: var(--card);
+  --sidebar-row-hover: color-mix(in srgb, var(--ch3-glow) 10%, transparent);
+  --sidebar-row-active: color-mix(in srgb, var(--ch3-glow) 15%, transparent);
+  --sidebar-row-selected: color-mix(in srgb, var(--ch3-glow) 9%, transparent);
+  --sidebar-border: var(--border);
+  --sidebar-stage-fade: var(--card);
+}
+
+/*
+ * Find in conversation. The browser paints these over the text it already
+ * rendered, which is what puts a highlight inside a Shiki code block without
+ * touching the highlighted HTML the markdown renderer caches. Every match is a
+ * soft amber; the one the reader is standing on is the saturated one, with its
+ * own foreground so it stays legible over a syntax colour in either theme.
+ */
+::highlight(find-in-thread) {
+  background-color: color-mix(in oklab, var(--warning) 32%, transparent);
+}
+
+::highlight(find-in-thread-active) {
+  background-color: var(--warning);
+  color: var(--color-neutral-950);
+}
+
+.dark.ch3 ::selection {
+  background: color-mix(in srgb, var(--ch3-brand) 45%, transparent);
+}
+
+/* The purple frame around the whole window — the brand mode's signature. */
+.dark.ch3 body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+  border: 4.5px solid var(--ch3-brand);
+  border-radius: 10px;
 }

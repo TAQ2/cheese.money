@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -10,6 +11,10 @@ import * as Electron from "electron";
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
+import { isClaudeOAuthSignInUrl } from "./claudeOAuthUrl.ts";
+import { consumeClaudeSignInEmail } from "./claudeSignInEmailHint.ts";
+import { attachClaudeSignInFlow } from "./claudeSignInFlow.ts";
+import { openClaudeSignInWindow } from "./claudeSignInWindow.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import { getDesktopUrl } from "../electron/ElectronProtocol.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
@@ -26,7 +31,6 @@ const TITLEBAR_DARK_SYMBOL_COLOR = "#f8fafc";
 const MAIN_WINDOW_BOUNDS_PERSIST_DEBOUNCE_MS = 500;
 // Long enough for the CLI's loopback success page to render before the
 // in-app OAuth child window closes itself.
-const CLAUDE_OAUTH_WINDOW_CLOSE_DELAY_MS = 1_500;
 const DEVELOPMENT_LOAD_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 const DEVELOPMENT_RETRYABLE_LOAD_ERROR_CODES = new Set([
   -2, // ERR_FAILED
@@ -161,30 +165,7 @@ function buildConnectingSplashDataUrl(shouldUseDarkColors: boolean): string {
  * The Claude OAuth page CH3 opens during account sign-in — the only
  * window.open target allowed to become an in-app child window. Everything
  * else keeps the deny-and-shell-out policy.
- *
- * The claude-agent-sdk issues the authorize URL from one of two hosts
- * depending on scope, and neither is `claude.ai` itself:
- *   - `platform.claude.com/oauth/authorize` — CONSOLE_AUTHORIZE_URL, the
- *     API-key/console scope.
- *   - `claude.com/cai/oauth/authorize` — CLAUDE_AI_AUTHORIZE_URL, the
- *     personal-subscription scope CH3's account sign-in actually uses.
- * (Confirmed against @anthropic-ai/claude-agent-sdk 0.3.170's own default
- * config.) `claude.ai/oauth` is kept too in case a future SDK version reverts
- * to it — matching it is free, since the check is host+path scoped either way.
  */
-export function isClaudeOAuthSignInUrl(rawUrl: string): boolean {
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol !== "https:") return false;
-    if (url.hostname === "claude.ai" && url.pathname.startsWith("/oauth")) return true;
-    if (url.hostname === "platform.claude.com" && url.pathname.startsWith("/oauth")) return true;
-    if (url.hostname === "claude.com" && url.pathname.startsWith("/cai/oauth")) return true;
-    return false;
-  } catch {
-    return false;
-  }
-}
-
 export function isSameOriginRendererNavigation(input: {
   readonly applicationUrl: string;
   readonly navigationUrl: string;
@@ -355,14 +336,12 @@ export const make = Effect.gen(function* () {
       minHeight: 620,
       show: false,
       autoHideMenuBar: true,
-      ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
       backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
       ...iconOption,
       title: environment.displayName,
       ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
       webPreferences: {
         preload: environment.preloadPath,
-        backgroundThrottling: false,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -370,9 +349,6 @@ export const make = Effect.gen(function* () {
       },
     });
 
-    if (environment.platform === "darwin") {
-      window.setAutoHideCursor(false);
-    }
     let boundsPersistFiber: Fiber.Fiber<void, never> | undefined;
     let pendingBoundsPersistFiber: Fiber.Fiber<void, never> | undefined;
     let boundsPersistenceEnabled = persistedBounds === null || restoredPersistedBounds;
@@ -527,44 +503,51 @@ export const make = Effect.gen(function* () {
       // The Claude account sign-in stays inside CH3: the accounts view has
       // no thread panel to host it, so the OAuth page opens as an app child
       // window instead of bouncing the user to an external browser.
+      //
+      // DENIED, then built by hand — deliberately, and this is the whole fix
+      // for signing a second account in and getting the first one back. A
+      // window Electron opens for `window.open` is created from the OPENER'S
+      // site instance and therefore shares the opener's session: the app's
+      // default cookie jar. The first sign-in left a `claude.ai` session cookie
+      // there, so every later one opened already authenticated as that person
+      // and completed OAuth into the wrong directory without a word.
+      //
+      // `overrideBrowserWindowOptions.webPreferences.partition` does NOT repair
+      // that. Electron only consults `partition` (and `session`) when it
+      // constructs a WebContents from scratch, and ignores both on this path —
+      // measured, not assumed, and re-measured by the window harness. Owning
+      // the construction is the only way to own the session.
       if (isClaudeOAuthSignInUrl(url)) {
-        return {
-          action: "allow",
-          overrideBrowserWindowOptions: {
-            width: 520,
-            height: 760,
-            autoHideMenuBar: true,
-            webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
-          },
-        };
+        // The hint is taken ONCE, here, rather than re-read per load: it
+        // belongs to this window, and leaving it pending would let a sign-in
+        // the user abandoned prefill the next one. Its expiry needs the clock,
+        // which is reached through Effect, so the window is built a tick later.
+        void runPromise(
+          Effect.gen(function* () {
+            const hint = consumeClaudeSignInEmail(DateTime.toEpochMillis(yield* DateTime.now));
+            openClaudeSignInWindow({
+              url,
+              // Everything that happens to the window afterwards — prefill,
+              // success detection, close — lives in claudeSignInFlow.ts so the
+              // live harness can run the same code against a fake page.
+              configure: (child) =>
+                runFork(
+                  attachClaudeSignInFlow({
+                    window: child,
+                    oauthUrl: url,
+                    hint,
+                    log: logWindowInfo,
+                  }),
+                ),
+            });
+          }),
+        );
+        return { action: "deny" };
       }
       if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
         void runPromise(electronShell.openExternal(url));
       }
       return { action: "deny" };
-    });
-    window.webContents.on("did-create-window", (child, details) => {
-      if (!isClaudeOAuthSignInUrl(details.url)) return;
-      // The flow ends on the CLI's loopback callback page; once the child
-      // lands there the sign-in is complete and the window has nothing left
-      // to say — close it after a beat so the success page registers.
-      child.webContents.on("did-navigate", (_event, navigatedUrl) => {
-        try {
-          const parsed = new URL(navigatedUrl);
-          if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") return;
-        } catch {
-          return;
-        }
-        runFork(
-          Effect.sleep(CLAUDE_OAUTH_WINDOW_CLOSE_DELAY_MS).pipe(
-            Effect.andThen(
-              Effect.sync(() => {
-                if (!child.isDestroyed()) child.close();
-              }),
-            ),
-          ),
-        );
-      });
     });
     window.webContents.on("will-navigate", (event, url) => {
       if (

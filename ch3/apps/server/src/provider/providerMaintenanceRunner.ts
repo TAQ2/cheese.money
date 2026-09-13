@@ -1,3 +1,38 @@
+/**
+ * Running a provider's own update command, and telling the truth about it.
+ *
+ * Two rules, both learned the hard way:
+ *
+ *   1. **The outcome comes from re-probing the provider, not from the exit
+ *      code.** See {@link providerUpdateOutcome} for why an updater that exits
+ *      0 proves nothing.
+ *   2. **A failed update fails.** This used to return a *success* carrying
+ *      `status: "failed"`, so every caller that branched on the error channel
+ *      thought it had worked — `ClaudeCliInstaller` had to ignore the result
+ *      outright, and the settings button reported a OpenCode update it never
+ *      installed. The recorded `updateState` and the returned channel now say
+ *      the same thing.
+ *
+ * The update subprocess inherits this server's environment and nothing else. In
+ * particular it is never handed the sealed GitHub token from
+ * `secrets/GithubTokenVault`: these are arbitrary third-party binaries (npm
+ * lifecycle scripts, Homebrew formulae, a vendor's own installer), the token is
+ * a CH3 org credential rather than a personal one, and `opencode upgrade`
+ * ignores `GITHUB_TOKEN`/`GH_TOKEN` anyway — so it would buy nothing for the
+ * one updater whose rate limit prompted the question. Any future exception is a
+ * per-mechanism decision that needs its own justification here.
+ *
+ * **That reasoning got stronger, not weaker, when the token gained write
+ * permissions.** It now carries `Contents`, `Issues` and `Pull requests` at
+ * read and write over five CH3 repositories, so handing it to a subprocess
+ * is handing that subprocess the ability to push branches, not merely to read.
+ * `contribution/GithubContributions` exists precisely so that the one feature
+ * needing those permissions gets them **inside this server process**, where the
+ * call is typed and the author is stamped, rather than by exporting `GH_TOKEN`
+ * into something's environment.
+ *
+ * @module providerMaintenanceRunner
+ */
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
@@ -25,6 +60,7 @@ import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import { enrichProviderSnapshotWithVersionAdvisory } from "./providerMaintenance.ts";
 import type { ProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
+import { resolveProviderUpdateOutcome } from "./providerUpdateOutcome.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 
@@ -167,18 +203,8 @@ function commandOutput(result: ProviderMaintenanceCommandResult): string | null 
   return truncateText(output, UPDATE_OUTPUT_MAX_BYTES);
 }
 
-function failureMessage(result: ProviderMaintenanceCommandResult): string {
-  if (result.timedOut) {
-    return "Update timed out.";
-  }
-  if (result.exitCode !== null && result.exitCode !== 0) {
-    return `Update command exited with code ${result.exitCode}.`;
-  }
-  return "Update command failed.";
-}
-
-function isOutdatedProvider(provider: ServerProvider | undefined): boolean {
-  return provider?.versionAdvisory?.status === "behind_latest";
+function hasCommandFailed(result: ProviderMaintenanceCommandResult): boolean {
+  return result.timedOut || (result.exitCode !== null && result.exitCode !== 0);
 }
 
 function makeUpdateState(input: {
@@ -322,8 +348,11 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
 
     const runProviderUpdate = Effect.fn("ProviderMaintenanceRunner.runProviderUpdate")(
       function* () {
+        // Records the outcome and hands it back, so the one decision about
+        // success and failure is made in a single place below rather than at
+        // every branch that finishes an update.
         const finish = (state: ServerProviderUpdateState) =>
-          setUpdateState(state).pipe(Effect.map((providers) => ({ providers })));
+          setUpdateState(state).pipe(Effect.map((providers) => ({ providers, state })));
         const startedAtRef = yield* Ref.make<string | null>(null);
 
         const runCommandAndVerify = Effect.fn("ProviderMaintenanceRunner.runCommandAndVerify")(
@@ -339,39 +368,43 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               }),
             );
 
+            // The version the person was looking at when they pressed the
+            // button. Read under the command lock so a serialized second update
+            // compares against what the first one left behind.
+            const snapshotBefore = (yield* providerRegistry.getProviders).find(
+              (candidate) => candidate.instanceId === instanceId,
+            );
+
             const result = yield* runMaintenanceCommand(update.executable, update.args);
             const finishedAt = yield* nowIso;
-            if (result.timedOut || result.exitCode !== 0) {
-              return yield* finish(
-                makeUpdateState({
-                  status: "failed",
-                  startedAt,
-                  finishedAt,
-                  message: failureMessage(result),
-                  output: commandOutput(result),
-                }),
-              );
-            }
+            // A non-zero exit is already the answer; re-probing a provider that
+            // never ran its updater only costs a `--version` to learn nothing.
+            const verifiedProviders = hasCommandFailed(result)
+              ? []
+              : (yield* verifyRefreshedProvider(provider, capabilities, instanceId))
+                  .verifiedProviders;
+            const snapshotAfter = verifiedProviders[0];
+            const outcome = resolveProviderUpdateOutcome({
+              command: result,
+              probe: hasCommandFailed(result)
+                ? null
+                : {
+                    verified: snapshotAfter !== undefined,
+                    versionBefore: snapshotBefore?.version ?? null,
+                    versionAfter: snapshotAfter?.version ?? null,
+                    installedBefore: snapshotBefore?.installed ?? false,
+                    installedAfter: snapshotAfter?.installed ?? false,
+                    advisoryStatus: snapshotAfter?.versionAdvisory?.status ?? "unknown",
+                  },
+              manualCommand: update.command,
+            });
 
-            const { verifiedProviders } = yield* verifyRefreshedProvider(
-              provider,
-              capabilities,
-              instanceId,
-            );
-            const couldNotVerify = verifiedProviders.length === 0;
-            const stillOutdated =
-              couldNotVerify ||
-              verifiedProviders.some((verifiedProvider) => isOutdatedProvider(verifiedProvider));
             return yield* finish(
               makeUpdateState({
-                status: stillOutdated ? "unchanged" : "succeeded",
+                status: outcome.status,
                 startedAt,
                 finishedAt,
-                message: couldNotVerify
-                  ? "Update command completed, but CH3 could not verify the provider version."
-                  : stillOutdated
-                    ? "Update command completed, but CH3 still detects an outdated provider version."
-                    : "Provider updated.",
+                message: outcome.message,
                 output: commandOutput(result),
               }),
             );
@@ -394,7 +427,20 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
           },
         );
 
-        return yield* runCommandAndVerify().pipe(Effect.catchCause(recordFailedUpdate));
+        const settled = yield* runCommandAndVerify().pipe(Effect.catchCause(recordFailedUpdate));
+        // The recorded state is the whole truth, so the caller's channel must
+        // agree with it. Returning a success that carries `status: "failed"` is
+        // what made `ClaudeCliInstaller` ignore this runner's result entirely,
+        // and what let the settings button report a OpenCode update it never
+        // installed. `unchanged` stays a success: nothing was owed, or nothing
+        // could be verified, and neither is an error to report.
+        if (settled.state.status === "failed") {
+          return yield* new ServerProviderUpdateError({
+            provider,
+            reason: settled.state.message ?? "The provider update did not finish.",
+          });
+        }
+        return { providers: settled.providers } satisfies ServerProviderUpdatedPayload;
       },
     );
 

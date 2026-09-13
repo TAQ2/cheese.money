@@ -5,6 +5,7 @@ import {
   TurnId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type RuntimeErrorClass,
 } from "@ch3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -66,6 +67,7 @@ function makeReadModel(
       readonly runtimeMode: "approval-required" | "full-access" | "auto-accept-edits";
       readonly activeTurnId: TurnId | null;
       readonly lastError: string | null;
+      readonly lastErrorClass: RuntimeErrorClass | null;
       readonly updatedAt: string;
     } | null;
   }>,
@@ -162,6 +164,7 @@ describe("ProviderSessionReaper", () => {
       mcpServerAction: () => unsupported(),
       listRewindTargets: () => unsupported(),
       rewindFiles: () => unsupported(),
+      reattachSessions: () => Effect.succeed([]),
       listSessions: () => Effect.succeed([]),
       getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
       getInstanceInfo: (instanceId) => {
@@ -198,6 +201,7 @@ describe("ProviderSessionReaper", () => {
         Layer.succeed(ProjectionSnapshotQuery, {
           getCommandReadModel: () => Effect.die("unused"),
           getSnapshot: () => Effect.die("unused"),
+          listProjects: () => Effect.die("this test should not list projects"),
           getShellSnapshot: () => Effect.die("unused"),
           getArchivedShellSnapshot: () => Effect.die("unused"),
           getSnapshotSequence: () =>
@@ -216,6 +220,7 @@ describe("ProviderSessionReaper", () => {
             ),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshot: () => Effect.die("unused"),
+          getThreadActivitiesPage: () => Effect.die("unused"),
           searchThreads: () => Effect.succeed({ matches: [] }),
         }),
       ),
@@ -240,6 +245,7 @@ describe("ProviderSessionReaper", () => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
         },
@@ -290,6 +296,7 @@ describe("ProviderSessionReaper", () => {
             runtimeMode: "full-access",
             activeTurnId: turnId,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
         },
@@ -339,6 +346,7 @@ describe("ProviderSessionReaper", () => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
         },
@@ -388,6 +396,7 @@ describe("ProviderSessionReaper", () => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
         },
@@ -438,6 +447,7 @@ describe("ProviderSessionReaper", () => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
         },
@@ -450,6 +460,7 @@ describe("ProviderSessionReaper", () => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
         },
@@ -526,6 +537,7 @@ describe("ProviderSessionReaper", () => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
         },
@@ -538,6 +550,7 @@ describe("ProviderSessionReaper", () => {
             runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
+            lastErrorClass: null,
             updatedAt: now,
           },
         },

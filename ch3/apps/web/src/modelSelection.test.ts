@@ -1,7 +1,14 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@ch3tools/contracts";
 import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@ch3tools/contracts/settings";
-import { describe, expect, it } from "vite-plus/test";
-import { deriveProviderInstanceEntries } from "./providerInstances";
+
+/** What the Claude instance falls back to when nothing else names a model. */
+const CLAUDE_DEFAULT_MODEL = "claude-sonnet-5";
+import { beforeEach, describe, expect, it } from "vite-plus/test";
+import {
+  deriveProviderInstanceEntries,
+  getDefaultProviderInstanceModel,
+} from "./providerInstances";
+import { deriveEffectiveComposerModelState } from "./composerDraftStore";
 import {
   getAppModelOptionsForInstance,
   resolveAppModelSelectionForInstance,
@@ -134,24 +141,26 @@ describe("instance-scoped model selection", () => {
     ).toBe("opus");
   });
 
-  it("includes Grok custom models from the selected provider instance", () => {
-    const providers = [provider({ provider: ProviderDriverKind.make("grok"), instanceId: "grok" })];
+  it("includes custom models from the selected provider instance", () => {
+    const providers = [
+      provider({ provider: ProviderDriverKind.make("opencode"), instanceId: "opencode" }),
+    ];
     const settings: UnifiedSettings = {
       ...settingsWithProviderInstances(),
       providerInstances: {
         ...settingsWithProviderInstances().providerInstances,
-        [ProviderInstanceId.make("grok")]: {
-          driver: ProviderDriverKind.make("grok"),
-          config: { customModels: ["grok-test-custom-model"] },
+        [ProviderInstanceId.make("opencode")]: {
+          driver: ProviderDriverKind.make("opencode"),
+          config: { customModels: ["maple/test-custom-model"] },
         },
       },
     };
-    const grok = deriveProviderInstanceEntries(providers).find(
-      (entry) => entry.instanceId === "grok",
+    const maple = deriveProviderInstanceEntries(providers).find(
+      (entry) => entry.instanceId === "opencode",
     )!;
 
-    expect(getAppModelOptionsForInstance(settings, grok).map((option) => option.slug)).toContain(
-      "grok-test-custom-model",
+    expect(getAppModelOptionsForInstance(settings, maple).map((option) => option.slug)).toContain(
+      "maple/test-custom-model",
     );
   });
 
@@ -301,5 +310,169 @@ describe("instance-scoped model selection", () => {
       instanceId: ProviderInstanceId.make("claude_openrouter"),
       model: "openai/gpt-5.5",
     });
+  });
+});
+
+/**
+ * A model may be *chosen* in a conversation, never *inherited* as a default.
+ * A project whose saved default names one — because it was derived from
+ * whatever the settings resolved to when the project was added, or written
+ * back from an earlier thread — must not open every later conversation on it.
+ */
+describe("a new conversation opens on the tier default", () => {
+  const claudeInstance = ProviderInstanceId.make("claudeAgent");
+  const claudeDriver = ProviderDriverKind.make("claudeAgent");
+  const premiumCatalogue = [
+    provider({
+      provider: claudeDriver,
+      instanceId: "claudeAgent",
+      models: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+    }),
+  ];
+
+  const resolve = (
+    projectModel: string | null,
+    threadModel: string | null,
+    tier: "top" | "standard",
+  ) =>
+    deriveEffectiveComposerModelState({
+      draft: undefined,
+      providers: premiumCatalogue,
+      selectedProvider: claudeDriver,
+      selectedInstanceId: claudeInstance,
+      threadModelSelection: threadModel ? { instanceId: claudeInstance, model: threadModel } : null,
+      projectModelSelection: projectModel
+        ? { instanceId: claudeInstance, model: projectModel }
+        : null,
+      settings: DEFAULT_UNIFIED_SETTINGS,
+    }).selectedModel;
+
+  it("ignores a project default that names the Premium metered model", () => {
+    expect(resolve("claude-fable-5-1", null, "top")).toBe("claude-sonnet-5");
+  });
+
+  it("ignores a project default that names the Standard metered model", () => {
+    expect(resolve("claude-opus-5", null, "standard")).toBe("claude-sonnet-5");
+  });
+
+  it("ignores a project default that names a freely selectable model", () => {
+    // Opus 5 needs no dialog on the Premium tier, and that is exactly why it
+    // used to survive as a project default and open every later conversation.
+    expect(resolve("claude-opus-5", null, "top")).toBe("claude-sonnet-5");
+  });
+
+  it("ignores an inherited thread selection on a thread that has not started", () => {
+    // CH3 seeds a new draft's selection from the project default, so a
+    // thread-level model is just as inherited as a project-level one until
+    // somebody picks it in the composer.
+    expect(resolve("claude-fable-5-1", "claude-fable-5-1", "top")).toBe("claude-sonnet-5");
+  });
+
+  it("keeps a model the person picked in this conversation", () => {
+    // A deliberate pick lands in the draft's own selection, which outranks any
+    // inherited default.
+    const state = deriveEffectiveComposerModelState({
+      draft: {
+        modelSelectionByProvider: {
+          [claudeInstance]: { instanceId: claudeInstance, model: "claude-fable-5-1" },
+        },
+      } as never,
+      providers: premiumCatalogue,
+      selectedProvider: claudeDriver,
+      selectedInstanceId: claudeInstance,
+      threadModelSelection: null,
+      projectModelSelection: null,
+      settings: DEFAULT_UNIFIED_SETTINGS,
+    });
+    expect(state.selectedModel).toBe("claude-fable-5-1");
+  });
+});
+
+/**
+ * A conversation that has run keeps the model it ran on — through a restart,
+ * through a reopen, and through the catalogue retiring that model's slug.
+ * The thread's record is the truth; the chip and the next turn follow it.
+ */
+describe("a started conversation keeps its recorded model", () => {
+  const claudeInstance = ProviderInstanceId.make("claudeAgent");
+  const claudeDriver = ProviderDriverKind.make("claudeAgent");
+  const premiumCatalogue = [
+    provider({
+      provider: claudeDriver,
+      instanceId: "claudeAgent",
+      models: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+    }),
+  ];
+
+  const resolve = (threadModel: string) =>
+    deriveEffectiveComposerModelState({
+      // No draft: the store on this machine knows nothing about the thread,
+      // which is what a restart, another device, or a thread from before the
+      // draft record existed all look like.
+      draft: undefined,
+      providers: premiumCatalogue,
+      selectedProvider: claudeDriver,
+      selectedInstanceId: claudeInstance,
+      threadModelSelection: { instanceId: claudeInstance, model: threadModel },
+      projectModelSelection: null,
+      settings: DEFAULT_UNIFIED_SETTINGS,
+      threadHasStarted: true,
+    }).selectedModel;
+
+  it("reopens on the metered model it ran on, not the tier default", () => {
+    expect(resolve("claude-fable-5-1")).toBe("claude-fable-5-1");
+  });
+
+  it("carries a retired slug forward to its successor instead of falling to the default", () => {
+    // Thirty-seven threads on one machine recorded `claude-fable-5` before the
+    // catalogue swapped in 5.1. Each reopened on Sonnet, and Fable could not be
+    // picked back because the ceiling judged the switch from Sonnet.
+    expect(resolve("claude-fable-5")).toBe("claude-fable-5-1");
+  });
+});
+
+/**
+ * Why anything that shows a model before the composer mounts must write it.
+ *
+ * A screen that displays `getDefaultProviderInstanceModel` and lets the
+ * composer independently derive its own answer on mount has two derivations of
+ * "what model will this conversation open on", which is one too many. Whatever
+ * shows the model commits it into the draft, and the draft outranks both.
+ */
+describe("the model a launcher shows and the model a conversation opens on", () => {
+  const claudeInstance = ProviderInstanceId.make("claudeAgent");
+  const claudeDriver = ProviderDriverKind.make("claudeAgent");
+  const catalogue = [
+    provider({
+      provider: claudeDriver,
+      instanceId: "claudeAgent",
+      models: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+    }),
+  ];
+
+  it("takes the provider's leading model when nothing is flagged as default", () => {
+    // Server order decides when no model carries `isDefault`.
+    expect(getDefaultProviderInstanceModel(catalogue, claudeInstance)).toBe("claude-fable-5-1");
+  });
+
+  it("a model written into the draft is the model that runs", () => {
+    for (const picked of ["claude-opus-5", "claude-sonnet-5"] as const) {
+      expect(
+        deriveEffectiveComposerModelState({
+          draft: {
+            activeProvider: claudeInstance,
+            modelSelectionByProvider: {
+              [claudeInstance]: { instanceId: claudeInstance, model: picked },
+            },
+          },
+          providers: catalogue,
+          selectedProvider: claudeDriver,
+          selectedInstanceId: claudeInstance,
+          threadModelSelection: null,
+          projectModelSelection: null,
+          settings: DEFAULT_UNIFIED_SETTINGS,
+        }).selectedModel,
+      ).toBe(picked);
+    }
   });
 });

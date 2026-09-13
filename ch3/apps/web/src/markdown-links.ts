@@ -187,6 +187,9 @@ export function resolveMarkdownFileLinkTarget(
 }
 
 const INLINE_CODE_DISQUALIFIER_PATTERN = /[\s`]/;
+// A backtick is never part of a path, whatever the span came from; a space is
+// only disqualifying inside inline code.
+const INLINE_CODE_BACKTICK_PATTERN = /`/;
 const PATH_SEPARATOR_PATTERN = /[\\/]/;
 const FILE_EXTENSION_PATTERN = /\.[A-Za-z0-9_-]+$/;
 const NUMERIC_DOTTED_PATTERN = /^\d+(?:\.\d+)+$/;
@@ -314,8 +317,38 @@ export function resolveInlineCodeFileLinkMeta(
   codeText: string,
   cwd?: string,
 ): MarkdownFileLinkMeta | null {
+  return resolveFileLinkMetaFromSpan(codeText, cwd, { allowSpaces: false });
+}
+
+/**
+ * The same resolution for a path the prose detector found, where a space is
+ * evidence rather than a disqualifier.
+ *
+ * Inline code refuses whitespace because a span is usually an identifier or a
+ * command, and `git status` is not a file. A prose match has already earned
+ * more than that: it is anchored on an allowlisted extension, scanned back to
+ * an opening slash, holds no newline and is length-bounded. Refusing it for
+ * its spaces threw away the only paths the backwards scan exists for — the
+ * `/Users/me/CH3 Repos/iOS Alt-Data Program — CCRs/brief.md` shape — which
+ * were detected, resolved to null, and then rendered as raw text.
+ */
+export function resolveProseFileLinkMeta(
+  pathText: string,
+  cwd?: string,
+): MarkdownFileLinkMeta | null {
+  return resolveFileLinkMetaFromSpan(pathText, cwd, { allowSpaces: true });
+}
+
+function resolveFileLinkMetaFromSpan(
+  codeText: string,
+  cwd: string | undefined,
+  options: { readonly allowSpaces: boolean },
+): MarkdownFileLinkMeta | null {
   const trimmed = codeText.trim();
-  if (trimmed.length === 0 || INLINE_CODE_DISQUALIFIER_PATTERN.test(trimmed)) return null;
+  const disqualifier = options.allowSpaces
+    ? INLINE_CODE_BACKTICK_PATTERN
+    : INLINE_CODE_DISQUALIFIER_PATTERN;
+  if (trimmed.length === 0 || disqualifier.test(trimmed)) return null;
 
   // Windows drive/UNC paths keep their backslashes; any other backslashes are
   // relative Windows-style paths, which neither the shape checks nor the

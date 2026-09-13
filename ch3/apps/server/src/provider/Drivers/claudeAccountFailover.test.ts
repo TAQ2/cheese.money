@@ -12,8 +12,8 @@ const personal = (
 ): ClaudeAccountProfile => ({
   homePath: "/Users/conradws/.claude",
   displayPath: "~/.claude",
-  email: "conrad@baubap.com",
-  organizationName: "conrad@baubap.com's Organization",
+  email: "conrad@example.com",
+  organizationName: "conrad@example.com's Organization",
   subscriptionLabel: "Claude Max Subscription",
   isCurrent,
   isDefaultHome: true,
@@ -26,8 +26,8 @@ const work = (
 ): ClaudeAccountProfile => ({
   homePath: "/Users/conradws/.claude-work",
   displayPath: "~/.claude-work",
-  email: "conrad@baubap.com",
-  organizationName: "Baubap",
+  email: "conrad@example.com",
+  organizationName: "CH3",
   subscriptionLabel: "Claude Max Subscription",
   isCurrent,
   isDefaultHome: false,
@@ -67,7 +67,7 @@ describe("Claude account failover", () => {
       work({ sessionPercent: 99, weekPercent: 80 }, true),
     ]);
     expect(decision?.homePath).toBe("");
-    expect(decision?.to.organizationName).toBe("conrad@baubap.com's Organization");
+    expect(decision?.to.organizationName).toBe("conrad@example.com's Organization");
   });
 
   it("stays put while the current account still has room", () => {
@@ -126,7 +126,7 @@ describe("Claude account failover", () => {
     const third: ClaudeAccountProfile = {
       homePath: "/Users/conradws/.claude-third",
       displayPath: "~/.claude-third",
-      email: "conrad@baubap.com",
+      email: "conrad@example.com",
       organizationName: "Third",
       isCurrent: false,
       isDefaultHome: false,

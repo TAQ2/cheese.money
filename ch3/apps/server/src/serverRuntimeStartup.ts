@@ -1,7 +1,6 @@
 import {
   CommandId,
   DEFAULT_MODEL,
-  DEFAULT_PROVIDER_INTERACTION_MODE,
   type ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -29,11 +28,16 @@ import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngi
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationReactor from "./orchestration/Services/OrchestrationReactor.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
+import { DEFAULT_SERVER_SETTINGS } from "@ch3tools/contracts/settings";
 import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
+import * as TurnStallWatchdog from "./provider/Services/TurnStallWatchdog.ts";
+import { reconcileOrphanedSessionsAtStartup } from "./orchestration/Layers/StartupSessionReconcile.ts";
+import { reconcileOpenTasks } from "./orchestration/Layers/TaskReconciler.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -184,6 +188,13 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
   const projectionReadModelQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
   const path = yield* Path.Path;
+  // The bootstrap thread is a new thread like any other, so it starts on the
+  // configured new-thread defaults. Unreadable settings fall back to the
+  // shipped defaults rather than failing the boot.
+  const settings = yield* ServerSettings.ServerSettingsService.pipe(
+    Effect.flatMap((service) => service.getSettings),
+    Effect.catch(() => Effect.succeed(DEFAULT_SERVER_SETTINGS)),
+  );
 
   let bootstrapProjectId: ProjectId | undefined;
   let bootstrapThreadId: ThreadId | undefined;
@@ -228,8 +239,8 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
           projectId: nextProjectId,
           title: "New thread",
           modelSelection: nextProjectDefaultModelSelection,
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "full-access",
+          interactionMode: settings.defaultInteractionMode,
+          runtimeMode: settings.defaultRuntimeMode,
           branch: null,
           worktreePath: null,
           createdAt,
@@ -293,6 +304,8 @@ export const make = Effect.gen(function* () {
   const keybindings = yield* Keybindings.Keybindings;
   const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
   const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
+  const providerService = yield* ProviderService.ProviderService;
+  const turnStallWatchdog = yield* TurnStallWatchdog.TurnStallWatchdog;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -337,12 +350,52 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+    // Before the reactors, in two steps. First, every Claude CLI a keeper
+    // carried through the restart is reattached: its session is rebuilt, its
+    // turn continues, its rows stay "Working" because they are. Then every
+    // other session still "running" in the projection — a process that did
+    // not survive — is settled, so the first reconnecting client sees an
+    // interrupted turn with a banner that says what to do, not a lie.
+    yield* Effect.logDebug("startup phase: reattaching sessions that outlived the previous server");
+    const reattached = yield* runStartupPhase(
+      "sessions.reattach",
+      providerService.reattachSessions().pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("failed to reattach sessions that outlived the previous server", {
+            cause,
+          }).pipe(Effect.as([] as ReadonlyArray<ThreadId>)),
+        ),
+      ),
+    );
+    // Only now is it known which threads actually came back. The task rows a
+    // previous server left open belong to the rest.
+    yield* runStartupPhase(
+      "tasks.reconcile",
+      reconcileOpenTasks(new Set<string>(reattached)).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("orchestration.taskReconciler.failed", { cause }).pipe(Effect.as(0)),
+        ),
+      ),
+    );
+    yield* Effect.logDebug("startup phase: settling sessions the previous server left running");
+    yield* runStartupPhase(
+      "sessions.reconcile",
+      reconcileOrphanedSessionsAtStartup({ except: new Set(reattached) }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("failed to settle sessions the previous server left running", {
+            cause,
+          }),
+        ),
+      ),
+    );
+
     yield* Effect.logDebug("startup phase: starting orchestration reactors");
     yield* runStartupPhase(
       "reactors.start",
       Effect.gen(function* () {
         yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
         yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+        yield* turnStallWatchdog.start().pipe(Scope.provide(reactorScope));
       }),
     );
 

@@ -1,5 +1,7 @@
 /**
- * ClaudeSkills — filesystem discovery of Claude Code skills for the `$` picker.
+ * ClaudeSkills — filesystem discovery of the Claude Code config directory for
+ * the pickers the Agent SDK init handshake cannot fill on its own: skills for
+ * the `$` picker, and response styles for the composer chip.
  *
  * Claude Code loads skills from `<config dir>/skills` (user scope) and
  * `<cwd>/.claude/skills` (project scope), one directory per skill with a
@@ -7,6 +9,10 @@
  * skills only as slash commands without their filesystem paths, so the
  * provider snapshot scans the same locations directly, mirroring how the
  * Codex app-server reports its skills.
+ *
+ * Response styles are a `<config dir>/output-styles/<file>.md` each, and are
+ * scanned for the harder reason that the handshake stopped reporting them at
+ * all — see `discoverClaudeOutputStyles`.
  *
  * @module provider/Drivers/ClaudeSkills
  */
@@ -24,25 +30,65 @@ type ClaudeSkillScope = "user" | "project";
 
 const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
-type SkillFrontmatter =
+export type SkillFrontmatter =
+  /** No `---` block at all. */
   | { readonly kind: "missing" }
-  | { readonly kind: "malformed" }
+  /**
+   * The block is not valid YAML. `name` is whatever a line-wise read could
+   * still recover, because the CLI's own reader is lenient where `yaml.parse`
+   * is strict — see `recoverFrontmatterField`.
+   */
+  | { readonly kind: "malformed"; readonly name?: string }
   | { readonly kind: "parsed"; readonly name?: string; readonly description?: string };
 
-function parseSkillFrontmatter(contents: string): SkillFrontmatter {
+/**
+ * Read one `key: value` line out of a frontmatter block that failed to parse.
+ *
+ * A bare `: ` inside an unquoted value ("Levels: lite, full, ultra") is the
+ * common way these blocks break, and it takes the whole document down with it
+ * even though every other line is fine. Claude Code still loads such a file
+ * (verified against CLI 2.1.263), so refusing to read anything out of it makes
+ * CH3 hide assets that work. Only top-level, unindented keys are considered.
+ */
+function recoverFrontmatterField(block: string, key: string): string | undefined {
+  const pattern = new RegExp(`^${key}:[ \\t]*(.*)$`, "m");
+  const raw = pattern.exec(block)?.[1]?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  // Strip a surrounding quote pair; anything else is taken verbatim.
+  const unquoted = /^(["'])([\s\S]*)\1$/.exec(raw);
+  const value = (unquoted?.[2] ?? raw).trim();
+  return value.length > 0 ? value : undefined;
+}
+
+/**
+ * The `name` and `description` a skill declares, or why they could not be read.
+ *
+ * Exported because the skills catalogue answers the same question about the
+ * same file shape, and two parsers for one frontmatter would disagree the day
+ * one of them learned something.
+ */
+export function parseSkillFrontmatter(contents: string): SkillFrontmatter {
   const match = FRONTMATTER_PATTERN.exec(contents);
   if (!match) {
     return { kind: "missing" };
   }
 
+  const block = match[1] ?? "";
+  const malformed = (): SkillFrontmatter => {
+    const recovered = recoverFrontmatterField(block, "name");
+    return { kind: "malformed", ...(recovered ? { name: recovered } : {}) };
+  };
+
   let parsed: unknown;
   try {
-    parsed = parseYamlDocument(match[1] ?? "");
+    parsed = parseYamlDocument(block);
   } catch {
-    return { kind: "malformed" };
+    return malformed();
   }
   if (typeof parsed !== "object" || parsed === null) {
-    return { kind: "malformed" };
+    return malformed();
   }
 
   const record = parsed as Record<string, unknown>;
@@ -61,7 +107,7 @@ function parseSkillFrontmatter(contents: string): SkillFrontmatter {
  * `CLAUDE_CONFIG_DIR` by `makeClaudeEnvironment`), then a `CLAUDE_CONFIG_DIR`
  * already present in the process environment, then `~/.claude`.
  */
-const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(function* (
+export const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(function* (
   config: Pick<ClaudeSettings, "homePath">,
   environment: NodeJS.ProcessEnv,
   cwd?: string,
@@ -120,13 +166,12 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
       }
 
       const frontmatter = parseSkillFrontmatter(contents);
-      // Malformed frontmatter means the skill won't load in Claude Code
-      // either — skip it rather than surfacing a broken entry under its
-      // directory name.
-      if (frontmatter.kind === "malformed") {
-        continue;
-      }
-
+      // Malformed frontmatter does NOT stop Claude Code from loading the
+      // skill: CLI 2.1.263 registers it under its DIRECTORY name, ignoring
+      // whatever `name:` the broken block claims. Skipping it here (as this
+      // did) hid working skills from the `$` picker, so mirror the CLI and
+      // fall back to the directory name — the same thing an absent
+      // frontmatter block already does.
       const name = (frontmatter.kind === "parsed" ? frontmatter.name : undefined) ?? entry.trim();
       if (!name) {
         continue;
@@ -145,4 +190,88 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
   }
 
   return [...skillsByName.values()].sort((left, right) => left.name.localeCompare(right.name));
+});
+
+/**
+ * Response styles the CLI compiles into its own binary.
+ *
+ * Listed first so the discovered order matches what `available_output_styles`
+ * used to report, and `default` is present for the same reason the composer
+ * chip needs it: it is the CLI's own no-style style, the entry the chip shows
+ * when the thread has picked nothing. The other three are filtered out by the
+ * web layer's `HIDDEN_OUTPUT_STYLES`, but reporting them keeps that array the
+ * single place that decides what the menu hides.
+ */
+const BUILT_IN_CLAUDE_OUTPUT_STYLES: ReadonlyArray<string> = [
+  "default",
+  "Explanatory",
+  "Learning",
+  "Proactive",
+];
+
+/**
+ * Enumerate Claude Code response styles from `<config dir>/output-styles`.
+ *
+ * The SDK init handshake carried these in `available_output_styles`, and CLI
+ * 2.1.263 no longer sends the field at all (verified against the shipped
+ * binary and through the SDK's own `initializationResult()`). The provider
+ * treated an absent list as "no styles", which hides the composer's style chip
+ * outright — so every style the user wrote silently disappeared from CH3 while
+ * still working perfectly in the CLI. Scanning the directory the CLI itself
+ * reads is what makes the picker independent of a field the CLI may or may not
+ * send.
+ *
+ * A style is identified by its frontmatter `name`, NOT by its filename: the
+ * CLI resolves `outputStyle: "Simplified Technical English"` and rejects
+ * `simplified-technical-english` for the same file. Files without a usable
+ * name fall back to the filename stem, matching how skills fall back to their
+ * directory name. Discovery is best-effort — an unreadable directory yields
+ * the built-ins alone rather than failing the snapshot.
+ */
+export const discoverClaudeOutputStyles = Effect.fn("discoverClaudeOutputStyles")(function* (
+  config: Pick<ClaudeSettings, "homePath">,
+  cwd?: string,
+  environment?: NodeJS.ProcessEnv,
+): Effect.fn.Return<ReadonlyArray<string>, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const configDirPath = yield* resolveClaudeConfigDirPath(config, environment ?? process.env, cwd);
+  const stylesDirectory = path.join(configDirPath, "output-styles");
+
+  const entries = yield* fileSystem
+    .readDirectory(stylesDirectory)
+    .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+
+  // The CLI matches style names case-insensitively, so a file whose name only
+  // differs in case from one already taken is that same style, not a second
+  // entry offering it twice.
+  const seen = new Set<string>(BUILT_IN_CLAUDE_OUTPUT_STYLES.map((style) => style.toLowerCase()));
+  const discovered: Array<string> = [];
+  for (const entry of [...entries].sort()) {
+    if (!entry.toLowerCase().endsWith(".md")) {
+      continue;
+    }
+    const contents = yield* fileSystem
+      .readFileString(path.join(stylesDirectory, entry))
+      .pipe(Effect.orElseSucceed(() => undefined));
+    if (contents === undefined) {
+      continue;
+    }
+
+    // Unlike skills, a style with a broken block keeps its declared name —
+    // CLI 2.1.263 resolves `outputStyle: "ZZ Probe Colon"` for a file whose
+    // YAML does not parse, and never accepts the filename stem in its place.
+    // So take the recovered name first and only then the stem.
+    const frontmatter = parseSkillFrontmatter(contents);
+    const name =
+      (frontmatter.kind === "missing" ? undefined : frontmatter.name) ?? entry.slice(0, -3).trim();
+    const key = name.toLowerCase();
+    if (!name || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    discovered.push(name);
+  }
+
+  return [...BUILT_IN_CLAUDE_OUTPUT_STYLES, ...discovered];
 });

@@ -694,10 +694,35 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         classifiedAt: null,
         classifiedTurnId: null,
         agentWorkingUntil: null,
+        agentWorkingSince: null,
       };
       // A pinned card belongs to the user: the classifier may refresh the
       // generated summary but must never move it or retype it.
       const classifierBlockedByPin = command.source === "classifier" && existing.pinned;
+      const nextAgentWorkingUntil =
+        command.source !== "classifier" && command.agentWorkingUntil !== undefined
+          ? command.agentWorkingUntil
+          : (existing.agentWorkingUntil ?? null);
+      // The lease's expiry slides forward on every renewal, so it cannot say
+      // when the run began — only that it has not ended. This is that missing
+      // half, and it is what lets a leased row count up like a session-backed
+      // one instead of sitting on a bare "Working".
+      //
+      // A lease that already LAPSED and is being claimed again is new work, so
+      // it gets a new stamp: comparing against `occurredAt` rather than just
+      // testing for a previous value is what separates a renewal from a
+      // restart. `Date.parse` on both sides, as the snooze guard above does —
+      // a malformed stored value falls through to a fresh stamp rather than
+      // freezing the clock at an unreadable timestamp.
+      const leaseAlreadyHeld =
+        existing.agentWorkingUntil != null &&
+        Date.parse(existing.agentWorkingUntil) > Date.parse(occurredAt);
+      const nextAgentWorkingSince =
+        nextAgentWorkingUntil === null
+          ? null
+          : leaseAlreadyHeld
+            ? (existing.agentWorkingSince ?? occurredAt)
+            : occurredAt;
       const kanban = {
         stage:
           command.stage !== undefined && !classifierBlockedByPin ? command.stage : existing.stage,
@@ -721,10 +746,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         // Ownership is asserted by whoever launched the work, so the
         // classifier — which only reads the conversation — must never clear a
         // lease held by a run it cannot see.
-        agentWorkingUntil:
-          command.source !== "classifier" && command.agentWorkingUntil !== undefined
-            ? command.agentWorkingUntil
-            : (existing.agentWorkingUntil ?? null),
+        agentWorkingUntil: nextAgentWorkingUntil,
+        // Derived here rather than accepted from the command, so a renewal
+        // that does not mention it cannot reset the clock it is renewing.
+        agentWorkingSince: nextAgentWorkingSince,
       };
       return {
         ...(yield* withEventBase({
@@ -926,6 +951,61 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [...lifecycleResetEvents, userMessageEvent, turnStartRequestedEvent];
     }
 
+    case "thread.turn.retry": {
+      const targetThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const message = targetThread.messages.find((entry) => entry.id === command.messageId);
+      if (!message || message.role !== "user") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `User message '${command.messageId}' does not exist on thread '${command.threadId}'.`,
+        });
+      }
+      // Only the message still waiting at the end of the thread may be retried.
+      // Anything after it means the attempt is spent: an assistant reply means
+      // the turn did run, and a newer user message means the person gave up and
+      // retyped — re-dispatching either sends work nobody asked for twice. A
+      // failed-turn row stays on screen forever, so without this a days-old
+      // failure is one click away from starting a turn on a thread that has
+      // moved on.
+      const last = targetThread.messages.at(-1);
+      if (last === undefined || last.id !== command.messageId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `User message '${command.messageId}' is not the latest message on thread '${command.threadId}'; its turn cannot be retried.`,
+        });
+      }
+      // `modelSelection` is deliberately absent below: the reactor falls back
+      // to `thread.modelSelection`, which is the thread's own model, and a
+      // thread keeps its model across a retry exactly as across a restart.
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          // The seed the first attempt carried, resolved the same way an
+          // ordinary send resolves it — the client sends the thread's current
+          // title as the seed (`ChatView.tsx:2905`). Without it a retried first
+          // turn keeps the raw prompt as its title forever, because
+          // `canReplaceThreadTitle` only replaces a title that is still the
+          // default or still equal to the seed.
+          titleSeed: targetThread.title,
+          runtimeMode: targetThread.runtimeMode,
+          interactionMode: targetThread.interactionMode,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.turn.interrupt": {
       yield* requireThread({
         readModel,
@@ -1036,6 +1116,27 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           commandId: command.commandId,
         })),
         type: "thread.session-stop-requested",
+        payload: {
+          threadId: command.threadId,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.session.start": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.session-start-requested",
         payload: {
           threadId: command.threadId,
           createdAt: command.createdAt,

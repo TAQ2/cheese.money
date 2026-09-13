@@ -104,8 +104,8 @@ token against the wrong database — if you see that error, pass a reachable
 
 The dev stack starts empty, and an empty app only proves the empty states
 render. `fixtures.ts` writes the projection tables directly, reusing
-`scripts/mobile-showcase-environment.ts` (the seeder behind the App Store
-screenshots) rather than inventing a second fixture vocabulary. On top of it
+`scripts/showcase-environment.ts` (the seeder that once fed the upstream
+mobile screenshots) rather than inventing a second fixture vocabulary. On top of it
 sits a small Kanban overlay: stages, card types, a deadline, and one snoozed
 thread, so all seven board columns are populated.
 
@@ -113,6 +113,14 @@ thread, so all seven board columns are populated.
 lifecycle, so the overlay produces them by snoozing a thread and by leaving the
 showcase's settled threads alone — never by writing a stage id that does not
 exist in the contract.
+
+Beside the showcase threads sits one long one, `LONG_CONVERSATION`: forty settled
+turns, each folded behind a "Worked for …" row, one user message long enough to
+render clipped, one fenced code block, and a marker word planted exactly three
+times across those three hiding places. It exists for the e2e suite (`e2e/`),
+which reuses this directory's `stack.ts`, `fixtures.ts` and the pairing exchange
+in `browser.ts` rather than booting or seeding a second way; here it is only one
+more inbox row.
 
 **Stated plainly:** seeding bypasses the event log, so the projections are
 self-consistent but have no `orchestration_events` behind them. Every view here

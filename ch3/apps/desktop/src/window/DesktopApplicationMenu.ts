@@ -191,31 +191,33 @@ export const make = Effect.gen(function* () {
     }
 
     template.push(
-      {
-        label: "File",
-        submenu: [
-          ...(environment.platform === "darwin"
-            ? []
-            : [
-                {
-                  label: "Settings...",
-                  accelerator: "CmdOrCtrl+,",
-                  click: settingsClick,
-                },
+      // No File menu on macOS: everything it would hold — Settings, Quit,
+      // Restart — lives in the app menu there, and its Close item claimed ⌘W
+      // before the key reached the page, where `terminal.close` and the
+      // preview's close-tab binding live. ⌘W in a terminal pane destroyed the
+      // whole window and the next dock click booted the app again.
+      ...(environment.platform === "darwin"
+        ? []
+        : [
+            {
+              label: "File",
+              submenu: [
+                { label: "Settings...", accelerator: "CmdOrCtrl+,", click: settingsClick },
                 { type: "separator" as const },
-              ]),
-          { role: environment.platform === "darwin" ? "close" : "quit" },
-          // Where the platform keeps Quit is where Restart belongs: the app
-          // menu on macOS, the File menu everywhere else.
-          ...(environment.platform === "darwin" ? [] : [restartItem]),
-        ],
-      },
+                { role: "quit" as const },
+                restartItem,
+              ],
+            },
+          ]),
       { role: "editMenu" },
       {
         label: "View",
+        // No plain Reload: ⌘R is the preview's refresh binding, and the menu
+        // role won it every time, reloading the whole renderer instead. A
+        // wedged renderer still needs a way back short of quitting, so the
+        // force reload stays on a chord nothing on the page uses.
         submenu: [
-          { role: "reload" },
-          { role: "forceReload" },
+          { role: "forceReload", accelerator: "Alt+CmdOrCtrl+R" },
           { role: "toggleDevTools" },
           { type: "separator" },
           { role: "resetZoom" },

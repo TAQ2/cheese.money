@@ -40,8 +40,8 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
-import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
+import { CLAUDE_AI_MCP_SERVERS_OFF, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { discoverClaudeOutputStyles, discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -52,7 +52,12 @@ const CLAUDE_PRESENTATION = {
   showInteractionModeToggle: true,
 } as const;
 const MINIMUM_CLAUDE_OPUS_5_VERSION = "2.1.219";
-const MINIMUM_CLAUDE_FABLE_VERSION = "2.1.169";
+/**
+ * The floor `ClaudeCliInstaller` holds every machine to: the newest model's
+ * requirement, so an auto-installed or auto-upgraded CLI can run everything
+ * the app offers.
+ */
+export const MINIMUM_CLAUDE_FABLE_VERSION = "2.1.257";
 
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
@@ -69,11 +74,7 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "medium", label: "Medium" },
             { value: "high", label: "High", isDefault: true },
             { value: "xhigh", label: "Extra High" },
-            { value: "max", label: "Max" },
-            { value: "ultracode", label: "Ultracode" },
-            { value: "ultrathink", label: "Ultrathink" },
           ],
-          promptInjectedValues: ["ultrathink"],
         }),
         buildSelectOptionDescriptor({
           id: "contextWindow",
@@ -100,11 +101,7 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "medium", label: "Medium" },
             { value: "high", label: "High", isDefault: true },
             { value: "xhigh", label: "Extra High" },
-            { value: "max", label: "Max" },
-            { value: "ultracode", label: "Ultracode" },
-            { value: "ultrathink", label: "Ultrathink" },
           ],
-          promptInjectedValues: ["ultrathink"],
         }),
         buildBooleanOptionDescriptor({
           id: "fastMode",
@@ -136,18 +133,20 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "medium", label: "Medium" },
             { value: "high", label: "High", isDefault: true },
             { value: "xhigh", label: "Extra High" },
-            { value: "max", label: "Max" },
-            { value: "ultrathink", label: "Ultrathink" },
           ],
-          promptInjectedValues: ["ultrathink"],
         }),
         buildSelectOptionDescriptor({
           id: "contextWindow",
           label: "Context Window",
-          // Sonnet is 200k-default in Claude Code (1M is opt-in there too).
+          // 1M by default, deliberately diverging from Claude Code's own
+          // 200k default for Sonnet. Sonnet 5 is the default model on both
+          // access tiers here, so its context window is the one every
+          // conversation starts with — and a conversation that has to be
+          // restarted because it ran out of room costs more than the wider
+          // window ever saved.
           options: [
-            { value: "200k", label: "200k", isDefault: true },
-            { value: "1m", label: "1M" },
+            { value: "200k", label: "200k" },
+            { value: "1m", label: "1M", isDefault: true },
           ],
         }),
       ],
@@ -177,14 +176,33 @@ function getBuiltInClaudeModelsForVersion(
   });
 }
 
-function formatClaudeOpus5UpgradeMessage(version: string | null): string {
-  const versionLabel = version ? `v${version}` : "the installed version";
-  return `Claude Code ${versionLabel} is too old for Claude Opus 5. Upgrade to v${MINIMUM_CLAUDE_OPUS_5_VERSION} or newer to access it.`;
-}
+/** Every model that needs a CLI newer than the app's own floor, with the name to say it by. */
+const CLAUDE_MODEL_VERSION_FLOORS: ReadonlyArray<{
+  readonly minimum: string;
+  readonly modelName: string;
+}> = [
+  { minimum: MINIMUM_CLAUDE_OPUS_5_VERSION, modelName: "Claude Opus 5" },
+  { minimum: MINIMUM_CLAUDE_FABLE_VERSION, modelName: "Claude Fable 5.1" },
+];
 
-function formatClaudeFableUpgradeMessage(version: string | null): string {
+/**
+ * The one upgrade to ask for, or undefined when the CLI meets every floor.
+ *
+ * The floors are sorted by version rather than read in the order they are
+ * written, and the message names the LOWEST one the CLI does not meet — the
+ * next step up, not the furthest away. Written as a ladder of nested
+ * conditionals this was a latent bug: the branches encoded "Fable's floor is
+ * below Opus 5's", which held until Fable 5.1 raised its floor to 2.1.257 and
+ * silently inverted both answers — a CLI too old for either named Fable, and
+ * one that could run Opus 5 but not Fable named nothing at all.
+ */
+function formatClaudeUpgradeMessage(version: string | null): string | undefined {
+  const unmet = [...CLAUDE_MODEL_VERSION_FLOORS]
+    .sort((left, right) => compareSemverVersions(left.minimum, right.minimum))
+    .find((floor) => version === null || compareSemverVersions(version, floor.minimum) < 0);
+  if (unmet === undefined) return undefined;
   const versionLabel = version ? `v${version}` : "the installed version";
-  return `Claude Code ${versionLabel} is too old for Claude Fable 5.1. Upgrade to v${MINIMUM_CLAUDE_FABLE_VERSION} or newer to access it.`;
+  return `Claude Code ${versionLabel} is too old for ${unmet.modelName}. Upgrade to v${unmet.minimum} or newer to access it.`;
 }
 
 export function getClaudeModelCapabilities(model: string | null | undefined): ModelCapabilities {
@@ -400,7 +418,7 @@ export function buildClaudeCapabilitiesProbeQueryOptions(input: {
       ...input.environment,
       // Connected claude.ai MCP servers are discovered outside filesystem
       // config; disable them independently for this health check.
-      ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+      ...CLAUDE_AI_MCP_SERVERS_OFF,
     },
     ...(input.cwd ? { cwd: input.cwd } : {}),
     stderr: () => {},
@@ -425,12 +443,13 @@ type ClaudeCapabilitiesProbe = {
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   /**
    * Output styles the CLI reports for this home directory — the built-ins
-   * plus whatever `.md` files live in `<claude-home>/output-styles`. The CLI
-   * owns this list, so we never scan the directory ourselves; the names come
-   * back in the same namespace the `outputStyle` setting expects.
+   * plus whatever `.md` files live in `<claude-home>/output-styles`. The names
+   * come back in the same namespace the `outputStyle` setting expects.
    *
-   * Optional because a CLI older than the field reports nothing here, which
-   * is the same "no styles" case as an empty list.
+   * Optional, and routinely empty: a CLI older than the field reports nothing,
+   * and CLI 2.1.263 stopped sending it again. Either way the snapshot falls
+   * back to `discoverClaudeOutputStyles`, so an empty list here means "the CLI
+   * did not say", never "the user has no styles".
    */
   readonly outputStyles?: ReadonlyArray<string>;
   /** The style the CLI resolved for itself from the user's settings files. */
@@ -441,8 +460,9 @@ type ClaudeCapabilitiesProbe = {
  * Normalize `available_output_styles` from the initialization response.
  *
  * The field is typed `string[]` but arrives over IPC from a separately
- * versioned CLI, so treat anything that is not an array of usable strings as
- * "no styles reported" rather than trusting the type. Order is preserved (the
+ * versioned CLI that may not send it at all, so treat anything that is not an
+ * array of usable strings as "no styles reported" rather than trusting the
+ * type; the caller supplies the fallback. Order is preserved (the
  * CLI lists the built-ins first) and duplicates are dropped case-sensitively,
  * since style names are matched verbatim by the `outputStyle` setting.
  */
@@ -741,11 +761,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     claudeSettings.customModels,
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
-  const versionUpgradeMessage = supportsClaudeOpus5(parsedVersion)
-    ? undefined
-    : supportsClaudeFable(parsedVersion)
-      ? formatClaudeOpus5UpgradeMessage(parsedVersion)
-      : formatClaudeFableUpgradeMessage(parsedVersion);
+  const versionUpgradeMessage = formatClaudeUpgradeMessage(parsedVersion);
 
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
@@ -753,7 +769,16 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
   const slashCommands = capabilities?.slashCommands ?? [];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
-  const outputStyles = capabilities?.outputStyles ?? [];
+  // The handshake is the preferred source, but it goes quiet in both
+  // directions of CLI drift (too old to have the field, 2.1.263+ no longer
+  // sending it), and an empty list here hides the composer's style chip
+  // entirely. Scanning the config directory is what keeps the user's own
+  // styles selectable across that whole version range.
+  const reportedOutputStyles = capabilities?.outputStyles ?? [];
+  const outputStyles =
+    reportedOutputStyles.length > 0
+      ? reportedOutputStyles
+      : yield* discoverClaudeOutputStyles(claudeSettings, cwd, resolvedEnvironment);
   const activeOutputStyle = capabilities?.activeOutputStyle;
 
   if (!capabilities) {

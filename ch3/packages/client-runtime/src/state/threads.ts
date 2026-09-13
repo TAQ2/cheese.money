@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom } from "effect/unstable/reactivity";
@@ -25,7 +26,7 @@ import { ThreadSnapshotLoader } from "./threadSnapshotHttp.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
 import { applyThreadDetailEvent } from "./threadReducer.ts";
 import { THREAD_STATE_IDLE_TTL_MS } from "./threadRetention.ts";
-import { followStreamInEnvironment } from "./runtime.ts";
+import { createEnvironmentCommand, followStreamInEnvironment } from "./runtime.ts";
 import {
   EMPTY_ENVIRONMENT_THREAD_STATE,
   type EnvironmentThreadState,
@@ -46,6 +47,38 @@ function formatThreadError(cause: Cause.Cause<unknown>): string {
 function shouldPersistThread(thread: OrchestrationThread): boolean {
   const status = thread.session?.status;
   return status !== "starting" && status !== "running";
+}
+
+/**
+ * The paging cursor: the oldest loaded activity that carries a sequence.
+ * Legacy pre-sequence rows sort before every sequenced row, so scanning from
+ * the front finds it; `null` means nothing sequenced is loaded and there is
+ * nothing to page from.
+ */
+function oldestActivitySequence(activities: OrchestrationThread["activities"]): number | null {
+  for (const activity of activities) {
+    if (activity.sequence !== undefined) {
+      return activity.sequence;
+    }
+  }
+  return null;
+}
+
+/**
+ * Live "load older" handles for mounted thread states, keyed by thread key.
+ * The state machine registers on mount and unregisters on scope close; the
+ * command below no-ops for a thread whose state is not mounted, which is also
+ * the only case where there is no timeline asking for older rows.
+ */
+const loadOlderActivitiesRegistry = new Map<string, Effect.Effect<void>>();
+
+export function runLoadOlderThreadActivities(
+  environmentId: EnvironmentIdType,
+  threadId: ThreadIdType,
+): Effect.Effect<void> {
+  return Effect.suspend(
+    () => loadOlderActivitiesRegistry.get(threadKey({ environmentId, threadId })) ?? Effect.void,
+  );
 }
 
 export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make")(function* (
@@ -81,6 +114,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   );
   const awaitingCompletion = yield* Ref.make(false);
   const persistence = yield* Queue.sliding<OrchestrationThreadDetailSnapshot>(1);
+  // Serializes stream items against older-page merges: both read-modify-write
+  // the state ref across yields, and an unserialized interleave would drop
+  // whichever write lands first.
+  const stateWriteLock = yield* Semaphore.make(1);
+  const loadingOlderActivities = yield* Ref.make(false);
 
   const persist = Effect.fn("EnvironmentThreadState.persist")(function* (
     snapshot: OrchestrationThreadDetailSnapshot,
@@ -179,7 +217,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     );
   });
 
-  const applyItem = Effect.fn("EnvironmentThreadState.applyItem")(function* (
+  const applyItemUnlocked = Effect.fn("EnvironmentThreadState.applyItem")(function* (
     item: OrchestrationThreadStreamItem,
   ) {
     if (item.kind === "synchronized") {
@@ -218,6 +256,78 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       yield* setDeleted();
     }
   });
+  const applyItem = (item: OrchestrationThreadStreamItem) =>
+    stateWriteLock.withPermits(1)(applyItemUnlocked(item));
+
+  const loadOlderActivities = Effect.fn("EnvironmentThreadState.loadOlderActivities")(function* () {
+    const current = yield* SubscriptionRef.get(state);
+    if (Option.isNone(current.data) || current.status === "deleted") {
+      return;
+    }
+    const thread = current.data.value;
+    if (thread.hasMoreActivities !== true) {
+      return;
+    }
+    const beforeSequence = oldestActivitySequence(thread.activities);
+    if (beforeSequence === null) {
+      return;
+    }
+    const alreadyLoading = yield* Ref.getAndSet(loadingOlderActivities, true);
+    if (alreadyLoading) {
+      return;
+    }
+    yield* Effect.gen(function* () {
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared)) {
+        return;
+      }
+      const page = yield* snapshotLoader.loadActivitiesPage(
+        prepared.value,
+        threadId,
+        beforeSequence,
+      );
+      if (Option.isNone(page)) {
+        return;
+      }
+      yield* stateWriteLock.withPermits(1)(
+        SubscriptionRef.update(state, (value) => {
+          if (Option.isNone(value.data) || value.status === "deleted") {
+            return value;
+          }
+          const existing = value.data.value;
+          // The page was fetched against this cursor. A snapshot refresh may
+          // have replaced the thread meanwhile (its window starts elsewhere),
+          // and prepending would then leave a hole — drop the page instead;
+          // the reader's next scroll re-pages from the fresh cursor.
+          if (oldestActivitySequence(existing.activities) !== beforeSequence) {
+            return value;
+          }
+          const knownIds = new Set(existing.activities.map((activity) => activity.id));
+          const older = page.value.activities.filter((activity) => !knownIds.has(activity.id));
+          return {
+            ...value,
+            data: Option.some({
+              ...existing,
+              activities:
+                older.length > 0 ? [...older, ...existing.activities] : existing.activities,
+              hasMoreActivities: page.value.hasMoreBefore,
+            }),
+          };
+        }),
+      );
+    }).pipe(Effect.ensuring(Ref.set(loadingOlderActivities, false)));
+  });
+
+  const registryKey = threadKey({ environmentId, threadId });
+  const loadOlderHandle = loadOlderActivities();
+  loadOlderActivitiesRegistry.set(registryKey, loadOlderHandle);
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      if (loadOlderActivitiesRegistry.get(registryKey) === loadOlderHandle) {
+        loadOlderActivitiesRegistry.delete(registryKey);
+      }
+    }),
+  );
 
   yield* SubscriptionRef.changes(supervisor.state).pipe(
     Stream.runForEach((connectionState) => {
@@ -341,6 +451,16 @@ export function createEnvironmentThreadStateAtoms<R, E>(
   return {
     stateAtom: (environmentId: EnvironmentIdType, threadId: ThreadIdType) =>
       family(threadKey({ environmentId, threadId })),
+    /**
+     * Fetch and prepend the next older activities page for a mounted thread.
+     * No-ops when the thread state is not mounted, nothing older exists, or a
+     * page fetch is already in flight.
+     */
+    loadOlderActivities: createEnvironmentCommand(runtime, {
+      label: "environment-thread-state:load-older-activities",
+      execute: (input: { readonly threadId: ThreadIdType }, _registry, environmentId) =>
+        runLoadOlderThreadActivities(environmentId, input.threadId),
+    }),
   };
 }
 

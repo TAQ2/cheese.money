@@ -61,6 +61,26 @@ export function orderedClaudeInstanceIds(
     : enabledFirst;
 }
 
+/** The Claude instances a machine has enabled, for "is there more than one". */
+export function enabledClaudeInstanceCount(instances: ClaudeInstanceMap | undefined): number {
+  return Object.values(instances ?? {}).filter(
+    (instance) => instance?.driver === CLAUDE_DRIVER && instance.enabled !== false,
+  ).length;
+}
+
+/**
+ * The home path ONE named Claude instance runs on, or undefined when the id
+ * names no Claude instance. Empty means the default home, like everywhere.
+ */
+export function claudeInstanceHomePathFor(
+  instances: ClaudeInstanceMap | undefined,
+  instanceId: string,
+): string | undefined {
+  const instance = (instances ?? {})[instanceId];
+  if (instance?.driver !== CLAUDE_DRIVER) return undefined;
+  return readHomePath(instance.config) ?? "";
+}
+
 export function resolveClaudeInstanceHomePath(input: {
   readonly providerInstances?: ClaudeInstanceMap | undefined;
   readonly legacyHomePath?: string | undefined;

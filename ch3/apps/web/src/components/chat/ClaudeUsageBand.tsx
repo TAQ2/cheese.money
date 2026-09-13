@@ -2,6 +2,9 @@ import type { EnvironmentId } from "@ch3tools/contracts";
 import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 
 import { useClaudeAccountSwitchStore } from "../../claudeAccountSwitchStore";
+import { claudeUsageMeterToneClass } from "../../claudeUsageMeter";
+import { formatClaudeUsageReadAge } from "../../claudeUsageReadAge";
+import { formatClaudeResetShort } from "../../claudeUsageReset";
 import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { claudeAccountEnvironment } from "../../state/claudeAccounts";
 import { useEnvironmentQuery } from "../../state/query";
@@ -27,13 +30,6 @@ import { cn } from "~/lib/utils";
 // resolve to the same atom — naming it is a readability aid.
 const NO_SWITCH_YET = {} as const;
 
-/** Tone thresholds mirror the kanban WIP pill: amber approaching the limit, red at it. */
-function meterToneClass(percent: number): string {
-  if (percent >= 90) return "bg-destructive";
-  if (percent >= 70) return "bg-warning";
-  return "bg-primary/70";
-}
-
 function UsageMeter({
   label,
   percent,
@@ -48,7 +44,7 @@ function UsageMeter({
 }) {
   const clamped = Math.max(0, Math.min(100, percent));
   const rounded = Math.round(percent);
-  const reset = formatResetShort(resetsAt);
+  const reset = formatClaudeResetShort(resetsAt);
   return (
     <div
       className="flex min-w-0 items-center gap-1.5"
@@ -62,7 +58,7 @@ function UsageMeter({
       <span className="text-muted-foreground">{label}</span>
       <span aria-hidden="true" className="h-2.5 w-40 overflow-hidden rounded-full bg-muted">
         <span
-          className={cn("block h-full rounded-full", meterToneClass(clamped))}
+          className={cn("block h-full rounded-full", claudeUsageMeterToneClass(clamped))}
           style={{ width: `${clamped}%` }}
         />
       </span>
@@ -72,23 +68,6 @@ function UsageMeter({
       ) : null}
     </div>
   );
-}
-
-/**
- * The reset instant, compact enough to live inline: time-only when it lands
- * today ("4:09pm"), day + time otherwise ("Aug 16 1pm") — the session window
- * resets within hours while the weekly one is days out.
- */
-function formatResetShort(resetsAt: string | undefined): string | null {
-  if (resetsAt === undefined) return null;
-  const at = new Date(resetsAt);
-  if (Number.isNaN(at.getTime())) return null;
-  const time = at
-    .toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
-    .toLowerCase()
-    .replace(/\s/g, "");
-  if (at.toDateString() === new Date().toDateString()) return time;
-  return `${at.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
 }
 
 function HideBandButton({ onHide }: { readonly onHide: () => void }) {
@@ -149,6 +128,10 @@ export function ClaudeUsageBand({ environmentId }: { readonly environmentId: Env
   const rateLimited = query.data?.rateLimited === true;
   const stale = query.data?.stale === true;
   const accountLabel = query.data?.accountLabel ?? "";
+  // When reads resume, from the endpoint's own retry-after. "rate limited"
+  // alone told the reader nothing they could act on; a time does.
+  const resumesAt = formatClaudeResetShort(query.data?.retryAt);
+  const pausedNote = resumesAt === null ? "reads paused" : `reads paused until ${resumesAt}`;
 
   // No usage yet. If the endpoint is rate limiting with nothing cached to show,
   // say so — a blank space would read as "no account" or "0%", the exact
@@ -163,8 +146,11 @@ export function ClaudeUsageBand({ environmentId }: { readonly environmentId: Env
         data-testid="usage-band"
         className="relative flex items-center justify-center gap-3 px-2.5 pt-1.5 text-xs opacity-70 sm:px-3"
       >
-        <span className="text-muted-foreground" title="The usage endpoint is rate limiting reads">
-          Usage unavailable — rate limited
+        <span
+          className="text-muted-foreground"
+          title="The usage endpoint asked CH3 to stop reading for a while; nothing has been read yet"
+        >
+          Usage unavailable — {pausedNote}
         </span>
         <span className="absolute right-2.5 sm:right-3">
           <HideBandButton onHide={() => updateSettings({ usageBandHidden: true })} />
@@ -203,10 +189,19 @@ export function ClaudeUsageBand({ environmentId }: { readonly environmentId: Env
           title={`Fable 7-day window${formatReset(usage.modelWeekResetsAt)}`}
         />
       ) : null}
-      {stale ? <span className="text-muted-foreground/60">cached</span> : null}
+      {stale ? (
+        // Dated rather than merely labelled "cached": the reader's question is
+        // whether these numbers can still be trusted, and only the age answers it.
+        <span className="text-muted-foreground/60">
+          ({formatClaudeUsageReadAge(usage.readAt) ?? "cached"})
+        </span>
+      ) : null}
       {rateLimited ? (
-        <span className="text-muted-foreground/60" title="The usage endpoint is rate limiting reads">
-          rate limited
+        <span
+          className="text-muted-foreground/60"
+          title="The usage endpoint asked CH3 to stop reading for a while; these are the last numbers read"
+        >
+          {pausedNote}
         </span>
       ) : null}
       <span className="absolute right-2.5 sm:right-3">
