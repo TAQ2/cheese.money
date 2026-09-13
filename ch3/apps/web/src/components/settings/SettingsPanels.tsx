@@ -169,10 +169,6 @@ const THEME_OPTIONS = [
     value: "dark",
     label: "Dark",
   },
-  {
-    value: "ch3",
-    label: "CH3",
-  },
 ] as const;
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
@@ -968,12 +964,7 @@ export function AppearanceSettingsPanel() {
             <Select
               value={theme}
               onValueChange={(value) => {
-                if (
-                  value === "system" ||
-                  value === "light" ||
-                  value === "dark" ||
-                  value === "ch3"
-                ) {
+                if (value === "system" || value === "light" || value === "dark") {
                   setTheme(value);
                 }
               }}

@@ -333,20 +333,20 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(ch3-mobi
   /* CH3 purple, not blueprint blue. The drafting motif — grid, rulers,
      dimension annotations — is what "blueprint" names here; the ink is the
      brand's. Every hue in this art sits in a 248-279deg band centred on
-     --ch3-brand (262deg), and each colour keeps the saturation and
+     the primary hue (262deg), and each colour keeps the saturation and
      lightness of the blue it replaced, so contrast against the white
      wordmark and traffic lights is unchanged. Glow and ink colours live in
      `SidebarStageBackdrop.tsx` with the stops they belong to. */
   .stage-blueprint {
-    --stage-bp-top: #9b67ff;
-    --stage-bp-mid: #8c34f8;
-    --stage-bp-bottom: #7b15d0;
+    --stage-bp-top: #67c2ff;
+    --stage-bp-mid: #347ff8;
+    --stage-bp-bottom: #1538d0;
   }
 
   .dark .stage-blueprint {
-    --stage-bp-top: #7b3ad1;
-    --stage-bp-mid: #6320ae;
-    --stage-bp-bottom: #45106e;
+    --stage-bp-top: #3a7ad1;
+    --stage-bp-mid: #2050ae;
+    --stage-bp-bottom: #101f6e;
   }
 
   /* Header art motion. Ambient drift and breathing animate `transform` and
@@ -2114,59 +2114,6 @@ label:has(> select#reasoning-effort) select {
 }
 
 /*
- * CH3 brand mode ("ch3" theme): dark, re-hued around the CH3 purple.
- * The theme is toggled as a `ch3` class on <html> alongside `dark` (see
- * useTheme.ts); everything below only re-points existing tokens, so every
- * component picks the brand up for free.
- */
-:root.dark.ch3 {
-  --ch3-brand: #7d33ff;
-  --ch3-deep: #6932c8;
-  --ch3-glow: #ceb7f6;
-  --background: oklch(14.7% 0.021 295);
-  --app-chrome-background: var(--background);
-  --card: color-mix(in srgb, var(--background) 96%, var(--ch3-glow));
-  --popover: color-mix(in srgb, var(--background) 92%, var(--ch3-glow));
-  --primary: var(--ch3-brand);
-  --primary-foreground: var(--color-white);
-  --ring: var(--ch3-brand);
-  --secondary: color-mix(in srgb, var(--ch3-glow) 7%, transparent);
-  --muted: color-mix(in srgb, var(--ch3-glow) 6%, transparent);
-  --accent: color-mix(in srgb, var(--ch3-glow) 9%, transparent);
-  --border: color-mix(in srgb, var(--ch3-glow) 13%, transparent);
-  --input: color-mix(in srgb, var(--ch3-glow) 18%, transparent);
-  --muted-foreground: oklch(64% 0.032 292);
-  --app-scrollbar-thumb: color-mix(in srgb, var(--ch3-glow) 14%, transparent);
-  --app-scrollbar-thumb-hover: color-mix(in srgb, var(--ch3-glow) 22%, transparent);
-  --sidebar: var(--card);
-  --sidebar-control-surface: var(--muted);
-  --sidebar-row-hover: var(--accent);
-  --sidebar-row-active: var(--accent);
-  --sidebar-row-selected: var(--muted);
-  --sidebar-border: var(--border);
-  --sidebar-stage-fade: var(--card);
-}
-
-.dark.ch3 [data-sidebar-version="v1"],
-.dark.ch3 [data-sidebar-version="v2"] {
-  --background: oklch(12.8% 0.018 295);
-  --card: oklch(12.8% 0.018 295);
-  --foreground: #f2f0f9;
-  --accent: color-mix(in srgb, var(--ch3-glow) 11%, transparent);
-  --accent-foreground: #f7f4ff;
-  --muted: oklch(15.5% 0.02 295);
-  --muted-foreground: oklch(64% 0.032 292);
-  --border: color-mix(in srgb, var(--ch3-glow) 12%, transparent);
-  --input: color-mix(in srgb, var(--ch3-glow) 20%, transparent);
-  --sidebar: var(--card);
-  --sidebar-row-hover: color-mix(in srgb, var(--ch3-glow) 10%, transparent);
-  --sidebar-row-active: color-mix(in srgb, var(--ch3-glow) 15%, transparent);
-  --sidebar-row-selected: color-mix(in srgb, var(--ch3-glow) 9%, transparent);
-  --sidebar-border: var(--border);
-  --sidebar-stage-fade: var(--card);
-}
-
-/*
  * Find in conversation. The browser paints these over the text it already
  * rendered, which is what puts a highlight inside a Shiki code block without
  * touching the highlighted HTML the markdown renderer caches. Every match is a
@@ -2182,17 +2129,4 @@ label:has(> select#reasoning-effort) select {
   color: var(--color-neutral-950);
 }
 
-.dark.ch3 ::selection {
-  background: color-mix(in srgb, var(--ch3-brand) 45%, transparent);
-}
-
 /* The purple frame around the whole window — the brand mode's signature. */
-.dark.ch3 body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 2147483647;
-  pointer-events: none;
-  border: 4.5px solid var(--ch3-brand);
-  border-radius: 10px;
-}

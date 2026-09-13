@@ -372,9 +372,9 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
           gradientTransform="translate(216 14) rotate(137) scale(120 84)"
           gradientUnits="userSpaceOnUse"
         >
-          <stop stopColor="#DFD4FF" stopOpacity="0.4" />
-          <stop offset="0.52" stopColor="#9665FF" stopOpacity="0.16" />
-          <stop offset="1" stopColor="#8727F1" stopOpacity="0" />
+          <stop stopColor="#D4F6FF" stopOpacity="0.4" />
+          <stop offset="0.52" stopColor="#65C8FF" stopOpacity="0.16" />
+          <stop offset="1" stopColor="#277EF1" stopOpacity="0" />
         </radialGradient>
         <radialGradient
           id={indigoGlowId}
@@ -384,9 +384,9 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
           gradientTransform="translate(474 44) rotate(166) scale(156 92)"
           gradientUnits="userSpaceOnUse"
         >
-          <stop stopColor="#D8D2FF" stopOpacity="0.34" />
+          <stop stopColor="#D9D8FF" stopOpacity="0.34" />
           <stop offset="0.5" stopColor="#6D48F5" stopOpacity="0.18" />
-          <stop offset="1" stopColor="#7D27F1" stopOpacity="0" />
+          <stop offset="1" stopColor="#276AF1" stopOpacity="0" />
         </radialGradient>
         <radialGradient
           id={orchidGlowId}
@@ -396,20 +396,20 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
           gradientTransform="translate(704 18) rotate(145) scale(132 88)"
           gradientUnits="userSpaceOnUse"
         >
-          <stop stopColor="#F2D8FF" stopOpacity="0.3" />
-          <stop offset="0.52" stopColor="#C97CFF" stopOpacity="0.14" />
-          <stop offset="1" stopColor="#8F31DF" stopOpacity="0" />
+          <stop stopColor="#D2FFFF" stopOpacity="0.3" />
+          <stop offset="0.52" stopColor="#7C8BFF" stopOpacity="0.14" />
+          <stop offset="1" stopColor="#3155DF" stopOpacity="0" />
         </radialGradient>
         <pattern id={minorGridId} width="8" height="8" patternUnits="userSpaceOnUse">
-          <path d="M8 0H0V8" stroke="#F1EAFF" strokeOpacity="0.14" strokeWidth="0.5" />
+          <path d="M8 0H0V8" stroke="#EAF6FF" strokeOpacity="0.14" strokeWidth="0.5" />
         </pattern>
         <pattern id={majorGridId} width="32" height="32" patternUnits="userSpaceOnUse">
-          <path d="M32 0H0V32" stroke="#F1EAFF" strokeOpacity="0.26" strokeWidth="0.6" />
+          <path d="M32 0H0V32" stroke="#EAF6FF" strokeOpacity="0.26" strokeWidth="0.6" />
         </pattern>
         <pattern id={rulerId} width="32" height="6" patternUnits="userSpaceOnUse">
           <path
             d="M4 0V2.5M12 0V2.5M20 0V4M28 0V2.5"
-            stroke="#E6DDFF"
+            stroke="#DDF7FF"
             strokeOpacity="0.5"
             strokeWidth="0.5"
           />
@@ -420,7 +420,7 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
           <rect width="768" height="96" fill={`url(#${orchidGlowId})`} />
         </pattern>
         <pattern id={annotationsId} width="768" height="96" patternUnits="userSpaceOnUse">
-          <g stroke="#E6DDFF" strokeLinecap="round" strokeOpacity="0.6" strokeWidth="0.7">
+          <g stroke="#DDF7FF" strokeLinecap="round" strokeOpacity="0.6" strokeWidth="0.7">
             <path d="M180 64H264" strokeDasharray="5 4" />
             <path d="M180 61V67M264 61V67" />
             <path d="M276 10V44" strokeDasharray="4 4" strokeOpacity="0.5" />
@@ -433,7 +433,7 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
             <path d="M590 67V73M724 67V73" strokeOpacity="0.55" />
           </g>
 
-          <g stroke="#E6DDFF" strokeLinecap="round" strokeOpacity="0.55" strokeWidth="0.6">
+          <g stroke="#DDF7FF" strokeLinecap="round" strokeOpacity="0.55" strokeWidth="0.6">
             <g>
               <path d="M34 60L38 64M38 60L34 64" />
             </g>
@@ -457,7 +457,7 @@ function DevBlueprintArt({ compact = false }: { compact?: boolean }) {
             </g>
           </g>
 
-          <g stroke="#E6DDFF" strokeOpacity="0.35" strokeWidth="0.6">
+          <g stroke="#DDF7FF" strokeOpacity="0.35" strokeWidth="0.6">
             <circle cx="196" cy="38" r="13" strokeDasharray="3.5 4" />
             <path d="M196 33V43M191 38H201" strokeOpacity="0.6" strokeWidth="0.4" />
             <circle cx="414" cy="64" r="10" strokeDasharray="2.5 3.5" />
