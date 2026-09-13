@@ -15,6 +15,7 @@ import {
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
 import {
+  compareOpenCodeModelsByCost,
   checkOpenCodeProviderStatus,
   makeOpenCodeCommandCache,
   toServerProviderSlashCommands,
@@ -576,5 +577,33 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
         ["refresh"],
       );
     }),
+  );
+});
+
+const costModel = (slug: string, name: string) =>
+  ({ slug, name, isCustom: false }) as unknown as Parameters<typeof compareOpenCodeModelsByCost>[0];
+
+// Alphabetical put Kimi K3 — $25.00 per million out, several times dearer than
+// anything else Maple offers — in the middle of the list, where the picker
+// binds number shortcuts.
+it("orders OpenCode models cheapest-first so shortcuts reach the cheap ones", () => {
+  NodeAssert.deepEqual(
+    [
+      costModel("maple/kimi-k3", "Kimi K3"),
+      costModel("maple/glm-5-2", "GLM 5.2"),
+      costModel("maple/gpt-oss-120b", "OpenAI GPT-OSS 120B"),
+    ]
+      .toSorted(compareOpenCodeModelsByCost)
+      .map((entry) => entry.slug),
+    ["maple/gpt-oss-120b", "maple/glm-5-2", "maple/kimi-k3"],
+  );
+});
+
+it("sorts a model the catalogue does not price last, rather than as free", () => {
+  NodeAssert.deepEqual(
+    [costModel("other/mystery", "Mystery"), costModel("maple/kimi-k3", "Kimi K3")]
+      .toSorted(compareOpenCodeModelsByCost)
+      .map((entry) => entry.slug),
+    ["maple/kimi-k3", "other/mystery"],
   );
 });

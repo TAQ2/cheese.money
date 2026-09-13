@@ -11,6 +11,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 
 import { createModelCapabilities } from "@ch3tools/shared/model";
+import { findMapleModel } from "@ch3tools/shared/mapleModels";
 import { compareSemverVersions } from "@ch3tools/shared/semver";
 import {
   buildServerProvider,
@@ -282,7 +283,37 @@ function flattenOpenCodeModels(input: OpenCodeInventory): ReadonlyArray<ServerPr
     }
   }
 
-  return models.toSorted((left, right) => left.name.localeCompare(right.name));
+  return models.toSorted(compareOpenCodeModelsByCost);
+}
+
+/**
+ * Cheapest first, by the OUTPUT rate.
+ *
+ * The picker binds the first models to number shortcuts, so plain alphabetical
+ * ordering put Kimi K3 — several times dearer per output token than anything
+ * else Maple offers — in the middle of the list, one mistaken keystroke from a
+ * very expensive turn. The cheap models are the ones a shortcut should reach.
+ *
+ * Output rather than input because completions dominate an agent turn, which is
+ * the same basis the picker colours the rate on (`mapleModelRates`), so the
+ * order and the colour never tell different stories.
+ *
+ * A model the catalogue does not price sorts after every priced one rather than
+ * as free: an unknown rate is unknown, and guessing it cheap is the guess that
+ * costs money. Ties fall back to the name, so the order is stable.
+ */
+export function compareOpenCodeModelsByCost(
+  left: ServerProviderModel,
+  right: ServerProviderModel,
+): number {
+  const leftRate = findMapleModel(left.slug)?.output;
+  const rightRate = findMapleModel(right.slug)?.output;
+  if (leftRate !== rightRate) {
+    if (leftRate === undefined) return 1;
+    if (rightRate === undefined) return -1;
+    return leftRate - rightRate;
+  }
+  return left.name.localeCompare(right.name);
 }
 
 /**
