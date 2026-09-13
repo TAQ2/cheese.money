@@ -7,6 +7,7 @@ import {
   type ModelEsque,
   PROVIDER_ICON_BY_PROVIDER,
 } from "./providerIconUtils";
+import { mapleModelRateSummary } from "./mapleModelRates";
 import { ComboboxItem } from "../ui/combobox";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
@@ -41,6 +42,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
   const providerLabel = props.model.subProvider
     ? `${props.providerDisplayName} · ${props.model.subProvider}`
     : props.providerDisplayName;
+  const rateSummary = mapleModelRateSummary(props.driverKind, props.model.slug);
 
   const row = (
     <ComboboxItem
@@ -83,6 +85,14 @@ export const ModelListRow = memo(function ModelListRow(props: {
             </span>
           </div>
         )}
+        {rateSummary ? (
+          <div
+            data-model-rate="true"
+            className={cn("mt-0.5 text-[11px] tabular-nums leading-snug", rateSummary.className)}
+          >
+            {rateSummary.label}
+          </div>
+        ) : null}
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">

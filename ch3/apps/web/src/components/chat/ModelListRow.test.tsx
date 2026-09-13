@@ -29,6 +29,27 @@ function renderRow(input: {
 }
 
 describe("ModelListRow", () => {
+  it("prices a Maple model in the row that offers it", () => {
+    const markup = renderRow({
+      driverKind: "opencode",
+      slug: "maple/glm-5-2",
+      name: "GLM 5.2",
+    });
+
+    expect(markup).toContain('data-model-rate="true"');
+    expect(markup).toContain("$3.00 in · $10.50 out");
+    expect(markup).toContain("text-amber-600");
+  });
+
+  it("colours the frontier models red and the cheap ones green", () => {
+    expect(renderRow({ driverKind: "opencode", slug: "maple/kimi-k3", name: "Kimi K3" })).toContain(
+      "text-red-600",
+    );
+    expect(
+      renderRow({ driverKind: "opencode", slug: "maple/gpt-oss-120b", name: "GPT-OSS 120B" }),
+    ).toContain("text-emerald-600");
+  });
+
   it("leaves a subscription model unpriced", () => {
     // Claude's models cost nothing per token here; a rate would be invented.
     const markup = renderRow({
