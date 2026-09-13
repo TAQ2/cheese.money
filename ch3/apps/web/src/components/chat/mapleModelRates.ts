@@ -9,8 +9,14 @@ import { findMapleModel } from "@ch3tools/shared/mapleModels";
  *
  * Bands are on the output rate — the number that dominates an agent turn,
  * where completions vastly outweigh the prompt.
+ *
+ * The thresholds sit in the gaps between the catalogue's own clusters rather
+ * than on round numbers. The cheap tier runs $1.20 to $2.50 and the next model
+ * up is $5.50, so 3 splits at a 2.2x jump; a threshold of 2 split $2.00 from
+ * $2.50, which is a 1.25x difference and reads as an arbitrary line through one
+ * group. Same reasoning at the top: $11.50 then $17.86.
  */
-const CHEAP_MAX_OUTPUT_RATE = 2;
+const CHEAP_MAX_OUTPUT_RATE = 3;
 const COSTLY_MIN_OUTPUT_RATE = 12;
 
 const TONE_CLASS = {

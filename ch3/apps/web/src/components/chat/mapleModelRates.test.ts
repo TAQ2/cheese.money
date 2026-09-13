@@ -6,6 +6,8 @@ describe("mapleModelRateSummary", () => {
   const cases = [
     { slug: "maple/gpt-oss-120b", label: "$0.30 in · $1.20 out", tone: "emerald" },
     { slug: "maple/gemma4-31b", label: "$0.80 in · $2.00 out", tone: "emerald" },
+    // The cheap tier tops out at $2.50; the next model up is $5.50.
+    { slug: "maple/glm-5-3-flash", label: "$0.80 in · $2.50 out", tone: "emerald" },
     { slug: "maple/deepseek-v4-flash", label: "$0.60 in · $1.40 out", tone: "emerald" },
     { slug: "maple/llama3-3-70b", label: "$3.50 in · $5.50 out", tone: "amber" },
     { slug: "maple/glm-5-2", label: "$3.00 in · $10.50 out", tone: "amber" },
