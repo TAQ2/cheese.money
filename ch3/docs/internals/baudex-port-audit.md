@@ -38,7 +38,9 @@ and no exported surface disappears unnoticed.
 | Rejected  | 28    | Judged not worth having here, with a reason                 |
 | Open      | 48    | No decision yet — the queue below                           |
 
-The 48 open files are six features, not forty-eight decisions.
+The 31 open files are four features, not thirty-one decisions. Seventeen files moved
+from Open to Corporate on 2026-09-13 after their module docs were read rather than their
+paths pattern-matched — see "Read, then reclassified" below.
 
 ## Open questions
 
@@ -72,29 +74,6 @@ feature, with what it does and what it would cost.
 - `packages/shared/src/mapleKeyVault.test.ts`
 - `packages/shared/src/mapleKeyVault.ts`
 
-### The MCP shelf (12 files)
-
-- `apps/server/src/mcp/ClaudeMcpConfigChange.test.ts`
-- `apps/server/src/mcp/ClaudeMcpConfigChange.ts`
-- `apps/server/src/mcp/mcpListOutput.test.ts`
-- `apps/server/src/mcp/mcpListOutput.ts`
-- `apps/server/src/mcp/mcpLoginOutput.test.ts`
-- `apps/server/src/mcp/mcpLoginOutput.ts`
-- `apps/web/src/components/mcp/McpCatalog.test.tsx`
-- `apps/web/src/components/mcp/McpCatalog.tsx`
-- `apps/web/src/routes/_chat.mcp.tsx`
-- `apps/web/src/state/mcpCatalog.ts`
-- `packages/client-runtime/src/state/mcpCatalog.ts`
-- `packages/contracts/src/mcpCatalog.ts`
-
-### The skills catalogue (5 files)
-
-- `apps/server/src/skills/SkillCatalog.test.ts`
-- `apps/server/src/skills/SkillCatalog.ts`
-- `apps/web/src/state/skills.ts`
-- `packages/client-runtime/src/state/skills.ts`
-- `packages/contracts/src/skills.ts`
-
 ### CI workflow split (5 files)
 
 - `.github/workflows/build-dmg.yml`
@@ -126,17 +105,6 @@ separate decision. `native/maple-proxy` is a 3-file MIT wrapper crate; the built
 already lives at `~/Desktop/maple-stack/bin/maple-proxy`, so bringing the crate only
 matters if the DMG should ship its own.
 
-**The MCP shelf.** A catalogue UI at `/mcp` plus the plumbing that makes it work:
-parsing `claude mcp list` and the authorization URL out of `claude mcp login
---no-browser`, and applying config changes. `BaubapMcpCatalog` is their server list and
-stays out; the shelf itself is generic. The route was deleted from this fork, which is
-why `routeTree.gen.ts` had to be regenerated in `dc692df`. **Recommend porting it with
-an empty catalogue** — there is no other way to sign an MCP server in from inside CH3.
-
-**The skills catalogue.** Reads and writes `~/.claude/skills`. Needs reading before a
-verdict: if it is a browser over whatever skills exist, it is generic and worth having;
-if it seeds a fixed list, it is theirs. **No recommendation yet.**
-
 **CI workflow split.** Five workflows that split what `ci.yml` does here into
 pre-commit checks, tests, coverage, e2e and a DMG build. `vite.config.ts` and
 `docs/internals/scripts.md` in this fork referred to `ci-pre-commit-checks.yml` until
@@ -147,6 +115,50 @@ pre-commit checks, tests, coverage, e2e and a DMG build. `vite.config.ts` and
 and does not exist here — one of the dangling links the QA pass reported.
 **Recommend porting it, de-corporatised.** `OpenCodeDriver.test.ts` covers the account
 failover wiring, so it follows the Maple failover decision.
+
+## Read, then reclassified (17 files)
+
+Both of these were in the open queue until their module docs were read. Recording the
+reason matters more than the verdict: "it mentions Baubap" is the same heuristic that
+deleted the Maple catalogue, and the correction has to come from reading the code.
+
+**The skills catalogue** (5 files) is not a skills browser. Its own first line is
+"The Baubap skills catalogue": it reads `baubap-skills/skills/<name>/SKILL.md` out of a
+project registered as the Baubap Skills default project, and installs from there into
+`~/.claude/skills`. Without that repository and that default project it has nothing to
+list. **Corporate.**
+
+- `apps/server/src/skills/SkillCatalog.test.ts`
+- `apps/server/src/skills/SkillCatalog.ts`
+- `apps/web/src/state/skills.ts`
+- `packages/client-runtime/src/state/skills.ts`
+- `packages/contracts/src/skills.ts`
+
+**The MCP shelf** (12 files) is "the sixth Baubap superpower" in its own words — every MCP
+server the company runs, with a dot per server saying whether this machine has it and
+whether it answers. The catalogue is the feature; without the company's server list there
+is no shelf. **Corporate.**
+
+Its three parsers are genuinely generic and stay out anyway, for a different reason:
+`mcpLoginOutput` pulls the authorization URL out of `claude mcp login --no-browser`
+(which prints it wrapped in an OSC 8 escape, often split across a line break),
+`mcpListOutput` reads `claude mcp list`, and `ClaudeMcpConfigChange` applies a config
+edit. Nothing in this fork calls any of them, and code with no caller is the entropy this
+repository's rules forbid. If CH3 ever grows its own MCP settings surface, take them then
+— they are the awkward part of that work, already solved.
+
+- `apps/server/src/mcp/ClaudeMcpConfigChange.test.ts`
+- `apps/server/src/mcp/ClaudeMcpConfigChange.ts`
+- `apps/server/src/mcp/mcpListOutput.test.ts`
+- `apps/server/src/mcp/mcpListOutput.ts`
+- `apps/server/src/mcp/mcpLoginOutput.test.ts`
+- `apps/server/src/mcp/mcpLoginOutput.ts`
+- `apps/web/src/components/mcp/McpCatalog.test.tsx`
+- `apps/web/src/components/mcp/McpCatalog.tsx`
+- `apps/web/src/routes/_chat.mcp.tsx`
+- `apps/web/src/state/mcpCatalog.ts`
+- `packages/client-runtime/src/state/mcpCatalog.ts`
+- `packages/contracts/src/mcpCatalog.ts`
 
 ## Cockpit — deliberately unported (48 files)
 
