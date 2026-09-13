@@ -468,7 +468,10 @@ export const runClaudeAccountRotationOnce = Effect.fn("runClaudeAccountRotationO
     rotationNowMs,
   );
   if (!current.usage) return undefined;
-  if (phase === "steady" && !rotationEngaged(current.usage)) return undefined;
+  // Both phases: an incumbent with session headroom keeps its seat. Asking
+  // here, before the fleet-wide usage probe below, also spares a boot every
+  // one of those calls when the answer was already "stay put".
+  if (!rotationEngaged(current.usage)) return undefined;
 
   const others = yield* Effect.forEach(
     known.filter((profile) => !profile.isCurrent),

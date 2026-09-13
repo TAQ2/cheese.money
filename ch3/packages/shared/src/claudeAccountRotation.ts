@@ -192,11 +192,18 @@ function scoreEligible(profile: ClaudeAccountProfile, nowMs: number): ScoredProf
  * failing its own gates does NOT force a switch here — that is exhaustion,
  * and the failover path owns it with its own rules.
  *
- * The two phases differ in exactly two ways. "steady" respects stickiness
- * (no evaluation until the incumbent has spent 60% of its session) and
- * demands the full hysteresis margins. "startup" is the one-time seating of
- * the best account: no stickiness — the incumbent was not chosen, merely
- * inherited — and any strict improvement is enough.
+ * BOTH phases respect the engagement gate: an incumbent under 60% of its
+ * session is left alone, whoever else is better positioned. Startup used to
+ * skip it, on the reasoning that "the incumbent was not chosen, merely
+ * inherited". That is false across a restart — the account seated at boot is
+ * usually the one somebody deliberately selected before quitting, and
+ * silently re-seating it is indistinguishable from the app losing the choice.
+ *
+ * What remains different is only the margin. "steady" demands the full
+ * hysteresis margins; "startup" accepts any improvement past
+ * STARTUP_MIN_GAIN_PER_DAY, because once the incumbent IS engaged a boot is
+ * the cheapest moment to move and there is no flap to protect against within
+ * a single launch.
  */
 export function chooseClaudeRotationTarget(input: {
   readonly profiles: ReadonlyArray<ClaudeAccountProfile>;
@@ -207,7 +214,7 @@ export function chooseClaudeRotationTarget(input: {
   const current = input.profiles.find((profile) => profile.isCurrent);
   if (!current?.usage) return null;
 
-  if (phase === "steady" && !rotationEngaged(current.usage)) {
+  if (!rotationEngaged(current.usage)) {
     return null;
   }
 

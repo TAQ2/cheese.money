@@ -102,16 +102,36 @@ describe("chooseClaudeRotationTarget", () => {
     ).toBeNull();
   });
 
-  it("seats the best account at startup, ignoring stickiness and margins", () => {
-    // Same fresh-session incumbent, but at startup nobody has earned the
-    // seat yet — any strictly better account takes it.
+  it("keeps a barely-used account at startup, because somebody chose it", () => {
+    // The account seated at boot is the one selected before the last quit.
+    // Re-seating it while it still has session headroom is indistinguishable
+    // from the app forgetting the choice, which is how this was reported.
+    expect(
+      chooseClaudeRotationTarget({
+        nowMs: NOW,
+        phase: "startup",
+        profiles: [
+          account(
+            "idle",
+            { sessionPercent: 5, weekPercent: 30, weekResetsAt: daysFromNow(7) },
+            { isCurrent: true },
+          ),
+          account("slightly", { sessionPercent: 0, weekPercent: 16, weekResetsAt: daysFromNow(7) }),
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("seats the best account at startup once the incumbent is engaged", () => {
+    // Past the engagement threshold the choice has been spent rather than
+    // overridden, and a boot is the cheapest moment to move.
     const decision = chooseClaudeRotationTarget({
       nowMs: NOW,
       phase: "startup",
       profiles: [
         account(
-          "idle",
-          { sessionPercent: 5, weekPercent: 30, weekResetsAt: daysFromNow(7) },
+          "spent",
+          { sessionPercent: 70, weekPercent: 30, weekResetsAt: daysFromNow(7) },
           { isCurrent: true },
         ),
         account("slightly", { sessionPercent: 0, weekPercent: 16, weekResetsAt: daysFromNow(7) }),
@@ -130,8 +150,9 @@ describe("chooseClaudeRotationTarget", () => {
         phase: "startup",
         profiles: [
           account(
+            // Engaged, so the engagement gate is not what returns null here.
             "current",
-            { sessionPercent: 5, weekPercent: 30, weekResetsAt: daysFromNow(7) },
+            { sessionPercent: 70, weekPercent: 30, weekResetsAt: daysFromNow(7) },
             { isCurrent: true },
           ),
           account("noise", { sessionPercent: 0, weekPercent: 29, weekResetsAt: daysFromNow(7) }),
