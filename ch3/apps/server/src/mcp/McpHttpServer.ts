@@ -22,6 +22,8 @@ import {
   PreviewSnapshotToolkit,
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
+import { AgentToolkitLayer } from "./toolkits/agent/handlers.ts";
+import { AgentToolkit } from "./toolkits/agent/tools.ts";
 import { ThreadToolkitLayer } from "./toolkits/thread/handlers.ts";
 import { ThreadToolkit } from "./toolkits/thread/tools.ts";
 
@@ -225,6 +227,13 @@ const ThreadToolkitRegistrationLive = McpServer.toolkit(ThreadToolkit).pipe(
   Layer.provide(ThreadToolkitLayer),
 );
 
+// Registered unconditionally too: spawning a child agent on a named model is
+// something the user asked for out loud, and a tool that is only sometimes
+// there reads to the agent as a tool that does not exist.
+export const AgentToolkitRegistrationLive = McpServer.toolkit(AgentToolkit).pipe(
+  Layer.provide(AgentToolkitLayer),
+);
+
 const McpTransportLive = McpServer.layerHttp({
   name: "CH3",
   version: packageJson.version,
@@ -234,4 +243,5 @@ const McpTransportLive = McpServer.layerHttp({
 export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   ThreadToolkitRegistrationLive,
+  AgentToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(McpTransportLive));

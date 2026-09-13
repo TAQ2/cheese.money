@@ -69,6 +69,7 @@ import { ChangedFilesCard } from "./ChangedFilesTree";
 import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { MessageSpeakButton } from "./MessageSpeakButton";
+import { readSpawnAgentCard, SpawnAgentCard } from "./SpawnAgentCard";
 import { WorkingTimer } from "./WorkingTimer";
 import {
   computeStableMessagesTimelineRows,
@@ -2792,6 +2793,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const activity = use(TimelineRowActivityCtx);
   const ctx = use(TimelineRowCtx);
   const [expanded, setExpanded] = useState(false);
+  // A `spawn_model_agent` call gets its own card: the child is an addressable
+  // thread somebody will want to open, which a one-line tool row cannot offer.
+  const spawnAgentCard = useMemo(() => readSpawnAgentCard(workEntry), [workEntry]);
+  if (spawnAgentCard) {
+    return <SpawnAgentCard card={spawnAgentCard} environmentId={ctx.activeThreadEnvironmentId} />;
+  }
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);

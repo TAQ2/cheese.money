@@ -116,6 +116,10 @@ Controls how assistant text reaches the thread timeline. In [the contracts][1], 
 
 A point-in-time view of state. The word is used in multiple layers, including orchestration, provider, and checkpointing. See [ProjectionSnapshotQuery.ts][10], [ProviderAdapter.ts][15], and [CheckpointStore.ts][19].
 
+#### Model agent
+
+A child thread another agent created to run one task on a different model. The in-app `ch3` MCP server exposes `spawn_model_agent` to whatever agent is driving a thread: given a Maple model id from [the catalogue][25] and a prompt, it creates a thread in the caller's project on the OpenCode provider (`instanceId: "opencode"`, model `maple/<id>`), starts one turn, waits a bounded time, and returns the child's id and final text. The child is an ordinary thread — resumable, openable from the thread list, and readable after the call returns — which is why this exists rather than the caller consulting the model inline and paraphrasing it. The Claude Agent SDK spawns only Anthropic subagents, so this is the only cross-provider delegate. See [tools.ts][26].
+
 ### Checkpointing
 
 Checkpointing captures workspace state over time so the app can diff turns and restore earlier points. The main pieces are [CheckpointStore.ts][19], [CheckpointDiffQuery.ts][20], and [CheckpointReactor.ts][6].
@@ -179,3 +183,5 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../../apps/server/src/checkpointing/Utils.ts
 [23]: ../../apps/server/src/checkpointing/Diffs.ts
 [24]: ./overview.md
+[25]: ../../packages/shared/src/mapleModels.ts
+[26]: ../../apps/server/src/mcp/toolkits/agent/tools.ts
