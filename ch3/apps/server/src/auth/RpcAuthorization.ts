@@ -81,6 +81,10 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.claudeSignOutAccount]: AuthOrchestrationOperateScope,
   // Installs software on the machine, so it sits with operate rather than read.
   [WS_METHODS.claudeInstallCli]: AuthOrchestrationOperateScope,
+  // Writing a skill changes what every agent on this machine can do, so it
+  // sits with the other operate-scope provider commands rather than with reads.
+  [WS_METHODS.claudeCreateSkill]: AuthOrchestrationOperateScope,
+  [WS_METHODS.claudeDeleteSkill]: AuthOrchestrationOperateScope,
   [WS_METHODS.claudeCurrentAccountUsage]: AuthOrchestrationReadScope,
   // Sends a request to Anthropic on the person's demand and clears a pause the
   // endpoint asked CH3 to keep. Reading is the effect, but SPENDING a

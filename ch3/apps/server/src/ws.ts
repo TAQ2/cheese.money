@@ -122,6 +122,7 @@ import {
   probeClaudeProfile,
   startClaudeAccountLogin,
 } from "./provider/Drivers/ClaudeAccounts.ts";
+import { createClaudeSkill, deleteClaudeSkill } from "./provider/Drivers/ClaudeSkillStore.ts";
 import {
   claudeInstanceHomePathFor,
   enabledClaudeInstanceCount,
@@ -2830,6 +2831,19 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "provider",
             },
           ),
+        [WS_METHODS.claudeCreateSkill]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.claudeCreateSkill,
+            // Always the shared store, never the account in use: every profile
+            // symlinks its `skills` there, so one write reaches all of them
+            // and a skill does not disappear when failover moves the seat.
+            createClaudeSkill(input),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.claudeDeleteSkill]: (input) =>
+          observeRpcEffect(WS_METHODS.claudeDeleteSkill, deleteClaudeSkill(input), {
+            "rpc.aggregate": "provider",
+          }),
         [WS_METHODS.claudeForceAccountUsageRead]: (input) =>
           observeRpcEffect(
             WS_METHODS.claudeForceAccountUsageRead,

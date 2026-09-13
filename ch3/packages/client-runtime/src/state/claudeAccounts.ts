@@ -47,6 +47,22 @@ export function createClaudeAccountEnvironmentAtoms<R, E>(
       tag: WS_METHODS.claudeSignOutAccount,
     }),
     /**
+     * Write a skill into the store every account shares, and remove one.
+     *
+     * Commands, not queries: each one changes the machine. The LIST is not
+     * here at all — skills already arrive on the provider snapshot for the `$`
+     * picker, so the panel reads what the picker reads and the two cannot
+     * disagree.
+     */
+    createSkill: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:claude:create-skill",
+      tag: WS_METHODS.claudeCreateSkill,
+    }),
+    deleteSkill: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:claude:delete-skill",
+      tag: WS_METHODS.claudeDeleteSkill,
+    }),
+    /**
      * Read ONE account's usage now, past its freshness window and past the
      * pause the endpoint asked for.
      *

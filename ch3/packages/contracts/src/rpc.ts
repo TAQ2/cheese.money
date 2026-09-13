@@ -45,6 +45,13 @@ import {
   ClaudeCurrentUsageResult,
 } from "./claudeAccounts.ts";
 import {
+  ClaudeSkillCreateInput,
+  ClaudeSkillCreateResult,
+  ClaudeSkillDeleteInput,
+  ClaudeSkillDeleteResult,
+  ClaudeSkillError,
+} from "./claudeSkills.ts";
+import {
   ClaudeExternalSessionError,
   ClaudeExternalSessionInput,
   ClaudeExternalSessionResult,
@@ -325,6 +332,8 @@ export const WS_METHODS = {
   claudeCancelAccountLogin: "claude.cancelAccountLogin",
   claudeSignOutAccount: "claude.signOutAccount",
   claudeInstallCli: "claude.installCli",
+  claudeCreateSkill: "claude.createSkill",
+  claudeDeleteSkill: "claude.deleteSkill",
   claudeCurrentAccountUsage: "claude.currentAccountUsage",
   claudeForceAccountUsageRead: "claude.forceAccountUsageRead",
 
@@ -676,6 +685,25 @@ export const WsClaudeSignOutAccountRpc = Rpc.make(WS_METHODS.claudeSignOutAccoun
  * `ok: false` with a reason, because "we could not install it" is information
  * the panel shows rather than an error it swallows.
  */
+/**
+ * Create a skill in the shared store every account reads, and remove one.
+ *
+ * The list is not an RPC: skills already ride the provider snapshot for the
+ * `$` picker, so a panel reads what the picker reads and cannot drift from it.
+ * Only the two writes are new.
+ */
+export const WsClaudeCreateSkillRpc = Rpc.make(WS_METHODS.claudeCreateSkill, {
+  payload: ClaudeSkillCreateInput,
+  success: ClaudeSkillCreateResult,
+  error: Schema.Union([ClaudeSkillError, EnvironmentAuthorizationError]),
+});
+
+export const WsClaudeDeleteSkillRpc = Rpc.make(WS_METHODS.claudeDeleteSkill, {
+  payload: ClaudeSkillDeleteInput,
+  success: ClaudeSkillDeleteResult,
+  error: Schema.Union([ClaudeSkillError, EnvironmentAuthorizationError]),
+});
+
 export const WsClaudeInstallCliRpc = Rpc.make(WS_METHODS.claudeInstallCli, {
   payload: ClaudeCliInstallInput,
   success: ClaudeCliInstallResult,
@@ -1086,6 +1114,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsThreadsListRewindTargetsRpc,
   WsThreadsRewindFilesRpc,
   WsClaudeResolveExternalSessionRpc,
+  WsClaudeCreateSkillRpc,
+  WsClaudeDeleteSkillRpc,
   WsThreadsAdoptClaudeSessionRpc,
   WsThreadsRewindToInputRpc,
   WsClaudeListAccountProfilesRpc,

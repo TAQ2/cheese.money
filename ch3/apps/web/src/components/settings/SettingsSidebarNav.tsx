@@ -8,6 +8,7 @@ import {
   Link2Icon,
   PaletteIcon,
   Settings2Icon,
+  SparklesIcon,
   UserRoundIcon,
   Volume2Icon,
 } from "lucide-react";
@@ -29,6 +30,7 @@ export type SettingsSectionPath =
   | "/settings/appearance"
   | "/settings/speech"
   | "/settings/accounts"
+  | "/settings/skills"
   | "/settings/keybindings"
   | "/settings/providers"
   | "/settings/source-control"
@@ -44,6 +46,7 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   { label: "General", to: "/settings/general", icon: Settings2Icon },
   { label: "Appearance", to: "/settings/appearance", icon: PaletteIcon },
   { label: "Text to speech", to: "/settings/speech", icon: Volume2Icon },
+  { label: "Skills", to: "/settings/skills", icon: SparklesIcon },
   { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
   { label: "Providers", to: "/settings/providers", icon: BotIcon },
   { label: "Accounts", to: "/settings/accounts", icon: UserRoundIcon },
