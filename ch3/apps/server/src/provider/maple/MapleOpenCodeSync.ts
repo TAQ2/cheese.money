@@ -16,14 +16,20 @@
  * Deliberately NOT here: the API key and the proxy. The key travels per request
  * in the `Authorization` header OpenCode sends, sourced outside CH3, and the
  * config records only the literal `{env:MAPLE_API_KEY}`. The proxy is a separate
- * process; this writes the address it is expected at and nothing more.
+ * process; this records the address it is expected at, and defers to the
+ * address already in the file over its own default, because the port belongs to
+ * whoever started the proxy.
  *
  * @module provider/maple/MapleOpenCodeSync
  */
 import * as NodeOS from "node:os";
 
 import { MAPLE_PROXY_DEFAULT_BASE_URL } from "@ch3tools/shared/mapleModels";
-import { mapleProviderIsCurrent, mergeMapleProvider } from "@ch3tools/shared/mapleOpenCodeConfig";
+import {
+  mapleBaseUrlIn,
+  mapleProviderIsCurrent,
+  mergeMapleProvider,
+} from "@ch3tools/shared/mapleOpenCodeConfig";
 import { fromJsonStringPretty } from "@ch3tools/shared/schemaJson";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -48,15 +54,17 @@ const decodeOpenCodeConfigJson = Schema.decodeEffect(OpenCodeConfigJson);
 const encodeOpenCodeConfigJson = Schema.encodeUnknownEffect(OpenCodeConfigJson);
 
 /**
- * Where the proxy is expected to answer.
+ * An explicit address for the proxy, or `undefined` when nothing named one.
  *
- * `MAPLE_PROXY_BASE_URL` overrides the loopback default for a proxy started on
- * another port. It is read rather than configured because the process that
- * starts the proxy is the one that knows, and it is not this one.
+ * `MAPLE_PROXY_BASE_URL` is read rather than configured because the process
+ * that starts the proxy is the one that knows where it listens, and it is not
+ * this one. Undefined is returned rather than the default so the caller can
+ * fall back to the address the config already carries first — see
+ * {@link writeMapleProviderBlock}.
  */
-export function resolveMapleProxyBaseUrl(env: NodeJS.ProcessEnv): string {
+export function resolveMapleProxyBaseUrlOverride(env: NodeJS.ProcessEnv): string | undefined {
   const explicit = env["MAPLE_PROXY_BASE_URL"]?.trim();
-  return explicit !== undefined && explicit.length > 0 ? explicit : MAPLE_PROXY_DEFAULT_BASE_URL;
+  return explicit !== undefined && explicit.length > 0 ? explicit : undefined;
 }
 
 /**
@@ -101,7 +109,7 @@ export const resolveOpenCodeConfigPath = Effect.fn("resolveOpenCodeConfigPath")(
  */
 export const writeMapleProviderBlock = Effect.fn("writeMapleProviderBlock")(function* (input: {
   readonly configPath: string;
-  readonly baseUrl: string;
+  readonly baseUrlOverride?: string | undefined;
 }): Effect.fn.Return<string | null, never, FileSystem.FileSystem | Path.Path> {
   const fs = yield* FileSystem.FileSystem;
 
@@ -135,13 +143,22 @@ export const writeMapleProviderBlock = Effect.fn("writeMapleProviderBlock")(func
     existing = value as Record<string, unknown>;
   }
 
-  if (mapleProviderIsCurrent(existing, input.baseUrl)) {
+  // Address precedence: an explicit override, then whatever the config already
+  // says, then the loopback default. The middle step is the important one — the
+  // default is this build's guess at a port, while the value in the file was
+  // put there by whoever actually started the proxy. Overwriting it with the
+  // guess repoints OpenCode at whatever else holds that port, which is silent:
+  // a wrong server answering 200 is indistinguishable from the right one until
+  // a turn hangs.
+  const baseUrl = input.baseUrlOverride ?? mapleBaseUrlIn(existing) ?? MAPLE_PROXY_DEFAULT_BASE_URL;
+
+  if (mapleProviderIsCurrent(existing, baseUrl)) {
     return null;
   }
 
-  const contents = yield* encodeOpenCodeConfigJson(
-    mergeMapleProvider({ existing, baseUrl: input.baseUrl }),
-  ).pipe(Effect.orDie);
+  const contents = yield* encodeOpenCodeConfigJson(mergeMapleProvider({ existing, baseUrl })).pipe(
+    Effect.orDie,
+  );
 
   return yield* writeFileStringAtomically({ filePath: input.configPath, contents }).pipe(
     Effect.as<string | null>(null),
@@ -170,7 +187,7 @@ export const syncMapleProviderIntoOpenCode = Effect.fn("syncMapleProviderIntoOpe
   const configPath = yield* resolveOpenCodeConfigPath(env);
   const refusal = yield* writeMapleProviderBlock({
     configPath,
-    baseUrl: resolveMapleProxyBaseUrl(env),
+    baseUrlOverride: resolveMapleProxyBaseUrlOverride(env),
   });
   if (refusal !== null) {
     yield* Effect.logWarning("Left OpenCode's Maple provider block unchanged", {

@@ -128,6 +128,26 @@ export function mergeMapleProvider(input: {
 }
 
 /**
+ * The proxy address a config already carries, if it carries a usable one.
+ *
+ * Whoever starts the proxy picks its port, and that choice is recorded here
+ * rather than in this build. A process that cannot see `MAPLE_PROXY_BASE_URL`
+ * — a GUI launch does not inherit `launchctl setenv`, and that setting is gone
+ * after a reboot — would otherwise replace a working address with the compiled
+ * default and point OpenCode at whatever else happens to hold that port.
+ */
+export function mapleBaseUrlIn(existing: Record<string, unknown>): string | undefined {
+  const provider = existing["provider"];
+  if (typeof provider !== "object" || provider === null) return undefined;
+  const block = (provider as Record<string, unknown>)[MAPLE_PROVIDER_ID];
+  if (typeof block !== "object" || block === null) return undefined;
+  const options = (block as Record<string, unknown>)["options"];
+  if (typeof options !== "object" || options === null) return undefined;
+  const baseUrl = (options as Record<string, unknown>)["baseURL"];
+  return typeof baseUrl === "string" && baseUrl.trim().length > 0 ? baseUrl : undefined;
+}
+
+/**
  * Whether a config document already carries exactly the Maple block this build
  * would write. Used to skip a pointless rewrite on every launch — rewriting the
  * file churns its mtime, which editors and file watchers notice.
