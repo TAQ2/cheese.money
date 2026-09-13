@@ -1,4 +1,5 @@
 {
+  "$schema": "https://ch3.codes/schema/ch3.json",
   "iconPath": "assets/prod/black-macos-1024.png",
   "scripts": [
     {

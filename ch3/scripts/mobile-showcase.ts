@@ -27,7 +27,7 @@ import {
   SHOWCASE_TERMINAL_ID,
   SHOWCASE_THREAD_ID,
   seedShowcaseEnvironment,
-} from "./mobile-showcase-environment.ts";
+} from "./showcase-environment.ts";
 
 const REPO_ROOT = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const MOBILE_ROOT = NodePath.join(REPO_ROOT, "apps/mobile");

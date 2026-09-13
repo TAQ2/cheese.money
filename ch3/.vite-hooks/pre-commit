@@ -1,18 +1,7 @@
 # Vite+'s own hook runner. `vp staged` reads the `staged` block in the root
 # vite.config.ts — that block is where the per-file checks live, not here.
 #
-# Only two things belong in this file: the guard that needs no file list, and
-# the flags that make the staged run deterministic.
-
-# Bauhog's `no-commit-to-branch`. main is protected — PRs only, review
-# required, squash merges only — so a commit landing directly on it is always a
-# mistake, and catching it here saves discovering it after the work is done.
-branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
-if [ "$branch" = "main" ]; then
-  echo "Refusing to commit directly to main." >&2
-  echo "  -> git switch -c <branch> and open a PR. main takes squash merges only." >&2
-  exit 1
-fi
+# Only the flags that make the staged run deterministic belong in this file.
 
 # --concurrent false: the tasks are ordered on purpose. `vp fmt` rewrites files
 # in place, and lint and typecheck read them; run in parallel — which is the

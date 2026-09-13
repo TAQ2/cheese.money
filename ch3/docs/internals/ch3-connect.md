@@ -8,11 +8,6 @@ two kinds of bearer credential: template JWTs generated from the `ch3-relay` tem
 back to OAuth verification (`acceptsToken: "oauth_token"`), so the CLI's OAuth credential works
 without a JWT template.
 
-**The relay's own source is no longer in this repository.** It was upstream's Cloudflare Worker,
-which CH3 does not deploy, and it was removed rather than carried — the clients here talk to a
-relay that is already running, and nothing in this repo builds or deploys one. What follows
-describes what a relay must provide, not how to deploy this one.
-
 For the wider system diagram, see
 [ch3-connect-auth-flow.html](./ch3-connect-auth-flow.html).
 
@@ -169,16 +164,16 @@ artifact.
 
 ## Desktop Passkeys
 
-The production macOS bundle ID is `com.ch3.ch3`. To enable native passkeys:
+The production macOS bundle ID is `com.ch3tools.ch3`. To enable native passkeys:
 
-1. Create an explicit macOS App ID for `com.ch3.ch3` in the Apple Developer portal and enable
+1. Create an explicit macOS App ID for `com.ch3tools.ch3` in the Apple Developer portal and enable
    **Associated Domains**.
 2. Create a compatible macOS provisioning profile for that App ID and the certificate used to sign
    the distributed app.
 3. In Clerk's Native API settings, add an iOS app with the same Apple Team ID and bundle ID. This is
    also the configuration point for Electron/macOS passkeys.
 4. Confirm Clerk serves `https://<frontend-api>/.well-known/apple-app-site-association` and that
-   `webcredentials.apps` contains `<TEAM_ID>.com.ch3.ch3`.
+   `webcredentials.apps` contains `<TEAM_ID>.com.ch3tools.ch3`.
 5. Set the local or CI signing configuration described below.
 
 For a local signed build, add these values to `.env.local` or export them before invoking the

@@ -54,7 +54,7 @@ const { openClaudeSignInWindow } = compile(
 const AUTOMATIC_URL =
   "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A64503%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&code_challenge=abc&code_challenge_method=S256&state=xyz";
 const LEGACY_URL = "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a";
-const UNRELATED_URL = "https://github.com/CH3/ch3";
+const UNRELATED_URL = "https://ch3.codes/docs";
 
 const results = [];
 const check = (name, condition) => {

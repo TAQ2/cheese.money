@@ -74,7 +74,11 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "medium", label: "Medium" },
             { value: "high", label: "High", isDefault: true },
             { value: "xhigh", label: "Extra High" },
+            { value: "max", label: "Max" },
+            { value: "ultracode", label: "Ultracode" },
+            { value: "ultrathink", label: "Ultrathink" },
           ],
+          promptInjectedValues: ["ultrathink"],
         }),
         buildSelectOptionDescriptor({
           id: "contextWindow",
@@ -101,7 +105,11 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "medium", label: "Medium" },
             { value: "high", label: "High", isDefault: true },
             { value: "xhigh", label: "Extra High" },
+            { value: "max", label: "Max" },
+            { value: "ultracode", label: "Ultracode" },
+            { value: "ultrathink", label: "Ultrathink" },
           ],
+          promptInjectedValues: ["ultrathink"],
         }),
         buildBooleanOptionDescriptor({
           id: "fastMode",
@@ -133,20 +141,18 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "medium", label: "Medium" },
             { value: "high", label: "High", isDefault: true },
             { value: "xhigh", label: "Extra High" },
+            { value: "max", label: "Max" },
+            { value: "ultrathink", label: "Ultrathink" },
           ],
+          promptInjectedValues: ["ultrathink"],
         }),
         buildSelectOptionDescriptor({
           id: "contextWindow",
           label: "Context Window",
-          // 1M by default, deliberately diverging from Claude Code's own
-          // 200k default for Sonnet. Sonnet 5 is the default model on both
-          // access tiers here, so its context window is the one every
-          // conversation starts with — and a conversation that has to be
-          // restarted because it ran out of room costs more than the wider
-          // window ever saved.
+          // Sonnet is 200k-default in Claude Code (1M is opt-in there too).
           options: [
-            { value: "200k", label: "200k" },
-            { value: "1m", label: "1M", isDefault: true },
+            { value: "200k", label: "200k", isDefault: true },
+            { value: "1m", label: "1M" },
           ],
         }),
       ],

@@ -4241,6 +4241,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
+        ...(ultracode ? { ultracode: true } : {}),
         ...(outputStyle ? { outputStyle } : {}),
         // Measured as changing nothing here today, and sent anyway. The CLI
         // decides the Artifact tool by entrypoint, and an SDK session does not

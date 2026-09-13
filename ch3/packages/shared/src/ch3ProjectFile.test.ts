@@ -10,7 +10,7 @@ describe("buildCH3ProjectFileJsonSchema", () => {
     const schema = buildCH3ProjectFileJsonSchema();
 
     expect(schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
-    expect(schema.$id).toBe("https://raw.githubusercontent.com/CH3/ch3/main/docs/schema/ch3.json");
+    expect(schema.$id).toBe("https://ch3.codes/schema/ch3.json");
     expect(schema.type).toBe("object");
     expect(schema.additionalProperties).toBe(false);
   });

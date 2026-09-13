@@ -108,6 +108,14 @@ export const runTurnStallSweep = Effect.fn("runTurnStallSweep")(function* (
       `server:stall-nudge:${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}`,
     );
     const messageId = MessageId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+    // Recorded before the dispatch, not inside its success branch. The record
+    // is what `MAX_NUDGES_WITHOUT_ACTIVITY` counts, so writing it only on
+    // success meant a thread whose dispatch keeps failing never accumulated
+    // one: `record` stayed undefined, `count` reset to 1 every sweep, the
+    // give-up guard never engaged, and the failing dispatch repeated once a
+    // minute for the life of the process. An attempt counts whether or not it
+    // landed.
+    nudgeRecords.set(thread.id, { turnId: session.activeTurnId, sinceMs: lastAtMs, count });
     yield* engine
       .dispatch({
         type: "thread.turn.start",
@@ -126,7 +134,6 @@ export const runTurnStallSweep = Effect.fn("runTurnStallSweep")(function* (
       .pipe(
         Effect.map(() => {
           nudged.push(thread.id);
-          nudgeRecords.set(thread.id, { turnId: session.activeTurnId!, sinceMs: lastAtMs, count });
         }),
         Effect.catch((error) =>
           Effect.logWarning("turn stall watchdog could not nudge a silent turn", {

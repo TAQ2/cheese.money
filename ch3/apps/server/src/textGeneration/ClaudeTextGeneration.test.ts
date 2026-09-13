@@ -197,10 +197,7 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
         output: JSON.stringify({
           structured_output: { title: "Improve orchestration flow", body: "Body" },
         }),
-        // Threads persisted before Max/Ultracode/Ultrathink were withdrawn still
-        // carry them. They must reach the CLI as the model's default, never as a
-        // level the menu no longer offers.
-        argsMustContain: "--effort high",
+        argsMustContain: '--effort max --settings {"fastMode":true}',
       },
       (textGeneration) =>
         Effect.gen(function* () {

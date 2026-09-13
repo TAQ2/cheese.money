@@ -15,8 +15,7 @@ export const CH3_PROJECT_FILE_NAME = "ch3.json";
  * a `$schema` link would have fetched from whoever registered it — and it
  * carried the pre-fork brand into every project file CH3 writes.
  */
-export const CH3_PROJECT_FILE_SCHEMA_URL =
-  "https://raw.githubusercontent.com/CH3/ch3/main/docs/schema/ch3.json";
+export const CH3_PROJECT_FILE_SCHEMA_URL = "https://ch3.codes/schema/ch3.json";
 
 const CH3_PROJECT_FILE_PATH_MAX_LENGTH = 512;
 const CH3_PROJECT_FILE_MAX_SCRIPTS = 50;
@@ -92,6 +91,6 @@ export const CH3ProjectFile = Schema.Struct({
 }).annotate({
   title: "CH3 project file",
   description:
-    "Checked-in project configuration for CH3 (ch3.json at the repository root). See https://github.com/CH3/ch3 for documentation.",
+    "Checked-in project configuration for CH3 (ch3.json at the repository root). See https://ch3.codes for documentation.",
 });
 export type CH3ProjectFile = typeof CH3ProjectFile.Type;

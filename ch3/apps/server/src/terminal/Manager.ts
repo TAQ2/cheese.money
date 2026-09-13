@@ -1162,14 +1162,6 @@ function createTerminalSpawnEnv(
       spawnEnv.CLAUDE_CONFIG_DIR = claudeAccount.configDir;
     }
   }
-  // First on PATH, so `claude` resolves the SELECTED account when it is
-  // invoked rather than inheriting whichever one this shell was born with.
-  // A shell opened before a switch would otherwise keep running as the old
-  // account for its whole life — silently, against the wrong limits.
-  if (shimDir) {
-    const existing = spawnEnv.PATH ?? spawnEnv.Path ?? "";
-    spawnEnv.PATH = existing.length > 0 ? `${shimDir}:${existing}` : shimDir;
-  }
   // Applied last: an explicit per-terminal env is the caller stating exactly
   // what it wants, which outranks the ambient account selection.
   if (runtimeEnv) {

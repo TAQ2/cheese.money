@@ -52,6 +52,4 @@ node_modules/
 *.provisionprofile
 ch3-devid*
 
-# Transient bundle emitted by claude-sign-in-flow-harness.cjs; deleted after load,
 # ignored so a crashed run cannot leave it staged.
-apps/desktop/.claude-sign-in-flow-harness.bundle.cjs

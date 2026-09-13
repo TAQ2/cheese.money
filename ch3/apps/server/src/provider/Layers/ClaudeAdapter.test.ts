@@ -455,7 +455,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.effort, "high");
+      assert.equal(createInput?.options.effort, "max");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -797,7 +797,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("no longer injects the Ultrathink prefix for a withdrawn selection", () => {
+  it.effect("treats ultrathink as a prompt keyword instead of a session effort", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -825,10 +825,8 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.effort, "high");
-      // Ultrathink was a prompt-injected level; with it gone from the
-      // descriptor the prompt goes out exactly as the user wrote it.
       const promptText = yield* Effect.promise(() => readFirstPromptText(createInput));
-      assert.equal(promptText, "Investigate the edge cases");
+      assert.equal(promptText, "Ultrathink:\nInvestigate the edge cases");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

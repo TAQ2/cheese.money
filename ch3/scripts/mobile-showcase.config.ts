@@ -1,4 +1,4 @@
-import { SHOWCASE_SCENES, type ShowcaseScene } from "./mobile-showcase-environment.ts";
+import { SHOWCASE_SCENES, type ShowcaseScene } from "./showcase-environment.ts";
 
 export { SHOWCASE_SCENES };
 export type { ShowcaseScene };

@@ -93,9 +93,9 @@ export default defineConfig({
         "**/*.gen.ts",
         "apps/desktop/src/preview/AnnotationStyles.generated.ts",
 
-        // Not shipped by CH3. `apps/marketing` is inherited from upstream
-        // and never built here; `apps/mobile` was deleted from this fork and
-        // the glob guards a re-sync putting it back.
+        // Not shipped by CH3. `apps/marketing` is inherited from upstream and
+        // never built here; `apps/mobile` builds through EAS, not through this
+        // config.
         //
         // `.repos`, `experiments`, `apps/*/scripts` and the
         // `apps/server/integration` tier need no glob: `include` above reaches
@@ -140,9 +140,8 @@ export default defineConfig({
   // Ordering is load-bearing: `vp fmt` rewrites files that the checks after it
   // read.
   //
-  // CI runs the same four checks over the whole tree in
-  // `.github/workflows/ci-pre-commit-checks.yml`. Adding one here without
-  // adding it there is how local and CI start disagreeing.
+  // `.github/workflows/ci.yml` runs the whole-tree equivalents. Adding a check
+  // here without adding it there is how local and CI start disagreeing.
   staged: {
     // Format, then the hygiene gate: large files, private keys, a staged
     // `.env`, and `console.log` in shipped server code. `sh` explicitly,
@@ -208,6 +207,9 @@ export default defineConfig({
       "**/routeTree.gen.ts",
       "apps/web/public/mockServiceWorker.js",
       "apps/web/src/lib/vendor/qrcodegen.ts",
+      "apps/mobile/android/**",
+      "apps/mobile/ios/**",
+      "apps/mobile/uniwind-types.d.ts",
       "*.icon/**",
     ],
     sortPackageJson: {},
@@ -230,6 +232,9 @@ export default defineConfig({
       "pnpm-lock.yaml",
       "*.tsbuildinfo",
       "**/routeTree.gen.ts",
+      "apps/mobile/android/**",
+      "apps/mobile/ios/**",
+      "apps/mobile/uniwind-types.d.ts",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
     jsPlugins: ["./oxlint-plugin-ch3/index.ts"],

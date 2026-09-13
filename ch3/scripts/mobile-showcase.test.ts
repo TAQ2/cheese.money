@@ -10,7 +10,7 @@ import {
   SHOWCASE_ENVIRONMENTS,
   SHOWCASE_PROJECTS,
   SHOWCASE_THREADS,
-} from "./mobile-showcase-environment.ts";
+} from "./showcase-environment.ts";
 import {
   encodeAndroidPairingUrls,
   normalizeStorePng,

@@ -361,31 +361,6 @@ Names are written by Claude Sonnet 5 — the cheapest model CH3 offers for Claud
 independent of the model running your thread. If Claude is unavailable, CH3 falls
 back to your **Text generation model** setting.
 
-## Talking to the agent that led an orchestrator run
-
-When a business-problem or coding run has finished, its cockpit shows **Habla con
-Estratega** (or **Habla con Cerebro** for a coding run) — in the header beside
-Detener/Reanudar, and again under **Documentos**, where whoever just read the memo
-already is.
-
-It opens a real conversation with the agent that adjudicated every challenger finding
-and wrote the decision memo. Not a summary of it: CH3 resumes that agent's own
-Claude Code session, so it answers with the whole run still in context and can quote
-the challengers it ruled on. The first message tells it the run is over and that a
-human is present, so it asks you questions instead of guessing — the run's own
-directive had forbidden that.
-
-The conversation is filed under a project called **Seguimiento de corridas**, and the
-run's own transcript is imported into it, so the thread opens where the run left off.
-It starts on the ordinary Claude default model rather than the one the run used, which
-may have been metered.
-
-If CH3 cannot identify the agent, it says so instead of offering a control that
-would not work. The three reasons are: the run never opened an agent; the session's
-transcript is no longer on this machine (deleted, or the run happened on another
-computer); or nothing on disk identifies which agent led — in which case CH3
-refuses rather than risk putting you in front of a challenger it ruled against.
-
 ## Copy Conversation ID
 
 Right-click a thread and choose **Copy Conversation ID** to get the id the provider

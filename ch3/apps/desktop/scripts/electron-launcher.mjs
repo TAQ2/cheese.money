@@ -17,8 +17,8 @@ const devBundleIdSuffix = NodePath.basename(repoRoot)
   .replaceAll(/[^a-z0-9]+/g, "");
 export const APP_DISPLAY_NAME = isDevelopment ? "CH3 (Dev)" : "CH3 (Alpha)";
 export const APP_BUNDLE_ID = isDevelopment
-  ? `com.ch3.ch3.dev.${devBundleIdSuffix || "local"}`
-  : "com.ch3.ch3";
+  ? `com.ch3tools.ch3.dev.${devBundleIdSuffix || "local"}`
+  : "com.ch3tools.ch3";
 const APP_PROTOCOL_SCHEMES = isDevelopment ? ["ch3-dev"] : ["ch3"];
 const LAUNCHER_VERSION = 14;
 const defaultIconPath = NodePath.join(desktopDir, "resources", "icon.icns");

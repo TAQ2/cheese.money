@@ -148,7 +148,7 @@ Validate existing files without starting Metro, servers, simulators, or emulator
 ## Customize the seeded environment
 
 - Project repository, thread projections, conversation, terminal transcript, and Git changes:
-  [mobile-showcase-environment.ts](../../scripts/mobile-showcase-environment.ts)
+  [showcase-environment.ts](../../scripts/showcase-environment.ts)
 - Device and capture matrix:
   [mobile-showcase.config.ts](../../scripts/mobile-showcase.config.ts)
 - Simulator/emulator orchestration:

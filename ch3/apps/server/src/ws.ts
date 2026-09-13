@@ -11,7 +11,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
-import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
@@ -74,12 +73,7 @@ import {
 } from "@ch3tools/contracts";
 import { HostProcessPlatform } from "@ch3tools/shared/hostProcess";
 import { resolveServerBackgroundActivitySettings } from "@ch3tools/shared/backgroundActivitySettings";
-import {
-  HttpClient,
-  HttpRouter,
-  HttpServerRequest,
-  HttpServerRespondable,
-} from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -87,7 +81,6 @@ import * as ServerConfig from "./config.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
-import * as ProcessRunner from "./processRunner.ts";
 import {
   projectActivityEvent,
   projectThreadDetailSnapshot,
@@ -109,7 +102,6 @@ import * as ServerSettings from "./serverSettings.ts";
 import { resolveTerminalShimPathLine } from "./terminal/claudeAccountShim.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
-import * as PtyAdapterLive from "./terminal/PtyAdapterLive.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
@@ -838,7 +830,6 @@ const makeWsRpcLayer = (
        * re-checked every five seconds for a minute leaves one line rather than
        * thirteen identical ones.
        */
-      const lastProbeReport = yield* Ref.make<string | null>(null);
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
       yield* Effect.addFinalizer(() =>
         Ref.get(rpcClientIds).pipe(

@@ -6,7 +6,7 @@
  * This is the wiring that `DesktopWindow.ts` used to hold inline. It is a
  * module of its own for one reason: it has to be exercised against a real
  * window and a real page — the live harness in
- * `apps/desktop/scripts/claude-sign-in-flow-harness.cjs` does that against a
+ * `apps/desktop/scripts/claude-oauth-window-harness.cjs` does that against a
  * fake `https://claude.ai` served inside the window's own session — and a
  * harness can only prove something about the code the app runs if it imports
  * the same module. The colocated unit test drives the same function with a

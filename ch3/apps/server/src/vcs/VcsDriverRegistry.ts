@@ -66,7 +66,7 @@ export class VcsDriverRegistry extends Context.Service<
 >()("ch3/vcs/VcsDriverRegistry") {}
 
 /** The requested-kind values a detection can be cached under. */
-const INVALIDATED_DETECTION_KINDS = ["auto", "git", "unknown"] as const;
+const INVALIDATED_DETECTION_KINDS = ["auto", "git", "jj", "unknown"] as const;
 
 function detectionCacheKey(input: {
   readonly cwd: string;

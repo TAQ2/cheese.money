@@ -59,13 +59,13 @@ authenticated.
 - `vp run test`: Runs workspace tests.
 - `vp run hygiene`: Checks every tracked file for the things that should never be committed — a
   file over 4 MiB, a private key, a `.env`, a `console.log` in shipped server code. The
-  pre-commit hook runs the same script against staged files only, and the `checks` CI stage runs
-  it with `--all`. See [CI gates](./ci.md).
+  pre-commit hook runs the same script against staged files only. See [CI gates](./ci.md).
 - `node apps/server/scripts/ch3-sqlite-state.ts <query|exec> --base-dir <path> ...`: Inspects or seeds
   an isolated CH3 SQLite database; writes create a private backup first.
 
-`fmt:check`, `hygiene`, `lint`, `typecheck` and `test` are exactly the five scripts CI runs, so
-running one locally reproduces that stage rather than approximating it.
+`fmt:check`, `hygiene`, `lint`, `typecheck` and `test` are the local gates. `ci.yml` runs `vp
+check`, `vpr typecheck`, `vp run test`, `vp run build:desktop`, `vp run lint:mobile` and
+`release-smoke.ts`, so a green local run is close to that stage rather than identical to it.
 
 ## Desktop artifacts
 

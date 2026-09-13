@@ -3,10 +3,8 @@
  *
  * Bun and Node need different bindings, and both are imported dynamically so
  * the one that cannot load here is never resolved. It lives in its own module
- * because terminals are no longer the only caller: the MCP shelf signs in to a
- * server by running `claude mcp login`, and that CLI refuses to authenticate
- * when stdin is not a terminal — "stdin isn't a terminal, so authentication
- * can't be completed here", verbatim, in front of somebody trying to sign in.
+ * so the server runtime and anything else needing a PTY share one definition
+ * rather than each carrying a copy of the same dynamic import.
  *
  * @module terminal/PtyAdapterLive
  */

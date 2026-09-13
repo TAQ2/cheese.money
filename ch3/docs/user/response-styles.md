@@ -9,7 +9,7 @@ conversation.
 
 ## What ships with CH3
 
-Eight styles are installed with the app, so a new machine has them before
+Nine styles are installed with the app, so a new machine has them before
 anyone configures anything:
 
 | Style                            | For                                                                                                                                                              |
@@ -19,6 +19,7 @@ anyone configures anything:
 | **Design Director**              | Design critique register.                                                                                                                                        |
 | **Executive Brief**              | Decision, impact, risk — written for someone who was not in the thread.                                                                                          |
 | **First Principles**             | Reasons up from fundamentals rather than analogy.                                                                                                                |
+| **I'm Tired**                    | Short sentences, small words, two options at most when a decision is needed.                                                                                     |
 | **No Caveats**                   | Strips hedging and disclaimers.                                                                                                                                  |
 | **Simplified Technical English** | Controlled vocabulary, short sentences. Good when English is not everyone's first language.                                                                      |
 | **Whiteboard**                   | Explains as if drawing it out.                                                                                                                                   |
@@ -28,7 +29,7 @@ starts. **An existing file is never overwritten** — if you have already writte
 your own `caveman.md`, yours is kept and CH3 leaves it alone. Delete a file
 if you want the shipped version back on the next launch.
 
-Any other style in that folder is still picked up and listed. The shipped eight
+Any other style in that folder is still picked up and listed. The shipped nine
 are a floor, not a replacement — your own styles keep working exactly as they
 did.
 

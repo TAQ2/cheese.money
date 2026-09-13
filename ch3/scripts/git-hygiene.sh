@@ -1,9 +1,9 @@
 #!/bin/sh
 # Hygiene gate: the checks that are about what a file *is*, not whether it
-# compiles. Ported from the pre-commit hooks Bauhog runs
-# (check-added-large-files, detect-private-key) plus the two rules that are
-# CH3's own: `.env` must never be committed, and shipped server code logs
-# through the structured logger rather than `console.log`.
+# compiles: the pre-commit staples (check-added-large-files, detect-private-key)
+# plus the two rules that are CH3's own: `.env` must never be committed, and
+# shipped server code logs through the structured logger rather than
+# `console.log`.
 #
 # One script, two callers, so the commit hook and CI cannot drift apart:
 #
@@ -31,9 +31,9 @@ MAX_BYTES=4194304
 KEY_MARKER='-----BEGIN [A-Z0-9 ]*PRIVATE KEY'
 KEY_MARKER="${KEY_MARKER}-----"
 
-# The Google Workspace SSO client secret has a fixed prefix. Assembled the same
-# way, for the same reason. The suffix class is what Google issues; the length
-# floor keeps a doc that merely names the prefix from tripping it.
+# A Google OAuth client secret has a fixed prefix. Assembled the same way, for
+# the same reason. The suffix class is what Google issues; the length floor
+# keeps a doc that merely names the prefix from tripping it.
 SECRET_MARKER='GOCSPX'
 SECRET_MARKER="${SECRET_MARKER}-[A-Za-z0-9_-]{20,}"
 
@@ -56,14 +56,13 @@ check_file() {
   [ -f "$path" ] || return 0
 
   # --- an environment file must never be committed ---
-  # .env carries the Google Workspace SSO client id and secret that gate the
-  # desktop app. It is gitignored, so reaching this check at all means someone
-  # ran `git add -f`.
+  # .env carries whatever this checkout bakes into a build. It is gitignored, so
+  # reaching this check at all means someone ran `git add -f`.
   case ${path##*/} in
     .env.example) ;;
     .env | .env.* | .envrc)
       fail "$path" \
-        "An environment file is staged. .env holds the Google Workspace SSO client secret." \
+        "An environment file is staged. .env is never committed." \
         "git restore --staged '$path' - document the variable name in .env.example instead."
       return 0
       ;;
@@ -95,8 +94,8 @@ check_file() {
   # pasted anywhere else: a fixture, a JSON blob, a log, a doc.
   if grep -qIE -- "$SECRET_MARKER" "$path" 2>/dev/null; then
     fail "$path" \
-      "Contains what looks like the Google Workspace SSO client secret." \
-      "Remove it and rotate the secret in the Google Cloud console - it is compromised once committed."
+      "Contains what looks like a Google OAuth client secret." \
+      "Remove it and rotate the secret - it is compromised once committed."
   fi
 
   # --- console.log in shipped server code ---
