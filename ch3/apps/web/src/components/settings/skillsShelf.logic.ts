@@ -23,6 +23,13 @@ export function isValidSkillName(name: string): boolean {
  * edit somebody's checkout. Several Claude instances can report the same
  * skill — they share one config directory — so names collapse rather than
  * repeat.
+ *
+ * `scope` briefly went untrustworthy server-side — `ClaudeSkills.ts`'s
+ * discovery walk could collide its project root with its user root and
+ * mislabel every shared skill `"project"` — and this filter was relaxed to
+ * match while that stood. The server fix (compare resolved directories, skip
+ * the project root when it collides) restores the field, so the filter
+ * belongs back here rather than nowhere.
  */
 export function visibleUserSkills(
   providers: ReadonlyArray<ServerProvider>,

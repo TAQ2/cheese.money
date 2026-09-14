@@ -4,8 +4,10 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -2242,6 +2244,39 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           assert.strictEqual(
             status.message,
             "Claude Agent CLI (`claude`) is not installed or not on PATH.",
+          );
+        }).pipe(Effect.provide(failingSpawnerLayer("spawn claude ENOENT"))),
+      );
+
+      // Skills and response styles are a directory scan, not a CLI call: the
+      // files on disk have not changed just because `claude --version`
+      // couldn't be spawned this time (a busy machine, a transient ENOENT).
+      // A settings screen or composer picker reading this snapshot must not
+      // see them vanish along with the CLI's own status.
+      it.effect("still reports skills found on disk when the CLI health check fails", () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const tempDir = yield* fs.makeTempDirectoryScoped({
+            prefix: "ch3-claude-provider-status-",
+          });
+          const skillDir = path.join(tempDir, "skills", "triage");
+          yield* fs.makeDirectory(skillDir, { recursive: true });
+          yield* fs.writeFileString(
+            path.join(skillDir, "SKILL.md"),
+            ["---", "name: triage", "description: Triage a bug.", "---", "", "# Triage"].join(
+              "\n",
+            ),
+          );
+          const settings = yield* Schema.decodeEffect(ClaudeSettings)({ homePath: tempDir });
+
+          const status = yield* checkClaudeProviderStatus(settings, claudeCapabilities());
+
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.installed, false);
+          assert.deepStrictEqual(
+            status.skills.map((skill) => skill.name),
+            ["triage"],
           );
         }).pipe(Effect.provide(failingSpawnerLayer("spawn claude ENOENT"))),
       );

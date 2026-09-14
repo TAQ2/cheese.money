@@ -677,6 +677,22 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     claudeSettings.customModels,
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
+  // Filesystem discovery, not a CLI health check: skills and response styles
+  // live in the config directory whether or not `claude` itself can run right
+  // now. Read once, up front, so every `buildServerProvider` call below —
+  // including the CLI-missing, timeout and non-zero-exit branches — reports
+  // them. Gating this behind a successful version probe (as this used to)
+  // meant a single slow or failing spawn wiped the `$` picker and the skills
+  // settings screen down to nothing, on a machine where nothing about the
+  // skills themselves had changed — most visibly on a machine already running
+  // several other `claude` subprocesses for active conversations, which is
+  // exactly what makes a concurrent `claude --version` health check slow.
+  const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
+  const discoveredOutputStyles = yield* discoverClaudeOutputStyles(
+    claudeSettings,
+    cwd,
+    resolvedEnvironment,
+  );
 
   if (!claudeSettings.enabled) {
     return buildServerProvider({
@@ -684,6 +700,8 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       enabled: false,
       checkedAt,
       models: allModels,
+      skills,
+      outputStyles: discoveredOutputStyles,
       probe: {
         installed: false,
         version: null,
@@ -710,6 +728,8 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       enabled: claudeSettings.enabled,
       checkedAt,
       models: allModels,
+      skills,
+      outputStyles: discoveredOutputStyles,
       probe: {
         installed: !isCommandMissingCause(error),
         version: null,
@@ -728,6 +748,8 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       enabled: claudeSettings.enabled,
       checkedAt,
       models: allModels,
+      skills,
+      outputStyles: discoveredOutputStyles,
       probe: {
         installed: true,
         version: null,
@@ -752,6 +774,8 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       enabled: claudeSettings.enabled,
       checkedAt,
       models: allModels,
+      skills,
+      outputStyles: discoveredOutputStyles,
       probe: {
         installed: true,
         version: parsedVersion,
@@ -772,19 +796,16 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
     : undefined;
-  const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
   const slashCommands = capabilities?.slashCommands ?? [];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
   // The handshake is the preferred source, but it goes quiet in both
   // directions of CLI drift (too old to have the field, 2.1.263+ no longer
   // sending it), and an empty list here hides the composer's style chip
-  // entirely. Scanning the config directory is what keeps the user's own
-  // styles selectable across that whole version range.
+  // entirely. The filesystem scan above is what keeps the user's own styles
+  // selectable across that whole version range.
   const reportedOutputStyles = capabilities?.outputStyles ?? [];
   const outputStyles =
-    reportedOutputStyles.length > 0
-      ? reportedOutputStyles
-      : yield* discoverClaudeOutputStyles(claudeSettings, cwd, resolvedEnvironment);
+    reportedOutputStyles.length > 0 ? reportedOutputStyles : discoveredOutputStyles;
   const activeOutputStyle = capabilities?.activeOutputStyle;
 
   if (!capabilities) {

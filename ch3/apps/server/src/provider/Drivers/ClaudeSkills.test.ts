@@ -66,6 +66,79 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
+  // The live failure this exists to stop: on a machine where `cwd` is the
+  // home directory (the common case when no project is open), the project
+  // root `<cwd>/.claude/skills` and the user root `<configDir>/skills`
+  // resolve to the identical directory. Iterated second, the project pass
+  // used to re-`set` every name the user pass had just found, so every skill
+  // in the shared store came back `scope: "project"` — read live from
+  // `~/.ch3/caches/claudeAgent.json` on 2026-09-14, all 28 skills mislabeled.
+  it.effect("labels a skill user-scope when cwd is the home directory itself", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-claude-skills-" });
+      const homeDir = path.join(tempDir, "home");
+
+      yield* writeSkill(
+        path.join(homeDir, ".claude", "skills"),
+        "triage",
+        ["---", "name: triage", "description: Triage a bug.", "---", "", "# Triage"].join("\n"),
+      );
+
+      // `homePath` resolves to `<homeDir>/.claude` and `cwd` is `homeDir`
+      // itself — the same collision the empty-`homePath` production default
+      // (`NodeOS.homedir()` + `.claude`) hits whenever `cwd` is the bare home
+      // directory, made deterministic here rather than mocking the OS home.
+      const skills = yield* discoverClaudeSkills(
+        { homePath: path.join(homeDir, ".claude") },
+        homeDir,
+      );
+
+      assert.deepEqual(skills, [
+        {
+          name: "triage",
+          path: path.join(homeDir, ".claude", "skills", "triage", "SKILL.md"),
+          enabled: true,
+          scope: "user",
+          description: "Triage a bug.",
+        },
+      ]);
+    }),
+  );
+
+  it.effect(
+    "still labels a skill project-scope when cwd is a real project, not the home directory",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "ch3-claude-skills-" });
+        const configDir = path.join(tempDir, "claude-home");
+        const workspace = path.join(tempDir, "workspace");
+
+        yield* writeSkill(
+          path.join(workspace, ".claude", "skills"),
+          "deploy",
+          ["---", "name: deploy", "description: Deploy the app.", "---", "", "# Deploy"].join(
+            "\n",
+          ),
+        );
+
+        const skills = yield* discoverClaudeSkills({ homePath: configDir }, workspace);
+
+        assert.deepEqual(skills, [
+          {
+            name: "deploy",
+            path: path.join(workspace, ".claude", "skills", "deploy", "SKILL.md"),
+            enabled: true,
+            scope: "project",
+            description: "Deploy the app.",
+          },
+        ]);
+      }),
+  );
+
   it.effect("prefers project skills over user skills on name collisions", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -145,9 +145,25 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
   const path = yield* Path.Path;
   const configDirPath = yield* resolveClaudeConfigDirPath(config, environment ?? process.env, cwd);
 
+  const userSkillsDirectory = path.join(configDirPath, "skills");
+  const projectSkillsDirectory = cwd ? path.join(cwd, ".claude", "skills") : undefined;
+  // The project root contributes nothing when it resolves to the same
+  // directory as the user root — most commonly when `cwd` is the home
+  // directory itself. Without this, that second pass over the identical
+  // directory re-set every name the first pass had already found, and
+  // `scope: "project"` (iterated second, `Map.set` last-write-wins) silently
+  // overwrote `scope: "user"` for every skill in the shared store. Compared
+  // as resolved absolute paths, not the join()'d strings as given, so a
+  // trailing slash or a relative `cwd` can't defeat the check.
+  const rootsCollide =
+    projectSkillsDirectory !== undefined &&
+    path.resolve(projectSkillsDirectory) === path.resolve(userSkillsDirectory);
+
   const roots: ReadonlyArray<{ directory: string; scope: ClaudeSkillScope }> = [
-    { directory: path.join(configDirPath, "skills"), scope: "user" },
-    ...(cwd ? [{ directory: path.join(cwd, ".claude", "skills"), scope: "project" as const }] : []),
+    { directory: userSkillsDirectory, scope: "user" },
+    ...(projectSkillsDirectory !== undefined && !rootsCollide
+      ? [{ directory: projectSkillsDirectory, scope: "project" as const }]
+      : []),
   ];
 
   const skillsByName = new Map<string, ServerProviderSkill>();

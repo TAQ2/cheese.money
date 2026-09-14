@@ -49,4 +49,34 @@ describe("visibleUserSkills", () => {
 
     expect(rows.map((row) => row.name)).toEqual(["user-one"]);
   });
+
+  // Real shape, read live from `~/.ch3/caches/claudeAgent.json` on
+  // 2026-09-14, corrected to what `ClaudeSkills.ts` reports post-fix: the
+  // shared `~/.claude/skills` root, discovered with `cwd` equal to the home
+  // directory, comes back `scope: "user"` (the collision that used to
+  // overwrite it with `"project"` is gone — see `ClaudeSkills.test.ts`). A
+  // genuine project skill, discovered under a real project's own `cwd`,
+  // still comes back `scope: "project"` and is still dropped here — the
+  // delete-safety rule this filter exists for depends on that distinction
+  // being real, and it is again.
+  it("keeps a real user-scope skill and drops a real project-scope one", () => {
+    const fiveWhys: ServerProviderSkill = {
+      name: "5y",
+      path: "/Users/Conrad/.claude/skills/5y/SKILL.md",
+      enabled: true,
+      scope: "user",
+      description: "Run a disciplined five-whys root-cause analysis on a software bug.",
+    };
+    const repoSkill: ServerProviderSkill = {
+      name: "deploy",
+      path: "/Users/Conrad/Desktop/cheese.money/.claude/skills/deploy/SKILL.md",
+      enabled: true,
+      scope: "project",
+      description: "Deploy this repository.",
+    };
+
+    const rows = visibleUserSkills([provider("claudeAgent", [fiveWhys, repoSkill])]);
+
+    expect(rows).toEqual([fiveWhys]);
+  });
 });
